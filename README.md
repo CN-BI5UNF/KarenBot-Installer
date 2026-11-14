@@ -87,10 +87,14 @@ GUI 功能：
 `.github/workflows/build-installer.yml` 使用公开仓库的免费标准 runner：
 
 - `windows-latest` → `KarenBot-Installer.exe`（x64，windowed，无黑框）；
-- `ubuntu-24.04` → `KarenBot-Installer-linux-x64`（x64，保留 console）；
-- `ubuntu-24.04-arm` → `KarenBot-Installer-linux-arm64`（arm64，保留 console）；
+- `ubuntu-24.04` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-x64`（x64，保留 console）；
+- `ubuntu-24.04-arm` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-arm64`（arm64，保留 console）；
 - `workflow_dispatch` 手动触发；
 - 推送 `v*` tag 时自动把三个产物附加到 GitHub Release（当前版本 `v0.0.1-dev`，会标记为 Pre-release）。
+
+Linux 产物在 Ubuntu 22.04 容器内构建，最低要求 **glibc 2.35**
+（Ubuntu 22.04 / Debian 12 及以上）。不要在 Ubuntu 24.04 主机上直接构建后
+发布，否则产物会要求 glibc 2.38+，无法在 Debian 12 或更旧的系统上启动。
 
 不构建 macOS（公开仓库也按 10 倍分钟计费，当前不需要）。构建产物未签名，
 Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”；后续可申请
