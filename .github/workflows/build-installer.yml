@@ -75,8 +75,10 @@ jobs:
         include:
           - runner: ubuntu-24.04
             artifact: installer-linux-x64
+            binary: KarenBot-Installer-linux-x64
           - runner: ubuntu-24.04-arm
             artifact: installer-linux-arm64
+            binary: KarenBot-Installer-linux-arm64
     runs-on: ${{ matrix.runner }}
     name: build-linux-${{ matrix.artifact }}
     timeout-minutes: 20
@@ -106,10 +108,13 @@ jobs:
       - name: Smoke check frozen binary
         run: xvfb-run -a dist/KarenBot-Installer --smoke-test
 
+      - name: Rename Linux binary for release
+        run: cp dist/KarenBot-Installer "dist/${{ matrix.binary }}"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/KarenBot-Installer
+          path: dist/${{ matrix.binary }}
           if-no-files-found: error
 
   release:
