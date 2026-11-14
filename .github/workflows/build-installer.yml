@@ -61,6 +61,81 @@ jobs:
       - name: Smoke check frozen exe
         run: .\dist\KarenBot-Installer.exe --check
 
+      - name: Capture Windows installer UI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $PWD "dist\KarenBot-Installer.exe"
+          $png = Join-Path $PWD "installer-ui.png"
+          $pngLate = Join-Path $PWD "installer-ui-late.png"
+
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          public static class Win32Capture {
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr hWnd);
+              [DllImport("user32.dll")]
+              public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+          }
+          "@
+
+          $process = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 5
+          if (-not $process.HasExited) {
+              $process.Refresh()
+          }
+          Write-Host "Launcher PID=$($process.Id) Exited=$($process.HasExited)"
+
+          # PyInstaller onefile launches a child process which owns the Tk
+          # window. Find the first process of this executable with a window.
+          $gui = Get-Process -Name "KarenBot-Installer" -ErrorAction SilentlyContinue |
+              Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } |
+              Select-Object -First 1
+          if ($gui) {
+              Write-Host "GUI PID=$($gui.Id) Title=$($gui.MainWindowTitle)"
+              [Win32Capture]::ShowWindow($gui.MainWindowHandle, 5) | Out-Null
+              [Win32Capture]::SetForegroundWindow($gui.MainWindowHandle) | Out-Null
+              Start-Sleep -Seconds 1
+          } else {
+              Write-Host "No GUI window handle found; capturing desktop anyway."
+          }
+
+          function Save-Screen([string]$path) {
+              $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bitmap = [System.Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              try {
+                  $graphics.CopyFromScreen(
+                      $bounds.Location,
+                      [System.Drawing.Point]::Empty,
+                      $bounds.Size
+                  )
+                  $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+              } finally {
+                  $graphics.Dispose()
+                  $bitmap.Dispose()
+              }
+          }
+
+          Save-Screen $png
+          Start-Sleep -Seconds 3
+          Save-Screen $pngLate
+          Get-Process -Name "KarenBot-Installer" -ErrorAction SilentlyContinue |
+              Stop-Process -Force
+          Get-Item $png, $pngLate | Select-Object Name, Length | Format-Table
+
+      - name: Upload Windows installer screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows-ui
+          path: |
+            installer-ui.png
+            installer-ui-late.png
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         with:
           name: installer-windows-x64
