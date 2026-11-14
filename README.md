@@ -5,7 +5,7 @@
 和自删除。安装器不内置任何应用包，也不编译 deb/exe；真正的在线 Release 组装
 等宿主拆分布局发布后再接入。
 
-仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`
+仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本 `v0.0.1-dev`）
 
 ## 快速开始
 
@@ -90,7 +90,7 @@ GUI 功能：
 - `ubuntu-24.04` → `KarenBot-Installer`（x64，保留 console）；
 - `ubuntu-24.04-arm` → `KarenBot-Installer`（arm64，保留 console）；
 - `workflow_dispatch` 手动触发；
-- 推送 `installer-v*` tag 时自动把三个产物附加到 GitHub Release。
+- 推送 `v*` tag 时自动把三个产物附加到 GitHub Release（当前版本 `v0.0.1-dev`，会标记为 Pre-release）。
 
 不构建 macOS（公开仓库也按 10 倍分钟计费，当前不需要）。构建产物未签名，
 Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”；后续可申请

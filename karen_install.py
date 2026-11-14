@@ -46,7 +46,8 @@ def _resource_path(name: str) -> Path:
 
 
 MIRRORS_FILE = _resource_path("mirrors.json")
-USER_AGENT = "KarenBot-Installer/0.1"
+INSTALLER_VERSION = "0.0.1-dev"
+USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 PROBE_BYTES = 256 * 1024
 FONT_SOURCES = (
     {
@@ -923,6 +924,11 @@ def self_delete_installer() -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="karen-install", description="KarenBot 安装引导器"
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {INSTALLER_VERSION}",
     )
     parser.add_argument("--frontend", choices=("gui", "webui"))
     parser.add_argument("--dir", default=str(DEFAULT_INSTALL_DIR), help="安装目录")

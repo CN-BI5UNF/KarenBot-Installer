@@ -233,6 +233,7 @@ class InstallerApp:
         )
         self.log_text.pack(fill="both", expand=True)
 
+        self._log_line(f"安装器版本：{core.INSTALLER_VERSION}")
         self._log_line(f"安装目录默认：{core.DEFAULT_INSTALL_DIR}")
         self._log_line("在线安装将在宿主拆分版发布后接入；当前请使用本地源码或安装包。")
 
@@ -770,6 +771,7 @@ def main(argv: list[str] | None = None) -> int:
                     "tk": getattr(tk, "TkVersion", None),
                     "python": sys.version.split()[0],
                     "default_install_dir": str(core.DEFAULT_INSTALL_DIR),
+                    "installer_version": core.INSTALLER_VERSION,
                     "mirrors": len(core.load_mirrors()),
                     "tk_error": str(_TK_ERROR) if _TK_ERROR else "",
                 },
