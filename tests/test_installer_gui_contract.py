@@ -34,6 +34,8 @@ def test_gui_wires_core_sinks_and_cancel():
     assert "cancel_event" in source
     assert "--smoke-test" in source
     assert "--check" in source
+    assert "ONLINE_TAG" in source
+    assert 'value="online"' in source
 
 
 def test_gui_has_windows_compatibility_hooks():

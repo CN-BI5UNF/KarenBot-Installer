@@ -1,9 +1,8 @@
 # KarenBot 安装引导器
 
-这是 KarenBot 的**独立安装引导仓库**，与宿主/模块仓库解耦。提供 Linux CLI
-和跨平台 Tkinter GUI，用于本地源码/离线安装包、镜像测速、字体下载、快捷方式
-和自删除。安装器不内置任何应用包，也不编译 deb/exe；真正的在线 Release 组装
-等宿主拆分布局发布后再接入。
+这是 KarenBot 的**独立安装引导仓库**，与模块仓库解耦。提供 Linux CLI
+和跨平台 Tkinter GUI，支持在线 Release 安装、本地源码/离线安装包、镜像测速、
+字体下载、快捷方式和自删除。安装器不内置应用包，也不编译 deb/exe。
 
 仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本 `v0.0.1-dev`）
 
@@ -12,6 +11,9 @@
 ### Linux CLI（主要入口）
 
 ```bash
+# 在线安装（默认；下载 backend 核心包 + 所选界面包）
+python3 karen_install.py --frontend webui --online
+
 # 本地源码安装（开发和本机验证）
 python3 karen_install.py \
   --frontend gui \
@@ -41,6 +43,7 @@ Python；也可以在本机用 PyInstaller 构建（见下文）。Linux GUI 是
 
 GUI 功能：
 
+- 在线安装（GitHub Release `v0.1.1-alpha.1` 的 backend 核心包 + GUI/WebUI）；
 - 本地源码目录 / 本地 tar/zip；
 - 原生 GUI 或 WebUI；
 - 安装目录、快捷方式、中文字体、安装后自删除；
@@ -52,6 +55,8 @@ GUI 功能：
 | 参数 | 说明 |
 |---|---|
 | `--frontend gui\|webui` | 选择原生 GUI 或 WebUI |
+| `--online` | 从 GitHub Release 在线安装；未指定源码/安装包时默认开启 |
+| `--tag` | 在线安装使用的 Release tag，默认 `v0.1.1-alpha.1` |
 | `--dir` | 安装目录，Linux 默认 `~/.local/opt/karenbot`，Windows 默认 `%LOCALAPPDATA%\Programs\KarenBot` |
 | `--source-dir` | 从本地源码安装（测试/离线） |
 | `--archive` | 从本地 tar/zip 安装包安装 |
@@ -119,11 +124,10 @@ python gui_install.py --smoke-test   # Linux 需要 DISPLAY/xvfb
 
 ## 当前限制
 
-- **在线 Release 安装尚未接入**：宿主仓库当前的公开 tag 仍是旧 `webui/`
-  布局，而模块仓库提供 `backend/` / `gui/` / `webui/`。需要先把宿主拆分布局
-  发布，再叠加模块 tarball；现在贸然在线组装会得到不兼容组合。
-- **Windows 源码 GUI 不支持**：GTK4/PyGObject 需要 Windows 便携运行时；
-  GUI 可安装预构建包，WebUI 源码安装需要系统 Python。
+- 在线安装固定使用 `v0.1.1-alpha.1`：backend 提供核心程序 + 后端，GUI/WebUI
+  各自提供界面模块；版本不匹配时需要先更新安装器或显式指定 `--tag`。
+- **Windows 源码/在线 GUI 不支持**：GTK4/PyGObject 需要 Windows 便携运行时；
+  在线 WebUI 安装需要系统 Python 3.10+，或使用预构建安装包。
 - **Windows GTK4 应用包尚未构建**：安装器已能识别预构建 `.exe` 包，但应用
   本身的 Windows 构建链是独立任务。
 - GUI 是简易向导，不是完整安装器设计系统；Linux 仍以 CLI 为主。

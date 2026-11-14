@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""KarenBot Linux 安装引导器（CLI 核心）。
+"""KarenBot 安装引导器（CLI 核心）。
 
 设计约束：
 - 安装器本身不内置任何应用包；只负责选择来源、下载、校验、解压、建 venv、
   创建快捷方式。
 - 支持 ``--source-dir`` / ``--archive`` 做离线/本地测试，不依赖 GitHub。
-- 真正的 Release 下载流程后续接入现有 backend/gui/webui 模块仓库。
+- 支持在线安装：下载 ``KarenBot-backend``（核心程序 + 后端）和所选 GUI/WebUI
+  模块的 Release 源码包，合并后安装。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,6 +51,18 @@ MIRRORS_FILE = _resource_path("mirrors.json")
 INSTALLER_VERSION = "0.0.1-dev"
 USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 PROBE_BYTES = 256 * 1024
+
+# 在线安装固定使用的配套版本。backend Release 现在包含核心程序 + 后端；
+# GUI/WebUI 仍从各自仓库下载对应的界面模块。
+ONLINE_TAG = "v0.1.1-alpha.1"
+ONLINE_BACKEND_REPO = "CN-BI5UNF/KarenBot-backend"
+ONLINE_FRONTEND_REPOS = {
+    "gui": "CN-BI5UNF/KarenBot-GUI",
+    "webui": "CN-BI5UNF/KarenBot-WebUI",
+}
+ONLINE_ARCHIVE_TEMPLATE = (
+    "https://github.com/{repo}/archive/refs/tags/{tag}.tar.gz"
+)
 FONT_SOURCES = (
     {
         "name": "NotoSansSC-VF.otf",
@@ -399,6 +413,106 @@ def _find_app_root(directory: Path) -> Path:
         if _prebuilt_executable(candidate) is not None:
             return candidate
     fail("安装包中找不到 backend/ + gui|webui/，也没有可识别的 KarenBot 可执行文件")
+
+
+def _find_core_root(directory: Path) -> Path:
+    """定位 backend Release 的“核心程序 + 后端”根目录。"""
+    candidates = [directory, *[p for p in directory.iterdir() if p.is_dir()]]
+    for candidate in candidates:
+        if (
+            (candidate / "main.py").is_file()
+            and (candidate / "backend").is_dir()
+            and (candidate / "core").is_dir()
+        ):
+            return candidate
+    fail("backend 安装包中找不到 main.py + backend/ + core/，不是有效的核心程序包")
+
+
+def _find_frontend_root(directory: Path, frontend: str) -> Path:
+    """定位 GUI/WebUI Release 的模块根目录。"""
+    candidates = [directory, *[p for p in directory.iterdir() if p.is_dir()]]
+    for candidate in candidates:
+        if (candidate / frontend / "plugin.json").is_file():
+            return candidate
+    fail(f"{frontend} 安装包中找不到 {frontend}/plugin.json")
+
+
+def _validate_online_tag(value: str) -> str:
+    tag = str(value or "").strip()
+    if not re.fullmatch(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}", tag):
+        fail(f"无效的 Release tag：{value!r}")
+    return tag
+
+
+def _online_archive_url(repo: str, tag: str) -> str:
+    return ONLINE_ARCHIVE_TEMPLATE.format(repo=repo, tag=tag)
+
+
+def _prepare_online_app(
+    staging: Path,
+    *,
+    frontend: str,
+    release_tag: str,
+    cancel_event: Any | None,
+) -> tuple[str, dict[str, Any]]:
+    """下载并合并 backend 核心包与所选界面模块，返回 installer_kind/components。"""
+    if frontend not in ONLINE_FRONTEND_REPOS:
+        fail(f"不支持的界面：{frontend}")
+    tag = _validate_online_tag(release_tag)
+    backend_url = _online_archive_url(ONLINE_BACKEND_REPO, tag)
+    frontend_repo = ONLINE_FRONTEND_REPOS[frontend]
+    frontend_url = _online_archive_url(frontend_repo, tag)
+    downloads = staging / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    log(f"在线安装版本：{tag}")
+    log("下载核心程序 + 后端包…")
+    backend_archive = download(
+        backend_url,
+        downloads / "backend.tar.gz",
+        cancel_event=cancel_event,
+    )
+    _check_cancel(cancel_event)
+    log(f"下载 {frontend.upper()} 界面包…")
+    frontend_archive = download(
+        frontend_url,
+        downloads / "frontend.tar.gz",
+        cancel_event=cancel_event,
+    )
+    _check_cancel(cancel_event)
+
+    backend_extract = staging / "extract-backend"
+    frontend_extract = staging / "extract-frontend"
+    extract_archive(backend_archive, backend_extract)
+    extract_archive(frontend_archive, frontend_extract)
+    core_root = _find_core_root(backend_extract)
+    frontend_root = _find_frontend_root(frontend_extract, frontend)
+    app_root = staging / "app"
+    log("合并核心程序、后端和界面模块…")
+    shutil.copytree(core_root, app_root, ignore=_IGNORE)
+    frontend_target = app_root / frontend
+    if frontend_target.exists():
+        shutil.rmtree(frontend_target)
+    shutil.copytree(
+        frontend_root / frontend,
+        frontend_target,
+        ignore=_IGNORE,
+    )
+    component_version = tag.lstrip("v")
+    components = {
+        "backend": {
+            "repo": ONLINE_BACKEND_REPO,
+            "dir": "backend",
+            "tag": tag,
+            "version": component_version,
+        },
+        frontend: {
+            "repo": frontend_repo,
+            "dir": frontend,
+            "tag": tag,
+            "version": component_version,
+        },
+    }
+    return "online-release", components
 
 
 _IGNORE = shutil.ignore_patterns(
@@ -787,6 +901,8 @@ def install(
     create_shortcut: bool,
     download_fonts: bool,
     cancel_event: Any | None = None,
+    online: bool = False,
+    release_tag: str = ONLINE_TAG,
 ) -> Path:
     _check_cancel(cancel_event)
     install_dir = install_dir.expanduser().resolve()
@@ -794,6 +910,7 @@ def install(
     staging = Path(tempfile.mkdtemp(prefix=".karen-install-", dir=str(install_dir)))
     try:
         installer_kind = "local-source"
+        components: dict[str, Any] | None = None
         if source_dir is not None:
             source = source_dir.expanduser().resolve()
             if not source.is_dir():
@@ -816,8 +933,17 @@ def install(
             extract_archive(archive, extract_root)
             app_root = _find_app_root(extract_root)
             shutil.copytree(app_root, staging / "app", ignore=_IGNORE)
+        elif online:
+            installer_kind, components = _prepare_online_app(
+                staging,
+                frontend=frontend,
+                release_tag=release_tag,
+                cancel_event=cancel_event,
+            )
         else:
-            fail("当前版本先支持 --source-dir / --archive；Release 下载流程待接入模块仓库")
+            fail(
+                "请提供 --source-dir / --archive，或使用 --online 从 GitHub Release 安装"
+            )
         _check_cancel(cancel_event)
         app_root = staging / "app"
         prebuilt = _prebuilt_executable(app_root, frontend)
@@ -827,7 +953,12 @@ def install(
             installer_kind = "prebuilt-archive"
             log(f"检测到预构建应用：{prebuilt.name}，跳过 venv/依赖安装")
             skip_deps = True
-        _write_modules_manifest(app_root, frontend, installer=installer_kind)
+        _write_modules_manifest(
+            app_root,
+            frontend,
+            installer=installer_kind,
+            components=components,
+        )
 
         target_app = install_dir / "app"
         old_app = install_dir / "app.old"
@@ -938,6 +1069,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--archive", default="", help="本地 tar/zip 安装包（测试/离线）"
     )
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help="从 GitHub Release 在线安装（未指定源码/安装包时默认开启）",
+    )
+    parser.add_argument(
+        "--tag",
+        default=ONLINE_TAG,
+        help=f"在线安装使用的 Release tag（默认 {ONLINE_TAG}）",
+    )
     parser.add_argument("--venv", default="", help="复用已有 venv（测试）")
     parser.add_argument(
         "--skip-deps", action="store_true", help="跳过 venv/依赖安装"
@@ -982,12 +1123,15 @@ def main(argv: list[str] | None = None) -> int:
                     "skip_deps": args.skip_deps,
                     "download_fonts": not args.no_fonts,
                     "self_delete": args.self_delete,
+                    "online": not (args.source_dir or args.archive),
+                    "tag": args.tag,
                 },
                 ensure_ascii=False,
                 indent=2,
             )
         )
         return 0
+    online = not (args.source_dir or args.archive)
     install(
         frontend=frontend,
         install_dir=install_dir,
@@ -997,6 +1141,8 @@ def main(argv: list[str] | None = None) -> int:
         skip_deps=args.skip_deps,
         create_shortcut=not args.no_shortcut,
         download_fonts=not args.no_fonts,
+        online=online,
+        release_tag=args.tag,
     )
     should_delete = args.self_delete or (
         getattr(sys, "frozen", False) and not args.keep_installer

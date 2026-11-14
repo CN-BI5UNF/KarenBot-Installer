@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.server
 import io
+import json
 import socketserver
 import tarfile
 import threading
@@ -239,3 +240,78 @@ def test_install_rejects_source_inside_install_dir(tmp_path):
             create_shortcut=False,
             download_fonts=False,
         )
+
+
+def _tar_gz(path: Path, files: dict[str, bytes]) -> bytes:
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return path.read_bytes()
+
+
+def test_find_core_and_frontend_roots(tmp_path):
+    core = tmp_path / "backend-extract" / "KarenBot-backend-abc"
+    core.mkdir(parents=True)
+    (core / "main.py").write_text("", encoding="utf-8")
+    (core / "backend").mkdir()
+    (core / "core").mkdir()
+    assert installer._find_core_root(core.parent) == core
+    front = tmp_path / "frontend-extract" / "KarenBot-WebUI-abc"
+    (front / "webui").mkdir(parents=True)
+    (front / "webui" / "plugin.json").write_text("{}", encoding="utf-8")
+    assert installer._find_frontend_root(front.parent, "webui") == front
+
+
+def test_install_online_composes_backend_and_frontend(tmp_path, monkeypatch):
+    backend_archive = tmp_path / "backend.tar.gz"
+    backend_bytes = _tar_gz(
+        backend_archive,
+        {
+            "KarenBot-backend-test/main.py": b"",
+            "KarenBot-backend-test/backend/__init__.py": b"",
+            "KarenBot-backend-test/core/__init__.py": b"",
+            "KarenBot-backend-test/pyproject.toml": b"[project]\nname='demo'\n",
+        },
+    )
+    frontend_archive = tmp_path / "frontend.tar.gz"
+    frontend_bytes = _tar_gz(
+        frontend_archive,
+        {
+            "KarenBot-WebUI-test/webui/plugin.json": b"{}",
+            "KarenBot-WebUI-test/webui/__init__.py": b"",
+        },
+    )
+
+    def fake_download(url, destination, **_kwargs):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if "KarenBot-backend" in url:
+            destination.write_bytes(backend_bytes)
+        else:
+            destination.write_bytes(frontend_bytes)
+        return destination
+
+    monkeypatch.setattr(installer, "download", fake_download)
+    install_dir = tmp_path / "install"
+    installer.install(
+        frontend="webui",
+        install_dir=install_dir,
+        source_dir=None,
+        archive=None,
+        venv=tmp_path / "venv",
+        skip_deps=True,
+        create_shortcut=False,
+        download_fonts=False,
+        online=True,
+        release_tag="v0.1.1-alpha.1",
+    )
+    app = install_dir / "app"
+    assert (app / "main.py").is_file()
+    assert (app / "backend").is_dir()
+    assert (app / "core").is_dir()
+    assert (app / "webui" / "plugin.json").is_file()
+    manifest = json.loads((app / "modules.json").read_text(encoding="utf-8"))
+    assert manifest["installer"] == "online-release"
+    assert manifest["components"]["backend"]["tag"] == "v0.1.1-alpha.1"
+    assert manifest["components"]["webui"]["repo"] == installer.ONLINE_FRONTEND_REPOS["webui"]

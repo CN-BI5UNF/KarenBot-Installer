@@ -128,8 +128,14 @@ class InstallerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("780x640")
-        self.root.minsize(740, 600)
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        width = 780
+        height = min(660, max(560, screen_height - 100))
+        x = max(0, (screen_width - width) // 2)
+        y = max(0, min(20, screen_height - height - 60))
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.minsize(740, 560)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.font_family = _configure_fonts(root)
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -148,7 +154,7 @@ class InstallerApp:
         self._poll_queue()
 
     def _build_vars(self) -> None:
-        self.source_mode = tk.StringVar(value="source")
+        self.source_mode = tk.StringVar(value="online")
         self.source_path = tk.StringVar()
         self.archive_path = tk.StringVar()
         self.frontend = tk.StringVar(value="gui")
@@ -235,7 +241,7 @@ class InstallerApp:
 
         self._log_line(f"安装器版本：{core.INSTALLER_VERSION}")
         self._log_line(f"安装目录默认：{core.DEFAULT_INSTALL_DIR}")
-        self._log_line("在线安装将在宿主拆分版发布后接入；当前请使用本地源码或安装包。")
+        self._log_line(f"在线安装版本：{core.ONLINE_TAG}（核心程序 + 后端 + 所选界面）")
 
     def _build_source_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="1. 安装来源", padding=8)
@@ -244,17 +250,25 @@ class InstallerApp:
 
         ttk.Radiobutton(
             frame,
+            text=f"在线安装（GitHub Release {core.ONLINE_TAG}）",
+            variable=self.source_mode,
+            value="online",
+            command=self._update_source_state,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
+
+        ttk.Radiobutton(
+            frame,
             text="本地源码目录",
             variable=self.source_mode,
             value="source",
             command=self._update_source_state,
-        ).grid(row=0, column=0, sticky="w", pady=2)
+        ).grid(row=1, column=0, sticky="w", pady=2)
         self.source_entry = ttk.Entry(frame, textvariable=self.source_path)
-        self.source_entry.grid(row=0, column=1, sticky="ew", padx=(8, 6), pady=2)
+        self.source_entry.grid(row=1, column=1, sticky="ew", padx=(8, 6), pady=2)
         self.source_button = ttk.Button(
             frame, text="浏览…", command=self._browse_source
         )
-        self.source_button.grid(row=0, column=2, pady=2)
+        self.source_button.grid(row=1, column=2, pady=2)
 
         ttk.Radiobutton(
             frame,
@@ -262,19 +276,19 @@ class InstallerApp:
             variable=self.source_mode,
             value="archive",
             command=self._update_source_state,
-        ).grid(row=1, column=0, sticky="w", pady=2)
+        ).grid(row=2, column=0, sticky="w", pady=2)
         self.archive_entry = ttk.Entry(frame, textvariable=self.archive_path)
-        self.archive_entry.grid(row=1, column=1, sticky="ew", padx=(8, 6), pady=2)
+        self.archive_entry.grid(row=2, column=1, sticky="ew", padx=(8, 6), pady=2)
         self.archive_button = ttk.Button(
             frame, text="浏览…", command=self._browse_archive
         )
-        self.archive_button.grid(row=1, column=2, pady=2)
+        self.archive_button.grid(row=2, column=2, pady=2)
 
         ttk.Label(
             frame,
-            text="支持 tar.gz/zip；源码目录需含 backend/ 与 gui|webui/。",
+            text="在线安装会下载 backend 核心包和 GUI/WebUI 模块；也可选本地源码/安装包。",
             foreground="#64748b",
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
     def _build_frontend_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="2. 界面版本", padding=8)
@@ -409,18 +423,20 @@ class InstallerApp:
                 pass
 
     def _update_source_state(self) -> None:
-        source_mode = self.source_mode.get() == "source"
+        mode = self.source_mode.get()
+        source_enabled = mode == "source"
+        archive_enabled = mode == "archive"
         self.source_entry.configure(
-            state="normal" if source_mode else "disabled"
+            state="normal" if source_enabled else "disabled"
         )
         self.source_button.configure(
-            state="normal" if source_mode else "disabled"
+            state="normal" if source_enabled else "disabled"
         )
         self.archive_entry.configure(
-            state="disabled" if source_mode else "normal"
+            state="normal" if archive_enabled else "disabled"
         )
         self.archive_button.configure(
-            state="disabled" if source_mode else "normal"
+            state="normal" if archive_enabled else "disabled"
         )
 
     def _browse_source(self) -> None:
@@ -477,6 +493,7 @@ class InstallerApp:
         if self._worker is not None and self._worker.is_alive():
             return
         source_mode = self.source_mode.get()
+        online = source_mode == "online"
         source_dir: Path | None = None
         archive: Path | None = None
         if source_mode == "source":
@@ -484,7 +501,7 @@ class InstallerApp:
             if not source_dir.is_dir():
                 messagebox.showerror("路径无效", "请选择有效的源码目录。")
                 return
-        else:
+        elif source_mode == "archive":
             archive = Path(self.archive_path.get().strip()).expanduser()
             if not archive.is_file():
                 messagebox.showerror("路径无效", "请选择有效的安装包。")
@@ -501,10 +518,12 @@ class InstallerApp:
         ):
             return
         frontend = self.frontend.get()
-        if os.name == "nt" and frontend == "gui" and source_dir is not None:
+        if os.name == "nt" and frontend == "gui" and (
+            source_dir is not None or online
+        ):
             messagebox.showwarning(
-                "Windows 源码安装",
-                "Windows 源码安装暂不支持 GTK4 GUI。\n"
+                "Windows GUI 安装",
+                "Windows 下源码/在线安装暂不支持 GTK4 GUI。\n"
                 "请改用 WebUI，或使用包含运行环境的预构建安装包。",
             )
             return
@@ -519,7 +538,12 @@ class InstallerApp:
         self.progress.start(12)
         self.status.set("准备安装…")
         self._clear_log()
-        self._log_line(f"来源：{source_dir or archive}")
+        source_desc = (
+            f"在线 Release {core.ONLINE_TAG}"
+            if online
+            else str(source_dir or archive)
+        )
+        self._log_line(f"来源：{source_desc}")
         self._log_line(f"界面：{frontend}；安装目录：{install_dir}")
         core.set_log_sink(self._queue_log)
         core.set_progress_sink(self._queue_progress)
@@ -535,6 +559,8 @@ class InstallerApp:
                 "create_shortcut": self.create_shortcut.get(),
                 "download_fonts": self.download_fonts.get(),
                 "cancel_event": self._cancel,
+                "online": online,
+                "release_tag": core.ONLINE_TAG,
             },
             daemon=True,
         )
