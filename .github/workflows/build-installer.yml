@@ -96,7 +96,7 @@ jobs:
               Select-Object -First 1
           if ($gui) {
               Write-Host "GUI PID=$($gui.Id) Title=$($gui.MainWindowTitle)"
-              [Win32Capture]::ShowWindow($gui.MainWindowHandle, 5) | Out-Null
+              [Win32Capture]::ShowWindow($gui.MainWindowHandle, 3) | Out-Null
               [Win32Capture]::SetForegroundWindow($gui.MainWindowHandle) | Out-Null
               Start-Sleep -Seconds 1
           } else {

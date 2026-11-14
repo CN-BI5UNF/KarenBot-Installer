@@ -128,7 +128,7 @@ class InstallerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("780x680")
+        self.root.geometry("780x640")
         self.root.minsize(740, 600)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.font_family = _configure_fonts(root)
