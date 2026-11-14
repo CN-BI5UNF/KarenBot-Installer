@@ -224,4 +224,8 @@ jobs:
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" --prerelease --title "KarenBot Installer $tag" --notes "Automated installer build."
           fi
-          gh release upload "$tag" artifacts/* --clobber
+          gh release upload "$tag" \
+            artifacts/KarenBot-Installer.exe \
+            artifacts/KarenBot-Installer-linux-x64 \
+            artifacts/KarenBot-Installer-linux-arm64 \
+            --clobber
