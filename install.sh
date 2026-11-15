@@ -5,6 +5,9 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh)
 #   ./install.sh --frontend gui --online
 #
+# raw.githubusercontent.com 被重置时，请使用 README 里的多源一行式命令，
+# 或先通过镜像下载本脚本后执行：bash install.sh [参数]。
+#
 # 脚本本身只负责找到 karen_install.py / 冻结版二进制并转交参数；
 # 测速、下载、校验和安装都由 Python 安装核心完成。不构建 deb 等系统包。
 set -euo pipefail
@@ -64,11 +67,11 @@ else
     RAW="https://raw.githubusercontent.com/$REPO/$REF"
     BASES=(
         "$RAW"
-        "https://cdn.jsdelivr.net/gh/$REPO@$REF"
-        "https://fastly.jsdelivr.net/gh/$REPO@$REF"
-        "https://ghproxy.net/https://raw.githubusercontent.com/$REPO/$REF"
         "https://gh-proxy.com/https://raw.githubusercontent.com/$REPO/$REF"
-        "https://raw.gitmirror.com/$REPO/$REF"
+        "https://ghproxy.net/https://raw.githubusercontent.com/$REPO/$REF"
+        "https://fastly.jsdelivr.net/gh/$REPO@$REF"
+        "https://ghproxy.cfd/https://raw.githubusercontent.com/$REPO/$REF"
+        "https://cdn.jsdelivr.net/gh/$REPO@$REF"
     )
 fi
 

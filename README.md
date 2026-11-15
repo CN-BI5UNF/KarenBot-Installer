@@ -16,9 +16,35 @@ Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装�
 
 ### Linux 一行式安装（CLI）
 
+`raw.githubusercontent.com` 在部分网络会被重置（`curl: (35) Recv failure:
+Connection reset by peer`）。下面这条命令会依次尝试多个镜像，成功拿到
+`install.sh` 后再执行：
+
+```bash
+bash <(
+  for u in \
+    "https://gh-proxy.com/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh" \
+    "https://ghproxy.net/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh" \
+    "https://fastly.jsdelivr.net/gh/CN-BI5UNF/KarenBot-Installer@main/install.sh" \
+    "https://ghproxy.cfd/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh" \
+    "https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh"; do
+      s="$(curl -fsSL --connect-timeout 8 --max-time 30 "$u" 2>/dev/null)" || continue
+      case "$s" in
+        "#!/usr/bin/env bash"*) printf '%s\n' "$s"; break ;;
+      esac
+  done
+)
+```
+
+如果网络能直连 GitHub，也可以用原来的短命令：
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh)
 ```
+
+所有源都失败时，请配置代理，或下载仓库里的 `install.sh` 后本地执行
+`bash install.sh`。`install.sh` 自身也会按 `raw → jsDelivr → ghproxy`
+的顺序回退获取 `karen_install.py`，可用 `KAREN_INSTALLER_BASE` 固定镜像。
 
 没有参数时会进入交互菜单；也可以直接传参：
 
