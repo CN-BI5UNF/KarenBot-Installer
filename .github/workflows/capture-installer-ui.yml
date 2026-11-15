@@ -29,9 +29,9 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: CN-BI5UNF/KarenBot-WebUI
-          ref: v0.1.1-alpha.1
-          path: webui-src
+          repository: CN-BI5UNF/KarenBot-GUI
+          ref: fix/setup-ux-and-stability
+          path: gui-src
 
       - uses: actions/checkout@v4
         with:
@@ -40,16 +40,14 @@ jobs:
           path: personas-src
           sparse-checkout: personas
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Xvfb and capture tools
+      - name: Install Xvfb, GTK4 and capture tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             xvfb openbox imagemagick ffmpeg x11-utils \
-            fonts-noto-cjk fonts-noto-color-emoji
+            fonts-noto-cjk fonts-noto-color-emoji \
+            python3 python3-venv python3-tk python3-gi \
+            gir1.2-gtk-4.0 gir1.2-adw-1
 
       - name: Prepare demo source
         run: |
@@ -57,10 +55,11 @@ jobs:
           rm -rf demo-src
           mkdir demo-src
           cp -a backend-src/. demo-src/
-          rm -rf demo-src/.git demo-src/.github demo-src/webui demo-src/personas
-          cp -a webui-src/webui demo-src/webui
+          rm -rf demo-src/.git demo-src/.github demo-src/gui demo-src/webui demo-src/personas
+          cp -a gui-src/gui demo-src/gui
           cp -a personas-src/personas demo-src/personas
           test -f "demo-src/personas/大肥鱼/persona_prompt.py"
+          test -f demo-src/gui/plugin.json
           test -f demo-src/pyproject.toml
 
       - name: Run installer wizard and capture
@@ -74,7 +73,7 @@ jobs:
           export DISPLAY=:99
           openbox >/tmp/openbox.log 2>&1 &
           sleep 1
-          python scripts/capture_installer_ui.py \
+          python3 scripts/capture_installer_ui.py \
             --source demo-src \
             --install-dir /tmp/kb-installer-demo \
             --out artifacts \

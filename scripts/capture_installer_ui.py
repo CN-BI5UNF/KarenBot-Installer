@@ -232,7 +232,7 @@ class DemoDriver:
         self.shot("main-config")
         self.app.source_mode.set("source")
         self.app.source_path.set(str(self.source))
-        self.app.frontend.set("webui")
+        self.app.frontend.set("gui")
         self.app.download_fonts.set(False)
         self.app.create_shortcut.set(False)
         self.app.install_dir.set(str(self.install_dir))
@@ -242,7 +242,7 @@ class DemoDriver:
 
     def _after_config_updated(self) -> None:
         assert self.app is not None
-        self.shot("source-webui-selected")
+        self.shot("source-gui-selected")
         self.app.config_canvas.yview_moveto(1.0)
         self.root.after(500, self._after_scroll)
 
@@ -303,7 +303,7 @@ class DemoDriver:
         self.app.notebook.select(0)
         self.app.config_canvas.yview_moveto(0.0)
         self.shot("before-install")
-        self.log("开始真实安装（本地 WebUI 源码）")
+        self.log("开始真实安装（本地 GUI 源码）")
         self.app._start_install()
         self.root.after(700, self._poll_install)
 
@@ -409,8 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     if not (args.source / "backend").is_dir():
         print(f"source backend missing: {args.source}", file=sys.stderr)
         return 2
-    if not (args.source / "webui").is_dir():
-        print(f"source webui missing: {args.source}", file=sys.stderr)
+    if not (args.source / "gui").is_dir():
+        print(f"source gui missing: {args.source}", file=sys.stderr)
         return 2
     driver = DemoDriver(
         source=args.source,
