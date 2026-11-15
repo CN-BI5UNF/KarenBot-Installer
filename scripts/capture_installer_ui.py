@@ -330,9 +330,17 @@ class DemoDriver:
             status = self.app.status.get()
             self.shot("finished")
             self.log(f"最终状态：{status}")
-            self.finish("安装完成" in status, status)
+            self.app.notebook.select(1)
+            self.root.after(
+                500, lambda: self._finish_with_log(status)
+            )
             return
         self.root.after(700, self._poll_install)
+
+    def _finish_with_log(self, status: str) -> None:
+        assert self.app is not None
+        self.shot("finished-log")
+        self.finish("安装完成" in status, status)
 
     def _timeout(self) -> None:
         if self._finished:
