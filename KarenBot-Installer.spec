@@ -10,17 +10,11 @@ from pathlib import Path
 
 INSTALLER_DIR = Path(SPECPATH).resolve()
 VERSION_FILE = INSTALLER_DIR / "packaging" / "windows-version-info.txt"
-VENDOR_DIR = INSTALLER_DIR / "vendor"
-BUNDLED_PYTHON = VENDOR_DIR / "python-runtime.tar.gz"
-BUNDLED_HASH = VENDOR_DIR / "python-runtime.sha256"
 
 DATAS = [
     (str(INSTALLER_DIR / "mirrors.json"), "."),
     (str(INSTALLER_DIR / "windows-gui-package.json"), "."),
 ]
-for _vendor_file in (BUNDLED_PYTHON, BUNDLED_HASH):
-    if _vendor_file.is_file():
-        DATAS.append((str(_vendor_file), "."))
 
 a = Analysis(
     [str(INSTALLER_DIR / "gui_install.py")],

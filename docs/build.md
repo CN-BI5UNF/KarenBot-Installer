@@ -10,16 +10,15 @@
 | Job | Runner | 产物 |
 |---|---|---|
 | `verify` | `ubuntu-24.04` | 静态检查 + 核心/契约测试 |
-| `build-windows` | `windows-2022` | `KarenBot-Installer.exe` + SHA256（内置 stripped Python，≤50 MiB） |
+| `build-windows` | `windows-2022` | `KarenBot-Installer.exe` + SHA256（≤60 MiB） |
 | `build-windows-bundle` | `windows-2022` + gvsbuild GTK4 / Python 3.14 | `KarenBot-Windows-x64.zip`（GTK4 便携包，Release 资产，不放进 exe） |
 | `build-linux-x64` | `ubuntu-24.04` + `ubuntu:22.04` 容器 | `KarenBot-Installer-linux-x64` |
 | `build-linux-arm64` | `ubuntu-24.04-arm` + `ubuntu:22.04` 容器 | `KarenBot-Installer-linux-arm64` |
-| `release` | `ubuntu-latest` | 推送 `v*` tag 时附加到 Release |
+| `release` | `ubuntu-latest` | 推送 `v*` tag 时附加到 Release；同时从主仓库打包 `KarenBot-Personas.zip` |
 
 Windows 工具链固定为 Python 3.12 + `requirements-build.txt` 中的
-PyInstaller 版本；Windows job 会先用 `scripts/fetch_bundled_python.py`
-把 stripped Python 3.12.16 放进 `vendor/`，打包后用
-`scripts/check_artifact_size.py` 强制检查 ≤50 MiB。`scripts/verify_windows_artifact.ps1` 会检查：
+PyInstaller 版本，打包后用 `scripts/check_artifact_size.py` 强制检查
+≤60 MiB。安装器不内置 Python；运行时按需下载到安装目录。`scripts/verify_windows_artifact.ps1` 会检查：
 
 - PE machine `0x8664`（x64）；
 - `FileVersionInfo` 是否写入；
@@ -28,7 +27,8 @@ PyInstaller 版本；Windows job 会先用 `scripts/fetch_bundled_python.py`
 - SHA256。
 
 `build-windows-bundle` 下载 gvsbuild GTK4 2026.8.0 和 python-build-standalone
-CPython 3.14.10，安装 gvsbuild 的 PyGObject/PyCairo wheels 与后端依赖，
+CPython 3.14.10，并从 `CN-BI5UNF/KarenBot` 主仓库取 `personas/`，安装
+gvsbuild 的 PyGObject/PyCairo wheels 与后端依赖，
 产物 `KarenBot-Windows-x64.zip` 作为安装器 Release 资产，不进入安装器 exe；
 详细目录契约见 `docs/windows-gui-package.md`。
 
@@ -61,6 +61,6 @@ xvfb-run -a python gui_install.py --smoke-test
 
 ## 版本
 
-- `VERSION` / `INSTALLER_VERSION`：`0.1.0-dev`
-- Windows 文件版本：`packaging/windows-version-info.txt`（FileVersion `0.1.0`）
-- 发布 tag：`v0.1.0-dev`（Pre-release）
+- `VERSION` / `INSTALLER_VERSION`：`0.1.1-dev`
+- Windows 文件版本：`packaging/windows-version-info.txt`（FileVersion `0.1.1`）
+- 发布 tag：`v0.1.1-dev`（Pre-release）

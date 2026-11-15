@@ -10,7 +10,7 @@ Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自
 Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装。
 
 仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
-`v0.1.0-dev`，安装器版本 `0.1.0-dev`）
+`v0.1.1-dev`，安装器版本 `0.1.1-dev`）
 
 ## 快速开始
 
@@ -69,17 +69,21 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
    方案；下载失败自动换下一个镜像。
 2. **在线 Release 安装**：Linux 下载 backend 核心包 + GUI/WebUI 源码模块；
    Windows 原生 GUI 下载 `KarenBot-Windows-x64.zip` 便携包。
-3. **本地安装**：源码目录、tar/zip、预构建包；不需要 GitHub。
-4. **GTK4 主题包**：Windows GUI 可选“Karen 暖色（目标机同款）”“系统
+3. **内置人格补齐**：backend 仓库的 `personas/` 只有空壳；Windows 便携包
+   在 CI 中从主仓库复制人格，Linux/WebUI 在线安装在安装阶段下载
+   `KarenBot-Personas.zip`（失败时回退主仓库源码包），避免 Runtime 因
+   “没有可用人格”拒绝启动。
+4. **本地安装**：源码目录、tar/zip、预构建包；不需要 GitHub。
+5. **GTK4 主题包**：Windows GUI 可选“Karen 暖色（目标机同款）”“系统
    Adwaita”或“不使用美化包”。前两者都是 GTK4 内置皮肤，不需要下载主题
    资产；选择不使用时会明确提醒 Windows 观感问题需要自行解决。
-5. **字体自动拉取**：安装时下载 GUI 实际使用的 Noto Sans SC / Noto Serif SC
+6. **字体自动拉取**：安装时下载 GUI 实际使用的 Noto Sans SC / Noto Serif SC
    可变字体，写到 GUI 读取的位置，并生成只追加该目录的 `fonts.conf`；
    不把字体打进安装器。
-6. **渲染回退**：启动入口在 GTK 初始化前设置渲染环境；GUI 自带的
+7. **渲染回退**：启动入口在 GTK 初始化前设置渲染环境；GUI 自带的
    `gui.launcher` 还会按 stage 自动回退到 Cairo 软件渲染。另提供
    `launch-gui-safe` / “KarenBot GUI (兼容模式)”入口。
-7. **快捷方式与自删除**：Linux `.desktop`，Windows PowerShell 创建开始
+8. **快捷方式与自删除**：Linux `.desktop`，Windows PowerShell 创建开始
    菜单/桌面快捷方式；打包版安装器默认安装后自删除。
 
 ## 已知问题处理
@@ -99,12 +103,11 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
    如果用户选了 `C:\Program Files` 等不可写目录，会立即提示改用
    `%LOCALAPPDATA%\Programs\KarenBot` 或 `%PUBLIC%\KarenBot`，不会等到
    venv 阶段才报错。
-4. **Python 环境自举**：Windows 安装器内置 python-build-standalone 的
-   stripped Python 3.12.16（约 22 MB，含 pip/venv），安装时解压到
-   `<安装目录>/python-runtime`，只用于本安装，不改动用户全局 Python。
-   如果内置运行时缺失/损坏，再回退到系统 Python 或下载完整便携 Python。
-   安装器成品仍限制在 **50 MiB** 以内（CI 会强制检查）。Linux 原生 GUI
-   例外：它仍需要系统 PyGObject/GTK4，安装器会给出 apt 安装命令。
+4. **Python 环境自举**：安装前检测 Python 3.10+ 是否含 `venv`/`ensurepip`/
+   `ssl`/`sqlite3`；不完整时自动下载 python-build-standalone 的便携 Python
+   3.12.16 到 `<安装目录>/python-runtime`，只用于本安装，不改动用户全局
+   Python。安装器本身不内置 Python，成品限制在 **60 MiB** 以内。Linux
+   原生 GUI 例外：它仍需要系统 PyGObject/GTK4，安装器会给出 apt 安装命令。
 
 ## 常用参数
 
@@ -182,17 +185,18 @@ Cairo 软件渲染开始，桌面快捷方式也提供“KarenBot GUI (兼容模
 
 `.github/workflows/build-installer.yml` 使用公开仓库的免费标准 runner：
 
-- `windows-2022` → `KarenBot-Installer.exe`（x64，windowed，内置 stripped Python，≤50 MiB）；
+- `windows-2022` → `KarenBot-Installer.exe`（x64，windowed，≤60 MiB）；
 - `windows-2022` + gvsbuild GTK4 / CPython 3.14 → `KarenBot-Windows-x64.zip`（GTK4 便携包，Release 资产，不放进 exe）；
 - `ubuntu-24.04` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-x64`（x64，保留 console）；
 - `ubuntu-24.04-arm` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-arm64`（arm64，保留 console）；
 - `workflow_dispatch` 手动触发；PR 只跑 verify；
-- 推送 `v*` tag 时自动把四个产物 + `SHA256SUMS.txt` 附加到 GitHub Release。
+- 推送 `v*` tag 时自动把安装器、Windows 便携包、人格资产
+  `KarenBot-Personas.zip` 和 `SHA256SUMS.txt` 附加到 GitHub Release。
 
 Windows 构建使用 `requirements-build.txt` 固定 PyInstaller 版本，由
 `scripts/build_windows.ps1` 打包、`scripts/verify_windows_artifact.ps1` 校验
 PE x64、文件版本、大小和 SHA256，并由 `scripts/check_artifact_size.py`
-强制检查 ≤50 MiB。Windows GUI 便携包由
+强制检查 ≤60 MiB。Windows GUI 便携包由
 `scripts/build_windows_bundle.py` 用 gvsbuild GTK4 2026.8.0 +
 CPython 3.14.10 组装，CI 还会用安装器核心实际安装并运行一次启动器。Linux 在 Ubuntu 22.04 容器内构建，最低
 glibc 2.35（Ubuntu 22.04 / Debian 12 及以上）。
@@ -224,6 +228,6 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
   Release。backend 提供核心程序 + 后端，GUI/WebUI 各自提供界面模块。
 - Windows 原生 GUI 需要安装器 Release 里已有 `KarenBot-Windows-x64.zip`；
   它由安装器仓库的 Windows 打包 job 产出，不放进安装器 exe。
-- Windows WebUI 安装优先使用内置/下载的便携 Python；系统 Python 不是必需。
+- Windows WebUI 安装会按需下载便携 Python；系统 Python 不是必需。
 - 不构建 deb/rpm 等系统包：Linux 用户以 CLI/install.sh 为主。
 - GUI 是简易向导，不是完整安装器设计系统；Linux 仍以 CLI 为主。

@@ -55,15 +55,15 @@ else:
 
 def _resource_path(name: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    for candidate in (base / name, base / "vendor" / name):
-        if candidate.is_file():
-            return candidate
+    candidate = base / name
+    if candidate.is_file():
+        return candidate
     return Path(__file__).with_name(name)
 
 
 MIRRORS_FILE = _resource_path("mirrors.json")
 WINDOWS_PACKAGE_FILE = _resource_path("windows-gui-package.json")
-INSTALLER_VERSION = "0.1.0-dev"
+INSTALLER_VERSION = "0.1.1-dev"
 USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 PROBE_BYTES = 512 * 1024
 PROBE_TIMEOUT = 8.0
@@ -83,6 +83,12 @@ ONLINE_ARCHIVE_TEMPLATE = "https://github.com/{repo}/archive/refs/tags/{tag}.tar
 WINDOWS_BUNDLE_REPO = "CN-BI5UNF/KarenBot-Installer"
 WINDOWS_GUI_ASSET_NAME = "KarenBot-Windows-x64.zip"
 WINDOWS_GUI_ASSET_ENV = "KAREN_GUI_WINDOWS_ASSET"
+PERSONAS_ASSET_NAME = "KarenBot-Personas.zip"
+PERSONAS_ASSET_ENV = "KAREN_PERSONAS_ASSET"
+PERSONAS_REPO = "CN-BI5UNF/KarenBot"
+PERSONAS_BRANCH_ARCHIVE = (
+    "https://github.com/CN-BI5UNF/KarenBot/archive/refs/heads/main.tar.gz"
+)
 
 GUI_SKINS = {
     "karen": "Karen 暖色（内置，最接近 Linux 目标机）",
@@ -94,6 +100,32 @@ RENDER_MODES = {
     "cairo": "软件渲染（Cairo；黑屏/崩溃时使用）",
     "gl": "硬件渲染（OpenGL）",
 }
+
+PYPI_MIRRORS = {
+    "direct": {
+        "label": "PyPI 官方",
+        "url": "https://pypi.org/simple",
+    },
+    "tsinghua": {
+        "label": "清华 TUNA",
+        "url": "https://pypi.tuna.tsinghua.edu.cn/simple",
+    },
+    "aliyun": {
+        "label": "阿里云",
+        "url": "https://mirrors.aliyun.com/pypi/simple",
+    },
+    "tencent": {
+        "label": "腾讯云",
+        "url": "https://mirrors.cloud.tencent.com/pypi/simple",
+    },
+    "ustc": {
+        "label": "中科大",
+        "url": "https://pypi.mirrors.ustc.edu.cn/simple",
+    },
+}
+PYPI_MIRROR_ENV = "KAREN_PYPI_MIRROR"
+PYPI_PROBE_BYTES = 32 * 1024
+PYPI_PROBE_TIMEOUT = 5.0
 
 FONT_SOURCES: tuple[dict[str, Any], ...] = (
     {
@@ -176,23 +208,6 @@ PYTHON_RUNTIME_SOURCES: dict[str, dict[str, str]] = {
 for _runtime_key, _runtime_value in PYTHON_RUNTIME_SOURCES.items():
     _runtime_value["url"] = f"{_PYTHON_RUNTIME_BASE}/{_runtime_value['archive']}"
 
-# Windows 安装器内置的精简 Python（22 MB 左右），总成品仍 < 50 MiB。
-# 安装时解压到 <安装目录>/python-runtime；解压失败才回退到网络下载。
-BUNDLED_PYTHON_ARCHIVE_NAME = "python-runtime.tar.gz"
-BUNDLED_PYTHON_HASH_NAME = "python-runtime.sha256"
-BUNDLED_PYTHON_SOURCES: dict[str, dict[str, Any]] = {
-    "windows-x64": {
-        "label": "Windows x64 stripped",
-        "url": (
-            f"{_PYTHON_RUNTIME_BASE}/cpython-{PYTHON_RUNTIME_VERSION}"
-            f"%2B{PYTHON_RUNTIME_RELEASE}"
-            "-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
-        ),
-        "sha256": "355ee61b8207b91574491b1c6dc9b0ebb4408fc56bfafe498f3ef439314b52dc",
-        "size": 22365213,
-    },
-}
-
 DEFAULT_WINDOWS_PACKAGE: dict[str, Any] = {
     "schema": 1,
     "asset_name": WINDOWS_GUI_ASSET_NAME,
@@ -218,6 +233,7 @@ DEFAULT_WINDOWS_PACKAGE: dict[str, Any] = {
 _MIRROR_CACHE: list[dict[str, Any]] | None = None
 _PACKAGE_CONTRACT_CACHE: dict[str, Any] | None = None
 _MIRROR_OVERRIDE: str | None = None
+_PYPI_OVERRIDE: str | None = None
 _LOG_SINK: Callable[[str], None] | None = None
 _PROGRESS_SINK: Callable[[int, int | None], None] | None = None
 _STATUS_SINK: Callable[[str], None] | None = None
@@ -266,10 +282,11 @@ def stage(message: str) -> None:
 
 def reset_runtime_caches() -> None:
     """测试/切换镜像后清空进程内缓存。"""
-    global _MIRROR_CACHE, _PACKAGE_CONTRACT_CACHE, _MIRROR_OVERRIDE
+    global _MIRROR_CACHE, _PACKAGE_CONTRACT_CACHE, _MIRROR_OVERRIDE, _PYPI_OVERRIDE
     _MIRROR_CACHE = None
     _PACKAGE_CONTRACT_CACHE = None
     _MIRROR_OVERRIDE = None
+    _PYPI_OVERRIDE = None
 
 
 def log(message: str) -> None:
@@ -474,64 +491,6 @@ def _portable_runtime_python(install_dir: Path) -> Path | None:
     return None
 
 
-def has_bundled_python() -> bool:
-    return _bundled_python_archive() is not None
-
-
-def _bundled_python_archive() -> Path | None:
-    path = _resource_path(BUNDLED_PYTHON_ARCHIVE_NAME)
-    return path if path.is_file() else None
-
-
-def _bundled_python_expected_hash() -> str:
-    hash_file = _resource_path(BUNDLED_PYTHON_HASH_NAME)
-    try:
-        value = hash_file.read_text(encoding="utf-8").strip().split()[0]
-    except (OSError, IndexError):
-        value = ""
-    if value:
-        return value
-    source = BUNDLED_PYTHON_SOURCES.get(_python_runtime_key() or "")
-    return str(source.get("sha256", "")) if source else ""
-
-
-def _install_bundled_python(
-    install_dir: Path, cancel_event: Any | None = None
-) -> Path | None:
-    """解压安装器内置的 Python；失败时返回 None 让调用方走网络下载。"""
-    archive = _bundled_python_archive()
-    if archive is None:
-        return None
-    expected = _bundled_python_expected_hash()
-    if expected and sha256_file(archive).lower() != expected.lower():
-        log("内置 Python 校验失败，改用网络下载")
-        return None
-    _check_cancel(cancel_event)
-    stage("解压内置便携 Python…")
-    extract_root = install_dir / ".python-runtime-bundled"
-    try:
-        try:
-            extract_archive(archive, extract_root, allow_symlinks=True)
-            runtime_root = _locate_runtime_root(extract_root)
-            target = install_dir / PYTHON_RUNTIME_DIRNAME
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-            runtime_root.rename(target)
-        except (OSError, SystemExit) as exc:
-            message = getattr(exc, "message", str(exc))
-            log(f"内置 Python 解压失败，改用网络下载：{message}")
-            return None
-    finally:
-        shutil.rmtree(extract_root, ignore_errors=True)
-    python = _portable_runtime_python(install_dir)
-    if python is not None and _python_is_complete(python):
-        log(f"已解压内置便携 Python：{python}")
-        stage("内置 Python 环境准备完成")
-        return python
-    log("内置 Python 解压后校验失败，改用网络下载")
-    return None
-
-
 def _locate_runtime_root(extract_root: Path) -> Path:
     candidates = [
         extract_root / "python",
@@ -560,9 +519,6 @@ def ensure_python_runtime(
     if existing is not None and _python_is_complete(existing):
         log(f"复用安装目录内的便携 Python：{existing}")
         return existing
-    bundled = _install_bundled_python(install_dir, cancel_event)
-    if bundled is not None:
-        return bundled
     system = _find_complete_python()
     if system is not None:
         log(f"使用系统 Python：{system}")
@@ -836,6 +792,123 @@ def rank_mirrors(
 # ---------------------------------------------------------------------------
 
 
+def set_pypi_mirror_override(name: str) -> None:
+    """固定使用某个 PyPI 镜像；auto/空字符串表示自动测速。"""
+    global _PYPI_OVERRIDE
+    value = str(name or "").strip()
+    if not value or value.lower() == "auto":
+        _PYPI_OVERRIDE = None
+        return
+    if value not in PYPI_MIRRORS:
+        fail(
+            f"未知 PyPI 镜像：{value}；可用："
+            + ", ".join(sorted(PYPI_MIRRORS))
+        )
+    _PYPI_OVERRIDE = value
+
+
+def pypi_mirror_url(name: str) -> str:
+    mirror = PYPI_MIRRORS.get(name)
+    if mirror is None:
+        fail(f"未知 PyPI 镜像：{name}")
+    return str(mirror["url"]).rstrip("/")
+
+
+def probe_pypi_mirror(
+    name: str, *, timeout: float = PYPI_PROBE_TIMEOUT
+) -> dict[str, Any]:
+    url = pypi_mirror_url(name) + "/pip/"
+    started = time.perf_counter()
+    try:
+        with urllib.request.urlopen(
+            _request(
+                url,
+                headers={"Range": f"bytes=0-{PYPI_PROBE_BYTES - 1}"},
+                timeout=timeout,
+            ),
+            timeout=timeout,
+        ) as response:
+            first_byte = time.perf_counter() - started
+            data = response.read(PYPI_PROBE_BYTES)
+        if not data:
+            raise OSError("响应为空")
+        elapsed = max(time.perf_counter() - started, 0.001)
+        speed = len(data) / elapsed
+        return {
+            "ok": True,
+            "mirror": name,
+            "url": url,
+            "latency": first_byte,
+            "bytes": len(data),
+            "speed": speed,
+            "score": mirror_score(speed, first_byte),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "mirror": name,
+            "url": url,
+            "error": f"{type(exc).__name__}: {exc}",
+            "speed": 0.0,
+            "latency": 999.0,
+            "score": 0.0,
+        }
+
+
+def probe_pypi_mirrors(
+    *, timeout: float = PYPI_PROBE_TIMEOUT
+) -> list[dict[str, Any]]:
+    names = list(PYPI_MIRRORS)
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(5, len(names))
+    ) as pool:
+        return list(
+            pool.map(
+                lambda name: probe_pypi_mirror(name, timeout=timeout),
+                names,
+            )
+        )
+
+
+def resolve_pypi_index(mirror: str = "auto") -> str:
+    """返回传给 pip/uv 的 index-url；空字符串表示沿用环境默认。"""
+    requested = str(mirror or "").strip()
+    if not requested:
+        requested = _PYPI_OVERRIDE or os.environ.get(
+            PYPI_MIRROR_ENV, ""
+        ).strip()
+    if requested and requested.lower() != "auto":
+        return pypi_mirror_url(requested)
+    if os.environ.get("PIP_INDEX_URL") or os.environ.get("UV_INDEX_URL"):
+        log("检测到 PIP_INDEX_URL/UV_INDEX_URL，沿用现有 PyPI 配置")
+        return ""
+    stage("自动测速 PyPI 镜像…")
+    results = probe_pypi_mirrors()
+    good = [item for item in results if item.get("ok")]
+    good.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0),
+            -float(item.get("speed") or 0),
+            float(item.get("latency") or 999),
+        )
+    )
+    for item in results:
+        if item.get("ok"):
+            log(
+                f"  PyPI {item['mirror']}: "
+                f"{item['speed'] / 1024:.1f} KB/s, "
+                f"首字节 {item['latency']:.2f}s"
+            )
+        else:
+            log(f"  PyPI {item['mirror']}: 失败 {item.get('error')}")
+    if not good:
+        log("PyPI 镜像测速全部失败，使用官方 PyPI")
+        return ""
+    chosen = str(good[0]["mirror"])
+    log(f"PyPI 镜像选择：{chosen}（{PYPI_MIRRORS[chosen]['label']}）")
+    return pypi_mirror_url(chosen)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1102,6 +1175,15 @@ def _validate_portable_gui(app_root: Path, python: Path) -> None:
     for rel in contract.get("required_dirs", []):
         if not (app_root / str(rel)).is_dir():
             fail(f"Windows GUI 预构建包缺少目录：{rel}")
+    personas_dir = app_root / "personas"
+    if not any(
+        item.is_dir() and (item / "persona_prompt.py").is_file()
+        for item in personas_dir.iterdir()
+    ):
+        fail(
+            "Windows GUI 预构建包缺少可用人格（personas/*/persona_prompt.py）；"
+            "Runtime 会拒绝启动。请用包含主仓库 personas/ 的新版便携包。"
+        )
     dll_dirs = [python.parent, app_root / "runtime" / "bin", app_root / "bin"]
     found: set[str] = set()
     for directory in dll_dirs:
@@ -1269,6 +1351,47 @@ def _windows_gui_asset_url(tag: str) -> str:
     return f"https://github.com/{repo}/releases/download/{tag}/{name}"
 
 
+def parse_sha256sums(text: str) -> dict[str, str]:
+    """解析 `sha256sum` 格式的校验文件。"""
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"^([0-9a-fA-F]{64})\s+\*?(.+)$", line)
+        if match:
+            result[match.group(2).strip()] = match.group(1).lower()
+    return result
+
+
+def fetch_release_checksums(
+    repo: str, tag: str, *, timeout: float = 15
+) -> dict[str, str]:
+    """读取 Release 的 SHA256SUMS.txt；失败返回空字典并记录原因。"""
+    url = (
+        f"https://github.com/{repo}/releases/download/{tag}/SHA256SUMS.txt"
+    )
+    errors: list[str] = []
+    for mirror in available_mirrors():
+        target = mirrored_url(url, mirror)
+        try:
+            with urllib.request.urlopen(
+                _request(target), timeout=timeout
+            ) as response:
+                data = response.read(1024 * 1024)
+            parsed = parse_sha256sums(data.decode("utf-8", "replace"))
+            if parsed:
+                log(f"已读取 Release 校验文件：{target}")
+                return parsed
+            errors.append(f"{mirror.get('name', '?')}: 文件为空")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                f"{mirror.get('name', '?')}: {type(exc).__name__}: {exc}"
+            )
+    log("无法读取 Release SHA256SUMS：" + "; ".join(errors))
+    return {}
+
+
 def _windows_bundle_tag(
     bundle_tag: str, cancel_event: Any | None
 ) -> tuple[str, str]:
@@ -1280,6 +1403,123 @@ def _windows_bundle_tag(
     )
     log(f"Windows GUI 便携包版本：{tag}（{kind}）")
     return tag, kind
+
+
+def has_available_personas(root: Path) -> bool:
+    """backend 仓库的 personas/ 是空壳；这里检查是否有可加载的人格。"""
+    directory = root / "personas"
+    if not directory.is_dir():
+        return False
+    return any(
+        item.is_dir() and (item / "persona_prompt.py").is_file()
+        for item in directory.iterdir()
+    )
+
+
+def _find_personas_root(directory: Path) -> Path | None:
+    candidates = [
+        directory / "personas",
+        *[path / "personas" for path in directory.iterdir() if path.is_dir()],
+    ]
+    for candidate in candidates:
+        if candidate.is_dir() and any(
+            item.is_dir() and (item / "persona_prompt.py").is_file()
+            for item in candidate.iterdir()
+        ):
+            return candidate
+    return None
+
+
+def _install_personas_from(directory: Path, app_root: Path) -> bool:
+    source = _find_personas_root(directory)
+    if source is None:
+        return False
+    target = app_root / "personas"
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(source, target, ignore=_IGNORE)
+    return has_available_personas(app_root)
+
+
+def ensure_personas(
+    app_root: Path,
+    staging: Path,
+    *,
+    cancel_event: Any | None = None,
+    bundle_tag: str = "auto",
+) -> None:
+    """补齐 personas/：优先安装器 Release 的小资产，失败再取主仓库源码包。
+
+    在线安装 backend 仓库时只有空的 ``personas/__init__.py``，直接启动会报
+    “未找到任何可用人格”。Windows 便携包已经内置；Linux/WebUI 在线安装
+    和旧安装包在安装阶段补一次。
+    """
+    if has_available_personas(app_root):
+        return
+    stage("安装项目自带人格…")
+    downloads = staging / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    extract_root = staging / "extract-personas"
+    try:
+        override = os.environ.get(PERSONAS_ASSET_ENV, "").strip()
+        if override:
+            source_path = Path(override).expanduser()
+            if source_path.is_file():
+                extract_archive(source_path, extract_root)
+            elif source_path.is_dir():
+                shutil.copytree(source_path, extract_root / "personas")
+            else:
+                fail(f"KAREN_PERSONAS_ASSET 指向的路径不存在：{source_path}")
+        else:
+            tag = _windows_bundle_tag(bundle_tag, cancel_event)[0]
+            asset_url = (
+                f"https://github.com/{WINDOWS_BUNDLE_REPO}/releases/download/"
+                f"{tag}/{PERSONAS_ASSET_NAME}"
+            )
+            checksums = fetch_release_checksums(WINDOWS_BUNDLE_REPO, tag)
+            expected = checksums.get(PERSONAS_ASSET_NAME, "")
+            asset_ok = False
+            try:
+                download(
+                    asset_url,
+                    downloads / PERSONAS_ASSET_NAME,
+                    expected_sha256=expected,
+                    cancel_event=cancel_event,
+                )
+                _check_cancel(cancel_event)
+                extract_archive(
+                    downloads / PERSONAS_ASSET_NAME, extract_root
+                )
+                asset_ok = True
+            except InstallCancelled:
+                raise
+            except BaseException as exc:  # noqa: BLE001
+                _check_cancel(cancel_event)
+                if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                    raise
+                log(
+                    "安装器 Release 未提供可用人格资产，"
+                    f"改从主仓库源码包提取（{type(exc).__name__}）"
+                )
+                shutil.rmtree(extract_root, ignore_errors=True)
+            if not asset_ok:
+                archive = downloads / "karenbot-main.tar.gz"
+                download(
+                    PERSONAS_BRANCH_ARCHIVE,
+                    archive,
+                    cancel_event=cancel_event,
+                )
+                _check_cancel(cancel_event)
+                extract_archive(archive, extract_root)
+        _check_cancel(cancel_event)
+        if not _install_personas_from(extract_root, app_root):
+            fail(
+                "安装包和下载源中都没有可用的 personas/*/persona_prompt.py。\n"
+                "请重新下载包含人格的安装包，或从主仓库复制 personas/ 后重试。"
+            )
+        log("已安装项目自带人格")
+    finally:
+        shutil.rmtree(extract_root, ignore_errors=True)
 
 
 def _prepare_windows_gui_app(
@@ -1303,6 +1543,16 @@ def _prepare_windows_gui_app(
             bundle_tag, cancel_event
         )
         asset_url = _windows_gui_asset_url(bundle_version)
+    expected_sha256 = ""
+    if not override:
+        checksums = fetch_release_checksums(
+            WINDOWS_BUNDLE_REPO, bundle_version
+        )
+        expected_sha256 = checksums.get(asset_name, "")
+        if expected_sha256:
+            log(f"Windows GUI 便携包 SHA256：{expected_sha256}")
+        else:
+            log("Release 未提供该资产的 SHA256，继续下载但无法校验")
     downloads = staging / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     stage(f"自动测速并下载 Windows GUI 便携包：{asset_name}")
@@ -1319,6 +1569,7 @@ def _prepare_windows_gui_app(
             archive = download(
                 asset_url,
                 downloads / asset_name,
+                expected_sha256=expected_sha256,
                 cancel_event=cancel_event,
                 ranked=ranked,
             )
@@ -1514,13 +1765,31 @@ def _create_venv(
     run(command)
 
 
-def _install_dependencies(venv: Path, app_root: Path) -> None:
+def _install_dependencies(
+    venv: Path, app_root: Path, *, pypi_index: str = ""
+) -> None:
     python = _venv_python(venv)
     uv = shutil.which("uv")
-    if uv:
-        run([uv, "pip", "install", "--python", str(python), "-e", str(app_root)])
-    else:
-        run([str(python), "-m", "pip", "install", "-e", str(app_root)])
+
+    def command(index: str) -> list[str]:
+        if uv:
+            parts = [uv, "pip", "install", "--python", str(python)]
+        else:
+            parts = [str(python), "-m", "pip", "install"]
+        if index:
+            parts.extend(["--index-url", index])
+        parts.extend(["-e", str(app_root)])
+        return parts
+
+    try:
+        run(command(pypi_index))
+    except subprocess.CalledProcessError:
+        official = PYPI_MIRRORS["direct"]["url"].rstrip("/")
+        if pypi_index and pypi_index.rstrip("/") != official:
+            log("PyPI 镜像安装失败，回退官方 PyPI 重试…")
+            run(command(""))
+        else:
+            raise
 
 
 def _check_gui_runtime(venv: Path) -> None:
@@ -2152,6 +2421,7 @@ def install(
     render_mode: str = "auto",
     windows_gui_asset: str = "",
     windows_bundle_tag: str = "auto",
+    pypi_mirror: str = "auto",
 ) -> Path:
     if gui_skin not in GUI_SKINS:
         fail(f"未知主题包：{gui_skin}")
@@ -2240,6 +2510,21 @@ def install(
                     "请使用安装器 Release 的 KarenBot-Windows-x64.zip，"
                     "契约见 docs/windows-gui-package.md。"
                 )
+        # 在线安装/Windows 便携包必须带可用人格，否则 Runtime 启动即失败；
+        # 本地源码/预构建包只提示，避免离线开发环境被网络依赖卡住。
+        if online or portable_python is not None:
+            ensure_personas(
+                app_root,
+                staging,
+                cancel_event=cancel_event,
+                bundle_tag=windows_bundle_tag,
+            )
+        elif not has_available_personas(app_root):
+            log(
+                "警告：安装包没有可用人格（personas/*/persona_prompt.py）。"
+                "Runtime 需要项目自带的 大肥鱼/ 或 deepseek/；"
+                "请从主仓库复制 personas/ 到安装目录后重启。"
+            )
         _write_modules_manifest(
             app_root,
             frontend,
@@ -2295,7 +2580,10 @@ def install(
                 base_python=base_python,
             )
             stage("安装 Python 依赖…")
-            _install_dependencies(target_venv, target_app)
+            pypi_index = resolve_pypi_index(pypi_mirror)
+            _install_dependencies(
+                target_venv, target_app, pypi_index=pypi_index
+            )
             if frontend == "gui":
                 _check_gui_runtime(target_venv)
         else:
@@ -2518,6 +2806,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="GUI 渲染模式：auto、cairo（软件）、gl（硬件）",
     )
     parser.add_argument(
+        "--pypi-mirror",
+        choices=("auto", *PYPI_MIRRORS),
+        default="auto",
+        help="PyPI 镜像：auto 自动测速，或 direct/tsinghua/aliyun/tencent/ustc",
+    )
+    parser.add_argument(
         "--mirror",
         default="auto",
         help="固定使用某个镜像（默认 auto 自动测速）；--list-mirrors 查看名称",
@@ -2597,6 +2891,7 @@ def main(argv: list[str] | None = None) -> int:
                     "create_shortcut": not args.no_shortcut,
                     "gui_skin": args.gui_skin,
                     "render_mode": args.renderer,
+                    "pypi_mirror": args.pypi_mirror,
                     "mirror": args.mirror,
                     "self_delete": args.self_delete,
                     "online": not (args.source_dir or args.archive),
@@ -2625,10 +2920,10 @@ def main(argv: list[str] | None = None) -> int:
         render_mode=args.renderer,
         windows_gui_asset=args.windows_gui_asset,
         windows_bundle_tag=args.bundle_tag,
+        pypi_mirror=args.pypi_mirror,
     )
-    should_delete = args.self_delete or (
-        getattr(sys, "frozen", False) and not args.keep_installer
-    )
+    # 默认保留安装器，避免自删除批处理触发杀软启发式拦截。
+    should_delete = args.self_delete
     if should_delete:
         self_delete_installer()
     return 0

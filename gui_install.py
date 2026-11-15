@@ -18,6 +18,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -149,6 +150,8 @@ class InstallerApp:
         self._mirror_button: ttk.Button | None = None
         self._progress_window: tk.Toplevel | None = None
         self._dialog_progress: ttk.Progressbar | None = None
+        self._progress_started: float | None = None
+        self._progress_done = 0
         self._cancel = threading.Event()
         self._installed_dir: Path | None = None
         self._installed_frontend = "gui"
@@ -169,34 +172,35 @@ class InstallerApp:
         self.install_dir = tk.StringVar(value=str(core.DEFAULT_INSTALL_DIR))
         self.create_shortcut = tk.BooleanVar(value=True)
         self.download_fonts = tk.BooleanVar(value=True)
-        self.self_delete = tk.BooleanVar(
-            value=bool(getattr(sys, "frozen", False))
-        )
+        # 默认保留安装器，避免自删除批处理触发杀软启发式拦截。
+        self.self_delete = tk.BooleanVar(value=False)
         self.gui_skin = tk.StringVar(value="karen")
         self.render_mode = tk.StringVar(value="auto")
+        self.pypi_mirror = tk.StringVar(value="auto")
         self.mirror_url = tk.StringVar(value=DEFAULT_PROBE_URL)
         self.status = tk.StringVar(value="就绪")
         self.progress_step = tk.StringVar(value="准备安装…")
         self.skin_note = tk.StringVar(value="")
 
     def _build_ui(self) -> None:
-        header = tk.Frame(self.root, bg="#111827", height=56)
+        # 不锁死高度：Windows 高 DPI / 不同字体度量下固定 56px 会把
+        # 16pt 标题裁掉。让标签自己撑开，再补一点底部留白。
+        header = tk.Frame(self.root, bg="#111827")
         header.pack(fill="x")
-        header.pack_propagate(False)
         tk.Label(
             header,
             text=APP_TITLE,
             bg="#111827",
             fg="#f9fafb",
             font=(self.font_family, 16, "bold"),
-        ).pack(anchor="w", padx=18, pady=(8, 0))
+        ).pack(anchor="w", padx=18, pady=(10, 0))
         tk.Label(
             header,
             text="选择来源、界面和外观；安装器本身不内置应用包。",
             bg="#111827",
             fg="#cbd5e1",
             font=(self.font_family, 9),
-        ).pack(anchor="w", padx=18, pady=(1, 0))
+        ).pack(anchor="w", padx=18, pady=(2, 10))
 
         body = ttk.Frame(self.root, padding=8)
         body.pack(fill="both", expand=True)
@@ -436,6 +440,22 @@ class InstallerApp:
             delete.configure(state="disabled")
             self.self_delete.set(False)
         delete.pack(side="left", padx=(14, 0))
+        pypi_row = ttk.Frame(frame)
+        pypi_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(pypi_row, text="PyPI 镜像").pack(side="left")
+        pypi_box = ttk.Combobox(
+            pypi_row,
+            textvariable=self.pypi_mirror,
+            state="readonly",
+            width=12,
+            values=("auto", *core.PYPI_MIRRORS),
+        )
+        pypi_box.pack(side="left", padx=(8, 0))
+        ttk.Label(
+            pypi_row,
+            text="auto 会按速度选择；国内网络通常清华/阿里更快。",
+            foreground="#64748b",
+        ).pack(side="left", padx=(8, 0))
 
     def _build_appearance_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="5. 外观与渲染（原生 GUI）", padding=5)
@@ -698,6 +718,7 @@ class InstallerApp:
                 "release_tag": core.ONLINE_TAG,
                 "gui_skin": gui_skin,
                 "render_mode": self.render_mode.get(),
+                "pypi_mirror": self.pypi_mirror.get(),
             },
             daemon=True,
         )
@@ -750,6 +771,16 @@ class InstallerApp:
 
     def _update_progress(self, done: int, total: int | None) -> None:
         dialog = self._dialog_progress
+        now = time.monotonic()
+        # 新文件从 0 开始时重置测速计时，避免把上一个下载的平均速度带进来。
+        if self._progress_started is None or done < self._progress_done:
+            self._progress_started = now
+        self._progress_done = int(done)
+        elapsed = max(0.001, now - (self._progress_started or now))
+        speed = done / elapsed if done > 0 else 0.0
+        speed_text = (
+            f" · {speed / 1024 / 1024:.1f} MB/s" if speed > 0 else ""
+        )
         if total and total > 0:
             if str(self.progress.cget("mode")) != "determinate":
                 self.progress.stop()
@@ -762,9 +793,14 @@ class InstallerApp:
                 dialog.configure(
                     mode="determinate", maximum=total, value=done
                 )
+            eta_text = ""
+            if speed > 0:
+                remaining = max(0.0, (total - done) / speed)
+                if remaining >= 1:
+                    eta_text = f" · 剩余约 {remaining:.0f} 秒"
             self.status.set(
                 f"下载中 {done / 1024 / 1024:.1f} / "
-                f"{total / 1024 / 1024:.1f} MB"
+                f"{total / 1024 / 1024:.1f} MB{speed_text}{eta_text}"
             )
             return
         if str(self.progress.cget("mode")) != "indeterminate":
@@ -773,7 +809,9 @@ class InstallerApp:
         if dialog is not None and str(dialog.cget("mode")) != "indeterminate":
             dialog.configure(mode="indeterminate")
             dialog.start(12)
-        self.status.set(f"已下载 {done / 1024 / 1024:.1f} MB")
+        self.status.set(
+            f"已下载 {done / 1024 / 1024:.1f} MB{speed_text}"
+        )
 
     def _on_done(self, path: Path) -> None:
         self._worker = None
@@ -837,15 +875,16 @@ class InstallerApp:
         window.transient(self.root)
         window.resizable(False, False)
         self.root.update_idletasks()
-        width = 540
-        height = 230
+        width = 580
         x = self.root.winfo_rootx() + max(
             0, (self.root.winfo_width() - width) // 2
         )
         y = self.root.winfo_rooty() + max(
-            0, (self.root.winfo_height() - height) // 2
+            0, (self.root.winfo_height() - 260) // 2
         )
-        window.geometry(f"{width}x{height}+{x}+{y}")
+        # 先给一个临时尺寸，等控件按当前 DPI/字体排完后按 reqheight
+        # 重新定高，避免“取消安装”按钮或说明文字被固定高度裁掉。
+        window.geometry(f"{width}x1+{x}+{y}")
         window.protocol("WM_DELETE_WINDOW", self._cancel_install)
         body = ttk.Frame(window, padding=18)
         body.pack(fill="both", expand=True)
@@ -857,14 +896,20 @@ class InstallerApp:
         ttk.Label(
             body,
             textvariable=self.progress_step,
-            wraplength=480,
+            wraplength=540,
             justify="left",
         ).pack(anchor="w", pady=(8, 10))
         self._dialog_progress = ttk.Progressbar(
-            body, mode="indeterminate", length=480
+            body, mode="indeterminate", length=540
         )
         self._dialog_progress.pack(fill="x")
         self._dialog_progress.start(12)
+        ttk.Label(
+            body,
+            textvariable=self.status,
+            wraplength=540,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
         ttk.Label(
             body,
             text=(
@@ -873,11 +918,15 @@ class InstallerApp:
             ),
             foreground="#64748b",
             justify="left",
-            wraplength=480,
+            wraplength=540,
         ).pack(anchor="w", pady=(10, 12))
         ttk.Button(
             body, text="取消安装", command=self._cancel_install
         ).pack(anchor="e")
+        window.update_idletasks()
+        height = max(230, window.winfo_reqheight())
+        window.minsize(width, height)
+        window.geometry(f"{width}x{height}+{x}+{y}")
         self._progress_window = window
         try:
             window.grab_set()
@@ -1121,9 +1170,9 @@ def main(argv: list[str] | None = None) -> int:
                     "mirrors": len(core.load_mirrors()),
                     "gui_skins": list(core.GUI_SKINS),
                     "render_modes": list(core.RENDER_MODES),
+                    "pypi_mirrors": list(core.PYPI_MIRRORS),
                     "windows_gui_asset": core.windows_gui_asset_name(),
                     "python_runtime_version": core.PYTHON_RUNTIME_VERSION,
-                    "bundled_python": core.has_bundled_python(),
                     "fonts": [item["name"] for item in core.FONT_SOURCES],
                     "tk_error": str(_TK_ERROR) if _TK_ERROR else "",
                 },

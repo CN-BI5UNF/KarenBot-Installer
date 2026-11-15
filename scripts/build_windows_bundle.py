@@ -108,10 +108,17 @@ def main() -> int:
     )
     parser.add_argument("--backend-dir", type=Path, required=True)
     parser.add_argument("--gui-dir", type=Path, required=True)
+    parser.add_argument(
+        "--personas-dir",
+        type=Path,
+        required=True,
+        help="KarenBot 主仓库的 personas/（backend 仓库本身不带人格文件）",
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, default=None)
     parser.add_argument("--backend-tag", default="unknown")
     parser.add_argument("--gui-tag", default="unknown")
+    parser.add_argument("--personas-tag", default="main")
     parser.add_argument("--keep-work", action="store_true")
     args = parser.parse_args()
 
@@ -147,6 +154,26 @@ def main() -> int:
         if gui_target.exists():
             shutil.rmtree(gui_target)
         shutil.copytree(gui / "gui", gui_target, ignore=IGNORE)
+
+        print("copy personas from KarenBot main repository")
+        personas = args.personas_dir.resolve()
+        persona_dirs = [
+            item
+            for item in personas.iterdir()
+            if item.is_dir() and (item / "persona_prompt.py").is_file()
+        ]
+        if not persona_dirs:
+            raise SystemExit(
+                f"personas directory has no persona_prompt.py: {personas}"
+            )
+        personas_target = bundle / "personas"
+        if personas_target.exists():
+            shutil.rmtree(personas_target)
+        shutil.copytree(personas, personas_target, ignore=IGNORE)
+        print(
+            "personas: "
+            + ", ".join(sorted(item.name for item in persona_dirs))
+        )
 
         print("copy GTK resources from gvsbuild")
         runtime_bin = runtime / "bin"
@@ -241,6 +268,10 @@ def main() -> int:
                 "repo": "CN-BI5UNF/KarenBot-GUI",
                 "tag": args.gui_tag,
             },
+            "personas": {
+                "repo": "CN-BI5UNF/KarenBot",
+                "ref": args.personas_tag,
+            },
             "runtime": {
                 "kind": "windows-gtk4-portable",
                 "python": "3.14.10",
@@ -313,6 +344,19 @@ def main() -> int:
             env=smoke_env,
         )
         run([str(python), "-m", "gui", "--version"], cwd=bundle, env=smoke_env)
+        run(
+            [
+                str(python),
+                "-c",
+                "from pathlib import Path; p=Path('personas'); "
+                "names=[x.name for x in p.iterdir() "
+                "if x.is_dir() and (x/'persona_prompt.py').is_file()]; "
+                "assert names, 'no persona_prompt.py'; "
+                "print('personas ok:', ', '.join(sorted(names)))",
+            ],
+            cwd=bundle,
+            env=smoke_env,
+        )
 
         print("create archive")
         args.out.parent.mkdir(parents=True, exist_ok=True)

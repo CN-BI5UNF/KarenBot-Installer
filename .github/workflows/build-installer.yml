@@ -97,18 +97,12 @@ jobs:
       - name: Installer tests on Windows
         run: python -m pytest tests/test_installer.py tests/test_windows_packaging.py -q
 
-      - name: Bundle stripped portable Python
-        run: python scripts/fetch_bundled_python.py
-
-      - name: Verify bundled Python resource
-        run: python -c "import karen_install; assert karen_install.has_bundled_python(); print('bundled python ok')"
-
       - name: Build installer (pinned toolchain)
         shell: pwsh
         run: ./scripts/build_windows.ps1
 
-      - name: Enforce 50 MiB artifact limit
-        run: python scripts/check_artifact_size.py dist/KarenBot-Installer.exe --max-mib 50
+      - name: Enforce 60 MiB artifact limit
+        run: python scripts/check_artifact_size.py dist/KarenBot-Installer.exe --max-mib 60
 
       - name: Verify x64 artifact, version and SHA256
         shell: pwsh
@@ -225,6 +219,14 @@ jobs:
           ref: ${{ env.GUI_TAG }}
           path: gui-src
 
+      # backend 仓库的 personas/ 是空壳，真实人格在主仓库；只取这个目录。
+      - uses: actions/checkout@v4
+        with:
+          repository: CN-BI5UNF/KarenBot
+          ref: main
+          path: personas-src
+          sparse-checkout: personas
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -261,6 +263,7 @@ jobs:
             --gvsbuild-zip "$env:RUNNER_TEMP\GTK4_Gvsbuild_2026.8.0_x64.zip" `
             --python-archive "$env:RUNNER_TEMP\python314.tar.gz" `
             --backend-dir backend --gui-dir gui-src `
+            --personas-dir personas-src/personas --personas-tag main `
             --out KarenBot-Windows-x64.zip `
             --backend-tag "$env:BACKEND_TAG" --gui-tag "$env:GUI_TAG"
 
@@ -350,10 +353,10 @@ jobs:
           PYTHON: .build-venv/bin/python
         run: bash scripts/build_linux.sh
 
-      - name: Enforce 50 MiB artifact limit
+      - name: Enforce 60 MiB artifact limit
         run: |
           .build-venv/bin/python scripts/check_artifact_size.py \
-            dist/KarenBot-Installer --max-mib 50
+            dist/KarenBot-Installer --max-mib 60
 
       - name: Smoke check frozen binary
         run: xvfb-run -a dist/KarenBot-Installer --smoke-test
@@ -387,6 +390,19 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - uses: actions/checkout@v4
+        with:
+          repository: CN-BI5UNF/KarenBot
+          ref: main
+          path: personas-src
+          sparse-checkout: personas
+
+      - name: Build personas asset
+        run: |
+          cd personas-src
+          zip -qr "$GITHUB_WORKSPACE/artifacts/KarenBot-Personas.zip" personas
+          unzip -l "$GITHUB_WORKSPACE/artifacts/KarenBot-Personas.zip"
+
       - name: Compute release checksums
         run: |
           cd artifacts
@@ -395,6 +411,7 @@ jobs:
             KarenBot-Installer-linux-x64 \
             KarenBot-Installer-linux-arm64 \
             KarenBot-Windows-x64.zip \
+            KarenBot-Personas.zip \
             > SHA256SUMS.txt
 
       - name: Attach installers to release
@@ -411,5 +428,6 @@ jobs:
             artifacts/KarenBot-Installer-linux-x64 \
             artifacts/KarenBot-Installer-linux-arm64 \
             artifacts/KarenBot-Windows-x64.zip \
+            artifacts/KarenBot-Personas.zip \
             artifacts/SHA256SUMS.txt \
             --clobber

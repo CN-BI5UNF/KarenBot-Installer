@@ -96,17 +96,11 @@ def test_readme_documents_no_local_build_and_no_deb():
     assert "GitHub Actions" in readme
 
 
-def test_bundled_python_fetch_and_size_scripts():
-    fetch = (INSTALLER / "scripts" / "fetch_bundled_python.py").read_text(
-        encoding="utf-8"
-    )
+def test_artifact_size_script_defaults_to_60_mib():
     size = (INSTALLER / "scripts" / "check_artifact_size.py").read_text(
         encoding="utf-8"
     )
-    assert "BUNDLED_PYTHON_SOURCES" in fetch
-    assert "sha256" in fetch
-    assert "vendor" in fetch
-    assert "50" in size
+    assert "60" in size
     assert "max-mib" in size
 
 
@@ -117,9 +111,10 @@ def test_workflow_builds_windows_bundle_asset():
     assert "build-windows-bundle" in workflow
     assert "KarenBot-Windows-x64.zip" in workflow
     assert "gvsbuild" in workflow
-    assert "fetch_bundled_python.py" in workflow
     assert "check_artifact_size.py" in workflow
-    assert "--max-mib 50" in workflow
+    assert "--max-mib 60" in workflow
+    assert "personas-src" in workflow
+    assert "KarenBot-Personas.zip" in workflow
 
 
 def test_windows_bundle_script_uses_gvsbuild_and_standalone_python():
@@ -132,12 +127,15 @@ def test_windows_bundle_script_uses_gvsbuild_and_standalone_python():
     assert "girepository-1.0" in script
     assert "gdk-pixbuf-query-loaders.exe" in script
     assert "windows-bundle.json" in script
+    assert "--personas-dir" in script
+    assert "persona_prompt.py" in script
     assert "-m" in script and "gui" in script
     assert "KarenBot-Windows-x64" in script
 
 
-def test_spec_can_bundle_vendor_python():
+def test_spec_does_not_bundle_python_runtime():
     spec = (INSTALLER / "KarenBot-Installer.spec").read_text(encoding="utf-8")
-    assert "vendor" in spec
-    assert "python-runtime.tar.gz" in spec
-    assert "python-runtime.sha256" in spec
+    # 安装器只限制成品体积，不内置 Python；便携 Python 在安装时按需下载。
+    assert "vendor" not in spec
+    assert "python-runtime.tar.gz" not in spec
+    assert "windows-gui-package.json" in spec

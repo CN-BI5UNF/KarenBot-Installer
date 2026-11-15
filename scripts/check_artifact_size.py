@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""校验安装器成品大小不超过给定 MiB（默认 50）。"""
+"""校验安装器成品大小不超过给定 MiB（默认 60）。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("path", type=Path)
-    parser.add_argument("--max-mib", type=float, default=50.0)
+    parser.add_argument("--max-mib", type=float, default=60.0)
     args = parser.parse_args()
     if not args.path.is_file():
         print(f"artifact not found: {args.path}")

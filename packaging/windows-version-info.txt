@@ -17,12 +17,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'CN-BI5UNF'),
             StringStruct('FileDescription', 'KarenBot Installer'),
-            StringStruct('FileVersion', '0.1.0'),
+            StringStruct('FileVersion', '0.1.1'),
             StringStruct('InternalName', 'KarenBot-Installer'),
             StringStruct('LegalCopyright', 'Apache-2.0'),
             StringStruct('OriginalFilename', 'KarenBot-Installer.exe'),
             StringStruct('ProductName', 'KarenBot Installer'),
-            StringStruct('ProductVersion', '0.1.0-dev')
+            StringStruct('ProductVersion', '0.1.1-dev')
           ]
         )
       ]

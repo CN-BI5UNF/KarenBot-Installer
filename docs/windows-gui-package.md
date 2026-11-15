@@ -30,8 +30,11 @@ zip 内有一个顶层目录：
 KarenBot-Windows-x64/
   backend/                         # KarenBot-backend
   gui/                             # KarenBot-GUI 模块（含 plugin.json、launcher.py）
+  personas/                        # 主仓库 KarenBot 的内置人格
+    大肥鱼/persona_prompt.py
+    deepseek/persona_prompt.py
   main.py                          # KarenBot 宿主入口
-  windows-bundle.json              # 本次打包的 backend/GUI/Python/GTK 版本
+  windows-bundle.json              # 本次打包的 backend/GUI/personas/Python/GTK 版本
   runtime/
     python.exe
     pythonw.exe
@@ -59,7 +62,9 @@ KarenBot-Windows-x64/
 
 安装器按 `windows-gui-package.json` 检查：
 
-- `required_dirs`: `backend`, `gui`；
+- `required_dirs`: `backend`, `gui`, `personas`；
+- `personas/` 下必须至少有一个 `*/persona_prompt.py`（Runtime 没有可用
+  人格会拒绝启动）；
 - `python_candidates`: `runtime/python.exe` 等；
 - `required_dlls`: `gtk-4-1.dll`, `adwaita-1-0.dll`,
   `gobject-2.0-0.dll`；
@@ -71,7 +76,8 @@ KarenBot-Windows-x64/
 
 `.github/workflows/build-installer.yml` 的 `build-windows-bundle` job：
 
-1. checkout 本仓库、`KarenBot-backend`、`KarenBot-GUI`（tag 可手动指定）；
+1. checkout 本仓库、`KarenBot-backend`、`KarenBot-GUI`（tag 可手动指定），
+   以及 `KarenBot` 主仓库的 `personas/`（backend 仓库本身只有空壳）；
 2. 下载并校验 **gvsbuild GTK4 2026.8.0 x64**（MSVC ABI，含 GTK4、
    libadwaita、PyGObject/PyCairo cp314 wheels 和全部依赖）：
 
@@ -90,6 +96,8 @@ KarenBot-Windows-x64/
 4. 运行 `scripts/build_windows_bundle.py`：
    - 解压 Python 和 gvsbuild；
    - 复制 `backend/` + `gui/`；
+   - 从主仓库复制 `personas/`，并冒烟检查至少一个人格包含
+     `persona_prompt.py`；
    - 安装 gvsbuild 的 `PyGObject` / `PyCairo` wheels；
    - `pip install` backend 依赖（使用 CPython MSVC ABI，PyPI wheel 均可用，
      不再受 MSYS2 mingw ABI 限制）；
@@ -134,7 +142,7 @@ FONTCONFIG_FILE=%LOCALAPPDATA%\KarenBot\fonts\fonts.conf
 
 ## 安装器自身大小
 
-Windows 安装器内置一个 **stripped Python 3.12.16**（约 22 MB），解压到
-`<安装目录>/python-runtime`，用于没有完整全局 Python 的用户；安装器 exe
-成品由 CI 强制检查 ≤ 50 MiB。GTK4 大运行时不在 exe 内，而是上面的
+安装器本身**不内置 Python**：检测到系统 Python 3.10+ 不完整时，才下载
+python-build-standalone 3.12.16 到 `<安装目录>/python-runtime`。安装器 exe
+成品由 CI 强制检查 ≤60 MiB。GTK4 大运行时不在 exe 内，而是上面的
 Release 资产。

@@ -281,6 +281,7 @@ def test_install_online_composes_backend_and_frontend(tmp_path, monkeypatch):
             "KarenBot-backend-test/main.py": b"",
             "KarenBot-backend-test/backend/__init__.py": b"",
             "KarenBot-backend-test/core/__init__.py": b"",
+            "KarenBot-backend-test/personas/example/persona_prompt.py": b"",
             "KarenBot-backend-test/pyproject.toml": b"[project]\nname='demo'\n",
         },
     )
@@ -468,6 +469,9 @@ def _make_portable_app(root: Path) -> Path:
     (app / "backend" / "__init__.py").write_text("", encoding="utf-8")
     (app / "gui").mkdir()
     (app / "gui" / "plugin.json").write_text("{}", encoding="utf-8")
+    persona = app / "personas" / "example"
+    persona.mkdir(parents=True)
+    (persona / "persona_prompt.py").write_text("PROMPT = ''\n", encoding="utf-8")
     (app / "main.py").write_text("", encoding="utf-8")
     (app / "windows-bundle.json").write_text(
         json.dumps(
@@ -668,7 +672,6 @@ def test_ensure_python_runtime_downloads_when_missing(tmp_path, monkeypatch):
         "label": "test",
         "key": "linux-x64",
     }
-    monkeypatch.setattr(installer, "_bundled_python_archive", lambda: None)
     monkeypatch.setattr(installer, "_find_complete_python", lambda: None)
     monkeypatch.setattr(installer, "_python_runtime_source", lambda: source)
     monkeypatch.setattr(installer, "_python_is_complete", lambda path: path.is_file())
@@ -692,7 +695,6 @@ def test_ensure_python_runtime_downloads_when_missing(tmp_path, monkeypatch):
 
 def test_ensure_python_runtime_linux_gui_requires_system(monkeypatch):
     monkeypatch.setattr(installer, "IS_WINDOWS", False)
-    monkeypatch.setattr(installer, "_bundled_python_archive", lambda: None)
     monkeypatch.setattr(installer, "_find_complete_python", lambda: None)
     with pytest.raises(SystemExit) as error:
         installer.ensure_python_runtime(Path("/tmp/karen-gui-python"), frontend="gui")
@@ -722,30 +724,6 @@ def test_allow_symlinks_still_rejects_escaping_links(tmp_path):
         )
 
 
-def test_bundled_python_archive_is_used(tmp_path, monkeypatch):
-    archive = tmp_path / "python-runtime.tar.gz"
-    with tarfile.open(archive, "w:gz") as tar:
-        data = b"fake"
-        info = tarfile.TarInfo("python/bin/python3")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-    expected = installer.sha256_file(archive)
-    monkeypatch.setattr(installer, "_bundled_python_archive", lambda: archive)
-    monkeypatch.setattr(
-        installer, "_bundled_python_expected_hash", lambda: expected
-    )
-    monkeypatch.setattr(installer, "_python_is_complete", lambda path: path.is_file())
-    monkeypatch.setattr(
-        installer,
-        "_find_complete_python",
-        lambda: (_ for _ in ()).throw(AssertionError("system Python must not be used")),
-    )
-    python = installer.ensure_python_runtime(tmp_path, frontend="webui")
-    assert python == tmp_path / "python-runtime" / "bin" / "python3"
-    assert python.is_file()
-    assert not (tmp_path / ".python-runtime-bundled").exists()
-
-
 def test_windows_bundle_asset_url_points_to_installer_repo():
     url = installer._windows_gui_asset_url("v0.1.0")
     assert "CN-BI5UNF/KarenBot-Installer" in url
@@ -772,3 +750,68 @@ def test_portable_env_supports_bin_python_layout(tmp_path):
     env = installer._portable_env(python)
     assert env["GTK_DATA_PREFIX"] == str(runtime)
     assert env["PATH"] == str(runtime / "bin")
+
+
+def test_parse_sha256sums_ignores_comments_and_stars():
+    digest = "a" * 64
+    parsed = installer.parse_sha256sums(
+        f"# checksums\n{digest}  KarenBot-Windows-x64.zip\n"
+        f"{digest.upper()} *KarenBot-Personas.zip\n"
+    )
+    assert parsed["KarenBot-Windows-x64.zip"] == digest
+    assert parsed["KarenBot-Personas.zip"] == digest
+
+
+def test_resolve_pypi_index_fixed_mirror(monkeypatch):
+    monkeypatch.delenv("PIP_INDEX_URL", raising=False)
+    monkeypatch.delenv("UV_INDEX_URL", raising=False)
+    installer.set_pypi_mirror_override("auto")
+    assert (
+        installer.resolve_pypi_index("tsinghua")
+        == "https://pypi.tuna.tsinghua.edu.cn/simple"
+    )
+
+
+def test_resolve_pypi_index_auto_picks_highest_score(monkeypatch):
+    monkeypatch.delenv("PIP_INDEX_URL", raising=False)
+    monkeypatch.delenv("UV_INDEX_URL", raising=False)
+    monkeypatch.setattr(
+        installer,
+        "probe_pypi_mirrors",
+        lambda **_kwargs: [
+            {"ok": True, "mirror": "direct", "url": "https://pypi.org/simple",
+             "score": 1.0, "speed": 1000.0, "latency": 0.2},
+            {"ok": True, "mirror": "ustc", "url": "https://mirrors.ustc.edu.cn/pypi/simple",
+             "score": 9.0, "speed": 9000.0, "latency": 0.05},
+        ],
+    )
+    installer.set_pypi_mirror_override("auto")
+    assert (
+        installer.resolve_pypi_index("auto")
+        == "https://pypi.mirrors.ustc.edu.cn/simple"
+    )
+
+
+def test_ensure_personas_from_local_override(tmp_path, monkeypatch):
+    source = tmp_path / "personas"
+    persona = source / "demo"
+    persona.mkdir(parents=True)
+    (persona / "persona_prompt.py").write_text("PROMPT = ''\n", encoding="utf-8")
+    app = tmp_path / "app"
+    app.mkdir()
+    monkeypatch.setenv("KAREN_PERSONAS_ASSET", str(source))
+    installer.ensure_personas(app, tmp_path / "staging")
+    assert (app / "personas" / "demo" / "persona_prompt.py").is_file()
+
+
+def test_ensure_personas_skips_when_present(tmp_path, monkeypatch):
+    app = tmp_path / "app"
+    persona = app / "personas" / "demo"
+    persona.mkdir(parents=True)
+    (persona / "persona_prompt.py").write_text("", encoding="utf-8")
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("download should not run")
+
+    monkeypatch.setattr(installer, "download", _unexpected)
+    installer.ensure_personas(app, tmp_path / "staging")
