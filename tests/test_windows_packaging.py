@@ -171,3 +171,13 @@ def test_windows_bundle_ships_shortcut_icon():
     )
     assert "karenbot.ico" in script
     assert "gui/assets/karenbot.ico" in script
+
+
+def test_release_manifest_includes_installer_sources():
+    workflow = (ROOT / ".github/workflows/build-installer.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "karen_install.py" in workflow
+    assert "gui_install.py" in workflow
+    assert "install.sh" in workflow
+    assert "artifacts/SHA256SUMS.txt" in workflow

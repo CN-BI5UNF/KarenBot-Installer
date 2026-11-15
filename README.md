@@ -218,7 +218,9 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 `install.sh` 还支持 `KAREN_INSTALLER_SHA256` 校验 `karen_install.py`；README
 顶部的一行式命令已经同时固定了 commit 和核心哈希。
 
-Release 流水线会为 Windows 便携包、人格包和安装器本体生成 `SHA256SUMS.txt`。
+Release 流水线会为 Windows 便携包、人格包、安装器本体，以及
+`karen_install.py`、`gui_install.py`、`install.sh` 等安装器源码生成
+`SHA256SUMS.txt`；`install.sh` 也会作为 Release 资产上传。
 
 ## Windows 原生 GUI
 

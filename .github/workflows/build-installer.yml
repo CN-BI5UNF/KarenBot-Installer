@@ -430,6 +430,16 @@ jobs:
             KarenBot-Windows-x64.zip \
             KarenBot-Personas.zip \
             > SHA256SUMS.txt
+          cd ..
+          # 安装器源码也写入清单，便于 KAREN_INSTALLER_SHA256 校验核心。
+          sha256sum \
+            karen_install.py \
+            gui_install.py \
+            install.sh \
+            mirrors.json \
+            windows-gui-package.json \
+            >> artifacts/SHA256SUMS.txt
+          cat artifacts/SHA256SUMS.txt
 
       - name: Attach installers to release
         env:
@@ -447,4 +457,5 @@ jobs:
             artifacts/KarenBot-Windows-x64.zip \
             artifacts/KarenBot-Personas.zip \
             artifacts/SHA256SUMS.txt \
+            install.sh \
             --clobber
