@@ -267,6 +267,24 @@ jobs:
           Get-Item KarenBot-Windows-x64.zip |
             Select-Object Name, Length, @{N="MiB";E={[math]::Round($_.Length/1MB,1)}}
 
+      - name: Install bundle with installer core
+        run: |
+          python karen_install.py --frontend gui `
+            --archive KarenBot-Windows-x64.zip `
+            --dir "$env:RUNNER_TEMP\kb-install" `
+            --no-fonts --no-shortcut --gui-skin karen --renderer auto `
+            --non-interactive
+
+      - name: Run installed GUI launcher
+        shell: pwsh
+        run: |
+          $launcher = Join-Path $env:RUNNER_TEMP "kb-install\launch-gui.cmd"
+          if (-not (Test-Path $launcher)) { throw "launcher missing: $launcher" }
+          cmd /c "`"$launcher`" --version"
+          if ($LASTEXITCODE -ne 0) {
+            throw "installed GUI launcher failed: $LASTEXITCODE"
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-gui-bundle
