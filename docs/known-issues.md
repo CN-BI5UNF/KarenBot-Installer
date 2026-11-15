@@ -107,3 +107,12 @@
 `GLib-GIO-WARNING: win32 session dbus binary not found` 是 Windows 上没有
 D-Bus 会话总线时 GLib 打印的警告，不影响 GUI 启动；同段日志里真正导致
 Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处理。
+
+## 10. 升级失败后旧版本消失
+
+**现象**：安装器先执行 `app/ → app.old`，再放入新 `app/`；如果后续
+建 venv、装依赖或写启动入口失败，旧版本会被留在 `app.old`，用户没有
+可用的 `app/`。
+
+**处理**：替换 `app/` 后记录回滚点；任何失败/取消都会删除半成品并把
+`app.old` 换回 `app/`。只有全部步骤成功后才删除旧备份。
