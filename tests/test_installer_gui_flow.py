@@ -60,10 +60,15 @@ def _make_app(tmp_path: Path, monkeypatch):
     root = tk.Tk()
     root.withdraw()
     app = gui_install.InstallerApp(root)
+    app.source_mode.set("source")
     app.source_path.set(str(source))
     app.install_dir.set(str(tmp_path / "install"))
     app.download_fonts.set(False)
     app.create_shortcut.set(False)
+    app.gui_skin.set("karen")
+    app.render_mode.set("auto")
+    app._update_source_state()
+    app._update_appearance_state()
     if os.name == "nt":
         # Windows 源码安装只允许 WebUI；GUI 需要预构建 GTK4 包。
         app.frontend.set("webui")
@@ -72,8 +77,10 @@ def _make_app(tmp_path: Path, monkeypatch):
 
 def test_gui_reports_success(monkeypatch, tmp_path):
     root, app, messages = _make_app(tmp_path, monkeypatch)
+    captured: dict = {}
 
     def fake_install(**kwargs):
+        captured.update(kwargs)
         karen_install.log("fake install")
         return kwargs["install_dir"]
 
@@ -83,6 +90,8 @@ def test_gui_reports_success(monkeypatch, tmp_path):
         assert _pump(root, lambda: app.status.get() == "安装完成")
         assert app._installed_dir == tmp_path / "install"
         assert messages and messages[-1][0] == "info"
+        assert captured["gui_skin"] == "karen"
+        assert captured["render_mode"] == "auto"
     finally:
         root.destroy()
 

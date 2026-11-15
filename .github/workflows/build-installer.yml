@@ -10,16 +10,27 @@ on:
       - "karen_install.py"
       - "gui_install.py"
       - "mirrors.json"
+      - "windows-gui-package.json"
       - "KarenBot-Installer.spec"
+      - "install.sh"
+      - "requirements-build.txt"
+      - "requirements-test.txt"
+      - "packaging/**"
+      - "scripts/**"
       - "tests/**"
+      - "docs/**"
       - ".github/workflows/build-installer.yml"
 
 permissions:
   contents: read
 
+concurrency:
+  group: build-installer-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -27,39 +38,70 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
 
       - name: Install test tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest ruff
+          python -m pip install -r requirements-test.txt
 
-      - name: Installer tests
-        run: python -m pytest tests/test_installer.py tests/test_installer_gui_contract.py -q
+      - name: Compile sources
+        run: python -m compileall -q karen_install.py gui_install.py
+
+      - name: Shell syntax
+        run: bash -n install.sh
 
       - name: Ruff
         run: python -m ruff check karen_install.py gui_install.py tests/
 
+      - name: Installer tests
+        run: |
+          python -m pytest tests/test_installer.py \
+            tests/test_installer_gui_contract.py \
+            tests/test_windows_packaging.py -q
+
   build-windows:
     needs: verify
-    runs-on: windows-latest
-    timeout-minutes: 20
+    runs-on: windows-2022
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-build.txt
+            requirements-test.txt
 
-      - name: Install PyInstaller
+      - name: Install test tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller
+          python -m pip install -r requirements-test.txt
 
-      - name: Build installer
-        run: python -m PyInstaller KarenBot-Installer.spec --noconfirm --clean
+      - name: Installer tests on Windows
+        run: |
+          python -m pytest tests/test_installer.py \
+            tests/test_windows_packaging.py -q
+
+      - name: Build installer (pinned toolchain)
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
+
+      - name: Verify x64 artifact, version and SHA256
+        shell: pwsh
+        run: ./scripts/verify_windows_artifact.ps1
 
       - name: Smoke check frozen exe
-        run: .\dist\KarenBot-Installer.exe --check
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\KarenBot-Installer.exe" `
+            -ArgumentList "--check" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            throw "--check failed with exit code $($p.ExitCode)"
+          }
 
       - name: Capture Windows installer UI
         shell: pwsh
@@ -89,8 +131,6 @@ jobs:
           }
           Write-Host "Launcher PID=$($process.Id) Exited=$($process.HasExited)"
 
-          # PyInstaller onefile launches a child process which owns the Tk
-          # window. Find the first process of this executable with a window.
           $gui = Get-Process -Name "KarenBot-Installer" -ErrorAction SilentlyContinue |
               Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } |
               Select-Object -First 1
@@ -139,7 +179,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: installer-windows-x64
-          path: dist/KarenBot-Installer.exe
+          path: |
+            dist/KarenBot-Installer.exe
+            dist/SHA256SUMS-windows.txt
           if-no-files-found: error
 
   build-linux:
@@ -156,7 +198,7 @@ jobs:
             binary: KarenBot-Installer-linux-arm64
     runs-on: ${{ matrix.runner }}
     name: build-linux-${{ matrix.artifact }}
-    timeout-minutes: 25
+    timeout-minutes: 30
     container:
       image: ubuntu:22.04
       options: --user root
@@ -169,7 +211,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            git ca-certificates python3 python3-venv python3-tk \
+            git ca-certificates curl python3 python3-venv python3-tk \
             libpython3.10 xvfb xauth fonts-dejavu-core binutils
 
       - uses: actions/checkout@v4
@@ -178,27 +220,41 @@ jobs:
         run: |
           /usr/bin/python3 -m venv .build-venv
           .build-venv/bin/python -m pip install --upgrade pip
-          .build-venv/bin/python -m pip install pyinstaller pytest
+          .build-venv/bin/python -m pip install \
+            -r requirements-build.txt -r requirements-test.txt
           .build-venv/bin/python -c "import tkinter; print('Tk', tkinter.TkVersion)"
 
-      - name: GUI smoke test from source
+      - name: Core and packaging tests
         run: |
-          xvfb-run -a .build-venv/bin/python -m pytest tests/test_installer_gui_flow.py -q
+          .build-venv/bin/python -m pytest tests/test_installer.py \
+            tests/test_windows_packaging.py -q
+
+      - name: GUI flow smoke test
+        run: |
+          xvfb-run -a .build-venv/bin/python -m pytest \
+            tests/test_installer_gui_flow.py -q
           xvfb-run -a .build-venv/bin/python gui_install.py --smoke-test
 
       - name: Build installer
-        run: .build-venv/bin/python -m PyInstaller KarenBot-Installer.spec --noconfirm --clean
+        env:
+          PYTHON: .build-venv/bin/python
+        run: bash scripts/build_linux.sh
 
       - name: Smoke check frozen binary
         run: xvfb-run -a dist/KarenBot-Installer --smoke-test
 
-      - name: Rename Linux binary for release
-        run: cp dist/KarenBot-Installer "dist/${{ matrix.binary }}"
+      - name: Rename and checksum Linux binary
+        run: |
+          cp dist/KarenBot-Installer "dist/${{ matrix.binary }}"
+          cd dist
+          sha256sum "${{ matrix.binary }}" > "SHA256SUMS-${{ matrix.artifact }}.txt"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.binary }}
+          path: |
+            dist/${{ matrix.binary }}
+            dist/SHA256SUMS-${{ matrix.artifact }}.txt
           if-no-files-found: error
 
   release:
@@ -216,16 +272,27 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Compute release checksums
+        run: |
+          cd artifacts
+          sha256sum \
+            KarenBot-Installer.exe \
+            KarenBot-Installer-linux-x64 \
+            KarenBot-Installer-linux-arm64 \
+            > SHA256SUMS.txt
+
       - name: Attach installers to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="$GITHUB_REF_NAME"
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --prerelease --title "KarenBot Installer $tag" --notes "Automated installer build."
+            gh release create "$tag" --prerelease --title "KarenBot Installer $tag" \
+              --notes "Installer only; KarenBot packages are downloaded at install time."
           fi
           gh release upload "$tag" \
             artifacts/KarenBot-Installer.exe \
             artifacts/KarenBot-Installer-linux-x64 \
             artifacts/KarenBot-Installer-linux-arm64 \
+            artifacts/SHA256SUMS.txt \
             --clobber

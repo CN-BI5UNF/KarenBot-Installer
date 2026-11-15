@@ -1,47 +1,111 @@
 {
-  "schema": 1,
-  "updated_at": "2026-11-14",
+  "schema": 2,
+  "updated_at": "2026-11-15",
+  "notes": "安装器会并发探测前 512KB，按吞吐和首字节延迟评分后自动选择；失败自动换下一个镜像。第三方镜像可能看到或篡改下载内容，敏感环境请使用 direct。",
   "mirrors": [
     {
       "name": "direct",
       "kind": "direct",
       "enabled": true,
-      "note": "GitHub 直连（最可信，但可能受网络影响）"
+      "note": "GitHub 直连（最可信，网络条件允许时通常也最快）"
     },
     {
       "name": "ghproxy-net",
       "kind": "prefix",
       "prefix": "https://ghproxy.net/https://github.com",
       "enabled": true,
-      "note": "ghproxy 反向代理（以实际可用性为准）"
+      "note": "ghproxy.net 反向代理"
     },
     {
       "name": "gh-proxy-com",
       "kind": "prefix",
       "prefix": "https://gh-proxy.com/https://github.com",
       "enabled": true,
-      "note": "gh-proxy 公共镜像（以实际可用性为准）"
+      "note": "gh-proxy.com 公共镜像"
     },
     {
       "name": "gh-proxy-org",
       "kind": "prefix",
       "prefix": "https://gh-proxy.org/https://github.com",
       "enabled": true,
-      "note": "gh-proxy.org（以实际可用性为准）"
+      "note": "gh-proxy.org 公共镜像"
     },
     {
       "name": "ghproxy-cn",
       "kind": "prefix",
       "prefix": "https://ghproxy.cn/https://github.com",
       "enabled": true,
-      "note": "ghproxy.cn（以实际可用性为准）"
+      "note": "ghproxy.cn 公共镜像"
     },
     {
       "name": "ghproxy-cfd",
       "kind": "prefix",
       "prefix": "https://ghproxy.cfd/https://github.com",
       "enabled": true,
-      "note": "ghproxy.cfd（以实际可用性为准）"
+      "note": "ghproxy.cfd 公共镜像"
+    },
+    {
+      "name": "ghfast-top",
+      "kind": "prefix",
+      "prefix": "https://ghfast.top/https://github.com",
+      "enabled": true,
+      "note": "ghfast.top 加速站"
+    },
+    {
+      "name": "gh-llkk-cc",
+      "kind": "prefix",
+      "prefix": "https://gh.llkk.cc/https://github.com",
+      "enabled": true,
+      "note": "gh.llkk.cc 加速站"
+    },
+    {
+      "name": "ghproxy-cc",
+      "kind": "prefix",
+      "prefix": "https://ghproxy.cc/https://github.com",
+      "enabled": true,
+      "note": "ghproxy.cc 加速站"
+    },
+    {
+      "name": "gh-proxy-net",
+      "kind": "prefix",
+      "prefix": "https://gh-proxy.net/https://github.com",
+      "enabled": true,
+      "note": "gh-proxy.net 加速站"
+    },
+    {
+      "name": "gitmirror-hub",
+      "kind": "prefix",
+      "prefix": "https://hub.gitmirror.com/https://github.com",
+      "enabled": true,
+      "note": "hub.gitmirror.com 加速站"
+    },
+    {
+      "name": "moeyy-xyz",
+      "kind": "prefix",
+      "prefix": "https://github.moeyy.xyz/https://github.com",
+      "enabled": true,
+      "note": "github.moeyy.xyz 加速站"
+    },
+    {
+      "name": "ghps-cc",
+      "kind": "prefix",
+      "prefix": "https://ghps.cc/https://github.com",
+      "enabled": true,
+      "note": "ghps.cc 加速站"
+    },
+    {
+      "name": "gitproxy-click",
+      "kind": "prefix",
+      "prefix": "https://gitproxy.click/https://github.com",
+      "enabled": true,
+      "note": "gitproxy.click 加速站"
+    },
+    {
+      "name": "ghproxy-1888866",
+      "kind": "prefix",
+      "prefix": "https://ghproxy.1888866.xyz/https://github.com",
+      "enabled": true,
+      "note": "ghproxy.1888866.xyz 加速站"
     }
   ]
 }

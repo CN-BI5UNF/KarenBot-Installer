@@ -8,6 +8,7 @@ import json
 import socketserver
 import tarfile
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -106,7 +107,12 @@ def test_install_local_source_builds_launchers(tmp_path):
     launcher = (install_dir / launcher_name).read_text(encoding="utf-8")
     assert "-m gui" in launcher
     if not installer.IS_WINDOWS:
-        assert f"cd '{install_dir / 'app'}'" in launcher
+        assert str(install_dir / "app") in launcher
+        assert "cd " in launcher
+        safe = (install_dir / "launch-gui-safe.sh").read_text(encoding="utf-8")
+        assert "GSK_RENDERER=cairo" in safe
+        assert "GDK_DEBUG=gl-disable" in safe
+        assert "LIBGL_ALWAYS_SOFTWARE=1" in safe
 
 
 def test_install_fonts_writes_fontconfig(tmp_path, monkeypatch):
@@ -186,10 +192,12 @@ def test_windows_shortcut_script_quotes_paths():
         Path(r"C:\Users\O'Brien\KarenBot"),
         "KarenBot GUI.lnk",
         Path(r"C:\Program Files\KarenBot\KarenBot-GUI.exe"),
+        window_style=7,
     )
     assert "GetFolderPath('Desktop')" in script
     assert "O''Brien" in script
     assert "New-Object -ComObject WScript.Shell" in script
+    assert "$s.WindowStyle = 7" in script
 
 
 def test_install_local_source_writes_manifest(tmp_path):
@@ -350,3 +358,231 @@ def test_online_explicit_tag_bypasses_release_queries(monkeypatch):
         "v9.9.9",
         "v9.9.9",
     )
+
+
+def test_mirror_score_prefers_throughput_and_low_latency():
+    assert installer.mirror_score(2048, 0.1) > installer.mirror_score(2048, 1.0)
+    assert installer.mirror_score(4096, 0.2) > installer.mirror_score(2048, 0.2)
+
+
+def test_rank_mirrors_orders_by_score(monkeypatch):
+    mirrors = [
+        {"name": "low-latency", "kind": "direct"},
+        {"name": "fast", "kind": "direct"},
+        {"name": "dead", "kind": "direct"},
+    ]
+    results = [
+        {
+            "ok": True,
+            "mirror": "fast",
+            "url": "https://example.test/a",
+            "speed": 3000.0,
+            "latency": 0.9,
+            "score": installer.mirror_score(3000.0, 0.9),
+        },
+        {
+            "ok": True,
+            "mirror": "low-latency",
+            "url": "https://example.test/b",
+            "speed": 2048.0,
+            "latency": 0.1,
+            "score": installer.mirror_score(2048.0, 0.1),
+        },
+        {"ok": False, "mirror": "dead", "error": "timeout"},
+    ]
+
+    monkeypatch.setattr(
+        installer,
+        "probe_mirrors",
+        lambda _url, _mirrors=None, **_kwargs: results,
+    )
+    ranked = installer.rank_mirrors("https://example.test/asset", mirrors)
+    assert [item["mirror"] for item in ranked] == ["low-latency", "fast"]
+
+
+def test_available_mirrors_can_be_forced(monkeypatch):
+    mirrors = [
+        {"name": "direct", "kind": "direct"},
+        {"name": "mirror", "kind": "prefix", "prefix": "https://mirror.test"},
+    ]
+    monkeypatch.setattr(installer, "_MIRROR_CACHE", mirrors)
+    installer.set_mirror_override("mirror")
+    assert [item["name"] for item in installer.available_mirrors()] == ["mirror"]
+    installer.set_mirror_override("auto")
+    assert len(installer.available_mirrors()) == 2
+
+
+def test_apply_gui_skin_writes_all_known_locations(tmp_path, monkeypatch):
+    dirs = [tmp_path / "roaming" / "karen-gui", tmp_path / "local" / "karen-gui"]
+    monkeypatch.setattr(installer, "_gui_skin_dirs", lambda: dirs)
+    installer.apply_gui_skin("karen")
+    assert all((dir / "skin").read_text(encoding="utf-8").strip() == "karen" for dir in dirs)
+    installer.apply_gui_skin("system")
+    assert all((dir / "skin").read_text(encoding="utf-8").strip() == "system" for dir in dirs)
+    installer.apply_gui_skin("none")
+
+
+def test_render_env_modes():
+    assert installer._render_env("auto") == {}
+    cairo = installer._render_env("cairo")
+    assert cairo["KAREN_GUI_RENDERER"] == "cairo"
+    assert cairo["GSK_RENDERER"] == "cairo"
+    assert cairo["GDK_DEBUG"] == "gl-disable"
+    assert cairo["LIBGL_ALWAYS_SOFTWARE"] == "1"
+    assert installer._render_env("gl")["KAREN_GUI_RENDERER"] == "gl"
+
+
+def test_launcher_sets_fontconfig_and_renderer(tmp_path, monkeypatch):
+    font_root = tmp_path / "fonts"
+    font_root.mkdir()
+    (font_root / "fonts.conf").write_text("<fontconfig/>", encoding="utf-8")
+    monkeypatch.setattr(installer, "_font_dir", lambda: font_root)
+
+    source = tmp_path / "source"
+    (source / "backend").mkdir(parents=True)
+    (source / "gui").mkdir()
+    install_dir = tmp_path / "install"
+    installer.install(
+        frontend="gui",
+        install_dir=install_dir,
+        source_dir=source,
+        archive=None,
+        venv=tmp_path / "venv",
+        skip_deps=True,
+        create_shortcut=False,
+        download_fonts=False,
+        gui_skin="none",
+        render_mode="cairo",
+    )
+    launcher = (install_dir / "launch-gui.sh").read_text(encoding="utf-8")
+    assert str(font_root / "fonts.conf") in launcher
+    assert "GSK_RENDERER=cairo" in launcher
+    safe = (install_dir / "launch-gui-safe.sh").read_text(encoding="utf-8")
+    assert "GSK_RENDERER=cairo" in safe
+
+
+def _make_portable_app(root: Path) -> Path:
+    app = root / "KarenBot-GUI-Windows-x64"
+    (app / "backend").mkdir(parents=True)
+    (app / "backend" / "__init__.py").write_text("", encoding="utf-8")
+    (app / "gui").mkdir()
+    (app / "gui" / "plugin.json").write_text("{}", encoding="utf-8")
+    (app / "main.py").write_text("", encoding="utf-8")
+    runtime = app / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    (runtime / "lib" / "girepository-1.0").mkdir(parents=True)
+    (runtime / "python.exe").write_bytes(b"fake")
+    for name in ("libgtk-4-1.dll", "libadwaita-1-0.dll", "libgobject-2.0-0.dll"):
+        (runtime / "bin" / name).write_bytes(b"fake")
+    for name in ("Gtk-4.0.typelib", "Adw-1.typelib"):
+        (runtime / "lib" / "girepository-1.0" / name).write_bytes(b"fake")
+    return app
+
+
+def test_validate_portable_gui_accepts_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    app = _make_portable_app(tmp_path)
+    installer._validate_portable_gui(app, app / "runtime" / "python.exe")
+
+    (app / "runtime" / "bin" / "libgtk-4-1.dll").unlink()
+    with pytest.raises(SystemExit):
+        installer._validate_portable_gui(app, app / "runtime" / "python.exe")
+
+
+def test_windows_gui_online_install_from_local_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    app = _make_portable_app(tmp_path / "bundle")
+    archive = tmp_path / "KarenBot-GUI-Windows-x64.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for path in app.rglob("*"):
+            if path.is_file():
+                zf.write(path, path.relative_to(tmp_path / "bundle"))
+
+    monkeypatch.setattr(
+        installer,
+        "_resolve_online_tags",
+        lambda *_args, **_kwargs: ("v0.1.1-alpha.1", "v0.1.1-alpha.1"),
+    )
+    install_dir = tmp_path / "install"
+    installer.install(
+        frontend="gui",
+        install_dir=install_dir,
+        source_dir=None,
+        archive=None,
+        venv=None,
+        skip_deps=False,
+        create_shortcut=False,
+        download_fonts=False,
+        online=True,
+        release_tag="auto",
+        gui_skin="none",
+        render_mode="auto",
+        windows_gui_asset=str(archive),
+    )
+    assert (install_dir / "app" / "runtime" / "python.exe").is_file()
+    launcher = (install_dir / "launch-gui.cmd").read_text(encoding="utf-8")
+    assert "python.exe" in launcher
+    assert "-m gui" in launcher
+    manifest = json.loads(
+        (install_dir / "app" / "modules.json").read_text(encoding="utf-8")
+    )
+    assert manifest["installer"] == "windows-portable-release"
+    assert manifest["components"]["gui"]["runtime"] == "windows-gtk4-portable"
+
+
+def test_windows_gui_asset_missing_has_actionable_message(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        installer,
+        "_resolve_online_tags",
+        lambda *_args, **_kwargs: ("v0.1.1-alpha.1", "v0.1.1-alpha.1"),
+    )
+    monkeypatch.setattr(
+        installer,
+        "download",
+        lambda *_args, **_kwargs: installer.fail("HTTPError: 404"),
+    )
+    with pytest.raises(SystemExit) as error:
+        installer._prepare_windows_gui_app(
+            tmp_path, release_tag="auto", cancel_event=None
+        )
+    message = error.value.message
+    assert "预构建包" in message
+    assert "docs/windows-gui-package.md" in message
+
+
+def test_latest_release_tag_uses_repo_and_path(monkeypatch):
+    calls = []
+
+    def fake_page(repo, path, **_kwargs):
+        calls.append((repo, path))
+        return (
+            b"<html>redirect</html>",
+            "https://github.com/owner/repo/releases/tag/v1.2.3",
+        )
+
+    monkeypatch.setattr(installer, "_fetch_github_page", fake_page)
+    assert installer._latest_release_tag("owner/repo") == ("v1.2.3", "稳定版")
+    assert calls[0] == ("owner/repo", "releases/latest")
+
+
+def test_latest_release_tag_falls_back_to_atom(monkeypatch):
+    calls = []
+
+    def fake_page(repo, path, **_kwargs):
+        calls.append((repo, path))
+        if path == "releases/latest":
+            installer.fail("404")
+        return (
+            b'<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+            b'<link rel="alternate" href="https://github.com/owner/repo/'
+            b'releases/tag/v0.9.0"/></entry></feed>',
+            "https://github.com/owner/repo/releases.atom",
+        )
+
+    monkeypatch.setattr(installer, "_fetch_github_page", fake_page)
+    assert installer._latest_release_tag("owner/repo") == ("v0.9.0", "最新版")
+    assert calls == [
+        ("owner/repo", "releases/latest"),
+        ("owner/repo", "releases.atom"),
+    ]

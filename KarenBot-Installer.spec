@@ -1,20 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec：Tkinter 安装器单文件。
 
-Windows 使用 windowed 子系统（无黑框）；Linux 保留 console，方便
-`--check` / `--smoke-test` 和终端启动时看到错误。
+Windows 使用 windowed 子系统（无黑框），并写入文件版本信息；Linux 保留
+console，方便 `--check` / `--smoke-test` 和终端启动时看到错误。
 """
 
 import sys
 from pathlib import Path
 
 INSTALLER_DIR = Path(SPECPATH).resolve()
+VERSION_FILE = INSTALLER_DIR / "packaging" / "windows-version-info.txt"
 
 a = Analysis(
     [str(INSTALLER_DIR / "gui_install.py")],
     pathex=[str(INSTALLER_DIR)],
     binaries=[],
-    datas=[(str(INSTALLER_DIR / "mirrors.json"), ".")],
+    datas=[
+        (str(INSTALLER_DIR / "mirrors.json"), "."),
+        (str(INSTALLER_DIR / "windows-gui-package.json"), "."),
+    ],
     hiddenimports=["karen_install"],
     hookspath=[],
     hooksconfig={},
@@ -39,4 +43,9 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=not sys.platform.startswith("win"),
+    version=(
+        str(VERSION_FILE)
+        if sys.platform.startswith("win") and VERSION_FILE.is_file()
+        else None
+    ),
 )

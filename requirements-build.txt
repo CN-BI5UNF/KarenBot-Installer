@@ -1,0 +1,2 @@
+# Windows/Linux 安装器打包工具链（固定版本，避免 CI 漂移）。
+pyinstaller==6.22.3

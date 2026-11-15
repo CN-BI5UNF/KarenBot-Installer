@@ -1,32 +1,45 @@
 # KarenBot 安装引导器
 
 这是 KarenBot 的**独立安装引导仓库**，与模块仓库解耦。提供 Linux CLI
-和跨平台 Tkinter GUI，支持在线 Release 安装、本地源码/离线安装包、镜像测速、
-字体下载、快捷方式和自删除。安装器不内置应用包，也不编译 deb/exe。
+（NapCat 风格的一行式入口）、跨平台 Tkinter GUI、GitHub 镜像测速、在线
+Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自动拉取、渲染
+回退启动器和快捷方式。
 
-仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本 `v0.0.1-dev`）
+安装器**不内置任何应用包**，也不构建 deb/exe 应用包；它只负责选择来源、
+测速、下载、校验、解压、建 venv 和写启动入口。Linux 以终端 CLI 为主，
+Windows 原生 GUI 通过 GUI 仓库发布的 GTK4 便携预构建包安装。
+
+仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
+`v0.1.0-dev`，安装器版本 `0.1.0-dev`）
 
 ## 快速开始
 
-### Linux CLI（主要入口）
+### Linux 一行式安装（CLI）
 
 ```bash
-# 在线安装（默认；下载 backend 核心包 + 所选界面包）
-python3 karen_install.py --frontend webui --online
+bash <(curl -fsSL https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh)
+```
 
-# 本地源码安装（开发和本机验证）
-python3 karen_install.py \
-  --frontend gui \
+没有参数时会进入交互菜单；也可以直接传参：
+
+```bash
+# 在线安装原生 GUI（Linux 使用系统 GTK4）
+./install.sh --frontend gui --online
+
+# 在线安装 WebUI
+./install.sh --frontend webui --online
+
+# 本地源码安装（开发/本机验证）
+./install.sh --frontend gui \
   --source-dir /path/to/KarenBot-GUI \
-  --dir ~/.local/opt/karenbot \
-  --no-shortcut
+  --dir ~/.local/opt/karenbot --no-shortcut
 
 # 本地 tar/zip 安装包
-python3 karen_install.py --frontend gui --archive /path/to/karen.tar.gz
+./install.sh --frontend gui --archive /path/to/karen.tar.gz
 
 # 只测镜像速度
-python3 karen_install.py --probe-url \
-  https://github.com/CN-BI5UNF/KarenBot/archive/refs/tags/v1.0.1-alpha.1.tar.gz
+./install.sh --probe-url \
+  https://github.com/CN-BI5UNF/KarenBot-backend/archive/refs/tags/v0.1.1-alpha.1.tar.gz
 ```
 
 ### GUI
@@ -38,24 +51,34 @@ python3 gui_install.py
 ```
 
 Windows 使用 GitHub Actions 产出的 `KarenBot-Installer.exe`，不需要本机
-Python；也可以在本机用 PyInstaller 构建（见下文）。Linux GUI 是可选入口，
-终端用户仍推荐 CLI 或直接使用 `install.sh`。
+Python；也可以在本机用 PyInstaller 构建（见下文，仅验证用）。
 
 ### GUI 与 WebUI 怎么选
 
 - **原生 GUI**：桌面原生窗口，图片预览、默认应用打开、文件夹定位更顺手；
-  需要系统 GTK4/libadwaita/PyGObject，Windows 原生 GUI 暂不支持。
+  Linux 需要系统 GTK4/libadwaita/PyGObject，Windows 使用便携 GTK4 预构建包。
 - **WebUI**：浏览器访问，不需要 GTK，局域网内手机/平板也能用；文件以浏览器
   下载、内嵌打开为主，需要保持服务运行并管理访问令牌。
 
-GUI 功能：
+## 安装器做了什么
 
-- 在线安装（自动选择最新稳定版，无稳定版时使用最新 Release；下载 backend 核心包 + GUI/WebUI）；
-- 本地源码目录 / 本地 tar/zip；
-- 原生 GUI 或 WebUI；
-- 安装目录、快捷方式、中文字体、安装后自删除；
-- 独立镜像测速窗口（并发探测前 256KB，按吞吐和首字节延迟排序）；
-- 后台安装、进度、日志、取消、打开目录/启动。
+1. **镜像测速自动选择**：`mirrors.json` 内置 GitHub 直连和多个公共镜像；
+   并发探测资产前 512KB，按吞吐 + 首字节延迟评分，自动选最快且低延迟的
+   方案；下载失败自动换下一个镜像。
+2. **在线 Release 安装**：Linux 下载 backend 核心包 + GUI/WebUI 源码模块；
+   Windows 原生 GUI 下载 `KarenBot-GUI-Windows-x64.zip` 便携包。
+3. **本地安装**：源码目录、tar/zip、预构建包；不需要 GitHub。
+4. **GTK4 主题包**：Windows GUI 可选“Karen 暖色（目标机同款）”“系统
+   Adwaita”或“不使用美化包”。前两者都是 GTK4 内置皮肤，不需要下载主题
+   资产；选择不使用时会明确提醒 Windows 观感问题需要自行解决。
+5. **字体自动拉取**：安装时下载 GUI 实际使用的 Noto Sans SC / Noto Serif SC
+   可变字体，写到 GUI 读取的位置，并生成只追加该目录的 `fonts.conf`；
+   不把字体打进安装器。
+6. **渲染回退**：启动入口在 GTK 初始化前设置渲染环境；GUI 自带的
+   `gui.launcher` 还会按 stage 自动回退到 Cairo 软件渲染。另提供
+   `launch-gui-safe` / “KarenBot GUI (兼容模式)”入口。
+7. **快捷方式与自删除**：Linux `.desktop`，Windows PowerShell 创建开始
+   菜单/桌面快捷方式；打包版安装器默认安装后自删除。
 
 ## 常用参数
 
@@ -65,61 +88,95 @@ GUI 功能：
 | `--online` | 从 GitHub Release 在线安装；未指定源码/安装包时默认开启 |
 | `--tag` | 指定 Online Release tag；默认 `auto`（每个仓库优先稳定版，否则最新版） |
 | `--dir` | 安装目录，Linux 默认 `~/.local/opt/karenbot`，Windows 默认 `%LOCALAPPDATA%\Programs\KarenBot` |
-| `--source-dir` | 从本地源码安装（测试/离线） |
-| `--archive` | 从本地 tar/zip 安装包安装 |
+| `--source-dir` | 从本地源码安装（测试/离线；Windows 原生 GUI 不支持源码安装） |
+| `--archive` | 从本地 tar/zip 安装包安装（可安装 Windows GTK4 便携包） |
 | `--venv` | 复用已有 venv（测试用） |
 | `--skip-deps` | 跳过 venv/依赖安装（测试用） |
 | `--no-fonts` | 不下载 Noto 中文字体 |
 | `--no-shortcut` | 不创建快捷方式 |
-| `--self-delete` | 安装后删除安装器自身 |
-| `--keep-installer` | 打包版安装后保留安装器（覆盖默认自删除） |
+| `--gui-skin karen\|system\|none` | GUI 主题包；默认 `karen`（目标机同款） |
+| `--renderer auto\|cairo\|gl` | 渲染模式；`cairo` 强制软件渲染，黑屏/崩溃时使用 |
+| `--mirror <名称>` | 固定使用某个镜像；`--list-mirrors` 查看名称 |
+| `--windows-gui-asset URL` | 覆盖 Windows GUI 预构建包 URL（本地路径或测试镜像） |
+| `--self-delete` / `--keep-installer` | 安装后删除/保留安装器自身 |
 | `--probe-url` | 只对镜像做测速并退出 |
+| `--list-mirrors` | 列出内置镜像后退出 |
+| `--dry-run` | 打印最终配置，不执行安装 |
 
-## 镜像
+## 镜像与安全
 
 `mirrors.json` 维护 GitHub 直连和公共前缀镜像。测速并发请求实际资产的前
-256KB，按吞吐和首字节延迟排序；下载失败自动换下一个镜像。字体下载也走同一
-套逻辑，失败不会阻塞安装。
+512KB，按吞吐和首字节延迟评分；下载失败自动换下一个镜像。Release 元数据
+（`releases/latest` / `releases.atom`）也走 direct → 镜像回退。
 
 第三方镜像能看到下载请求，也可能篡改内容。安装器对有 SHA256 的资产会校验；
 没有官方哈希的 Release tarball 只能靠结构和运行检查。敏感环境请优先使用
-`direct`，或在后续 Release manifest 中补齐哈希。
+`--mirror direct`，或在后续 Release manifest 中补齐哈希。
+
+## Windows 原生 GUI
+
+Windows 源码安装不现实：GTK4/PyGObject 需要一整套便携运行时。安装器改为
+下载 GUI 仓库的预构建包 `KarenBot-GUI-Windows-x64.zip`，并按
+`windows-gui-package.json` 契约校验：
+
+- `runtime/python.exe`；
+- `libgtk-4-1.dll`、`libadwaita-1-0.dll`、`libgobject-2.0-0.dll`；
+- `Gtk-4.0.typelib`、`Adw-1.typelib`；
+- `backend/` + `gui/`。
+
+详细目录与构建工具链约定见 [`docs/windows-gui-package.md`](docs/windows-gui-package.md)。
+如果当前 Release 还没有该资产，安装器会给出明确错误；可用
+`KAREN_GUI_WINDOWS_ASSET=<本地或远程 zip>` / `--windows-gui-asset` 临时覆盖。
 
 ## 字体
 
-默认下载 Noto Sans SC / Noto Serif SC 可变字体到：
+默认下载 Noto Sans SC / Noto Serif SC 可变字体（与 GUI `gui/style.css`、
+`gui/fonts.py` 使用的字体一致）到：
 
-- Linux：`$XDG_DATA_HOME/KarenBot/fonts`
+- Linux：`$XDG_DATA_HOME/KarenBot/fonts`（默认 `~/.local/share/KarenBot/fonts`）
 - Windows：`%LOCALAPPDATA%\KarenBot\fonts`
 
-并生成只追加该目录的 `fonts.conf`。GUI 没有字体时会回退到系统字体。
+并生成只追加该目录的 `fonts.conf`。启动器会设置 `FONTCONFIG_FILE`，GUI
+不会再回退到 Windows 默认宋体/黑体。字体下载失败不会阻塞安装。
+
+## 渲染回退
+
+GUI 的 `gui/launcher.py` 在导入 `gi` 之前按 stage 设置环境变量：
+
+- stage 1：`GSK_RENDERER=cairo`、`GDK_DEBUG=gl-disable`、
+  `LIBGL_ALWAYS_SOFTWARE=1`；
+- stage 2：再加 `GDK_BACKEND=x11`（Linux 有 DISPLAY 时）/ `win32`（Windows）。
+
+安装器生成的 `launch-gui` 默认使用自动回退；`launch-gui-safe` 直接从
+Cairo 软件渲染开始，桌面快捷方式也提供“KarenBot GUI (兼容模式)”。安装器
+不会把 `--renderer` 传给 GTK（GUI 启动器只从环境变量读取），避免未知参数。
 
 ## 构建（GitHub Actions，免费）
 
 `.github/workflows/build-installer.yml` 使用公开仓库的免费标准 runner：
 
-- `windows-latest` → `KarenBot-Installer.exe`（x64，windowed，无黑框）；
+- `windows-2022` → `KarenBot-Installer.exe`（x64，windowed，无黑框，带文件版本信息）；
 - `ubuntu-24.04` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-x64`（x64，保留 console）；
 - `ubuntu-24.04-arm` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-arm64`（arm64，保留 console）；
-- `workflow_dispatch` 手动触发；
-- 推送 `v*` tag 时自动把三个产物附加到 GitHub Release（当前版本 `v0.0.1-dev`，会标记为 Pre-release）。
+- `workflow_dispatch` 手动触发；PR 只跑 verify；
+- 推送 `v*` tag 时自动把三个产物 + `SHA256SUMS.txt` 附加到 GitHub Release。
 
-Linux 产物在 Ubuntu 22.04 容器内构建，最低要求 **glibc 2.35**
-（Ubuntu 22.04 / Debian 12 及以上）。不要在 Ubuntu 24.04 主机上直接构建后
-发布，否则产物会要求 glibc 2.38+，无法在 Debian 12 或更旧的系统上启动。
+Windows 构建使用 `requirements-build.txt` 固定 PyInstaller 版本，由
+`scripts/build_windows.ps1` 打包、`scripts/verify_windows_artifact.ps1` 校验
+PE x64、文件版本、大小和 SHA256。Linux 在 Ubuntu 22.04 容器内构建，最低
+glibc 2.35（Ubuntu 22.04 / Debian 12 及以上）。
 
-不构建 macOS（公开仓库也按 10 倍分钟计费，当前不需要）。构建产物未签名，
-Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”；后续可申请
-开源签名服务或购买证书。
-
-本地构建仅用于验证：
+**不要在本机直接 PyInstaller 打包**（内存不够时容易失败）；本地只做语法/
+单测验证，完整构建和测试交给 Actions。本地验证：
 
 ```bash
-python -m pip install pyinstaller
-python -m PyInstaller KarenBot-Installer.spec --noconfirm --clean
-python gui_install.py --check
-python gui_install.py --smoke-test   # Linux 需要 DISPLAY/xvfb
+python -m pytest tests/test_installer.py tests/test_windows_packaging.py -q
+python -m ruff check karen_install.py gui_install.py tests/
+bash -n install.sh
 ```
+
+不构建 macOS（公开仓库也按 10 倍分钟计费，当前不需要）。构建产物未签名，
+Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”。
 
 ## 安全边界
 
@@ -127,15 +184,15 @@ python gui_install.py --smoke-test   # Linux 需要 DISPLAY/xvfb
 - 下载支持 SHA256 校验，失败自动换镜像；
 - Windows 默认 per-user 安装，不触发 UAC；
 - 安装器只替换 `<install>/app`，不删除用户数据目录；
-- 自删除只在打包版默认开启；源码运行默认保留脚本。
+- 自删除只在打包版默认开启；源码运行默认保留脚本；
+- Windows GUI 预构建包按 DLL/typelib 契约检查，缺运行时直接报错。
 
 ## 当前限制
 
 - 在线安装默认自动选择每个仓库的最新**稳定版**；没有稳定版时选择最新
   Release。backend 提供核心程序 + 后端，GUI/WebUI 各自提供界面模块。
-  如果两个仓库的最新版本不兼容，可显式指定 `--tag` 使用同一版本。
-- **Windows 源码/在线 GUI 不支持**：GTK4/PyGObject 需要 Windows 便携运行时；
-  在线 WebUI 安装需要系统 Python 3.10+，或使用预构建安装包。
-- **Windows GTK4 应用包尚未构建**：安装器已能识别预构建 `.exe` 包，但应用
-  本身的 Windows 构建链是独立任务。
+- Windows 原生 GUI 需要 GUI 仓库先产出 `KarenBot-GUI-Windows-x64.zip`；
+  安装器仓库不构建 GTK4 运行时。
+- Windows WebUI 源码安装仍需要系统 Python 3.10+；建议使用预构建包。
+- 不构建 deb/rpm 等系统包：Linux 用户以 CLI/install.sh 为主。
 - GUI 是简易向导，不是完整安装器设计系统；Linux 仍以 CLI 为主。

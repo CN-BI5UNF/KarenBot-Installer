@@ -4,6 +4,9 @@
 安装器只需要一个简单的原生向导：不嵌入浏览器、不依赖 GTK4，也不把
 额外的浏览器运行时塞进安装包。Tkinter 随 CPython 提供，PyInstaller
 可以把它打成 Windows/Linux 单文件。
+
+界面分成“安装配置 / 安装日志”两页；外观页提供 GTK4 内置主题包和
+渲染回退选项，实际启动参数由安装核心写入 launch-gui / launch-gui-safe。
 """
 
 from __future__ import annotations
@@ -42,8 +45,8 @@ else:
 
 APP_TITLE = "KarenBot 安装引导"
 DEFAULT_PROBE_URL = (
-    "https://github.com/CN-BI5UNF/KarenBot/archive/refs/tags/"
-    "v1.0.1-alpha.1.tar.gz"
+    "https://github.com/CN-BI5UNF/KarenBot-backend/archive/refs/tags/"
+    "v0.1.1-alpha.1.tar.gz"
 )
 
 
@@ -130,12 +133,12 @@ class InstallerApp:
         self.root.title(APP_TITLE)
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        width = 780
-        height = min(660, max(560, screen_height - 100))
+        width = 900
+        height = min(720, max(620, screen_height - 80))
         x = max(0, (screen_width - width) // 2)
         y = max(0, min(20, screen_height - height - 60))
         self.root.geometry(f"{width}x{height}+{x}+{y}")
-        self.root.minsize(740, 560)
+        self.root.minsize(820, 620)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.font_family = _configure_fonts(root)
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -148,9 +151,12 @@ class InstallerApp:
         self._installed_dir: Path | None = None
         self._installed_frontend = "gui"
         self._delete_on_close = False
+        self._skin_radios: list[ttk.Radiobutton] = []
+        self._render_radios: list[ttk.Radiobutton] = []
         self._build_vars()
         self._build_ui()
         self._update_source_state()
+        self._update_appearance_state()
         self._poll_queue()
 
     def _build_vars(self) -> None:
@@ -164,11 +170,14 @@ class InstallerApp:
         self.self_delete = tk.BooleanVar(
             value=bool(getattr(sys, "frozen", False))
         )
+        self.gui_skin = tk.StringVar(value="karen")
+        self.render_mode = tk.StringVar(value="auto")
         self.mirror_url = tk.StringVar(value=DEFAULT_PROBE_URL)
         self.status = tk.StringVar(value="就绪")
+        self.skin_note = tk.StringVar(value="")
 
     def _build_ui(self) -> None:
-        header = tk.Frame(self.root, bg="#111827", height=60)
+        header = tk.Frame(self.root, bg="#111827", height=64)
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Label(
@@ -180,7 +189,7 @@ class InstallerApp:
         ).pack(anchor="w", padx=18, pady=(10, 0))
         tk.Label(
             header,
-            text="选择安装来源与界面版本；安装器本身不内置应用包。",
+            text="选择来源、界面和外观；安装器本身不内置应用包。",
             bg="#111827",
             fg="#cbd5e1",
             font=(self.font_family, 9),
@@ -189,14 +198,8 @@ class InstallerApp:
         body = ttk.Frame(self.root, padding=10)
         body.pack(fill="both", expand=True)
 
-        self._build_source_section(body)
-        self._build_frontend_section(body)
-        self._build_install_section(body)
-        self._build_options_section(body)
-
-        # 先占住底部区域，避免小屏/高 DPI 时按钮被可伸缩的日志框挤出窗口。
         buttons = ttk.Frame(body)
-        buttons.pack(side="bottom", fill="x")
+        buttons.pack(side="bottom", fill="x", pady=(6, 0))
         self.mirror_open_button = ttk.Button(
             buttons, text="镜像测速…", command=self._open_mirror_dialog
         )
@@ -212,6 +215,13 @@ class InstallerApp:
             buttons, text="启动", command=self._launch_installed, state="disabled"
         )
         self.launch_button.pack(side="left", padx=(6, 0))
+        self.launch_safe_button = ttk.Button(
+            buttons,
+            text="兼容模式启动",
+            command=self._launch_installed_safe,
+            state="disabled",
+        )
+        self.launch_safe_button.pack(side="left", padx=(6, 0))
         self.start_button = ttk.Button(
             buttons, text="开始安装", command=self._start_install
         )
@@ -232,16 +242,28 @@ class InstallerApp:
         self.progress.pack(fill="x")
         ttk.Label(status_frame, textvariable=self.status).pack(anchor="w")
 
-        log_frame = ttk.LabelFrame(body, text="安装日志", padding=5)
-        log_frame.pack(fill="both", expand=True, pady=(0, 4))
+        self.notebook = ttk.Notebook(body)
+        self.notebook.pack(fill="both", expand=True)
+        config_tab = ttk.Frame(self.notebook, padding=8)
+        log_tab = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(config_tab, text="安装配置")
+        self.notebook.add(log_tab, text="安装日志")
+
+        self._build_source_section(config_tab)
+        self._build_frontend_section(config_tab)
+        self._build_install_section(config_tab)
+        self._build_options_section(config_tab)
+        self._build_appearance_section(config_tab)
+
         self.log_text = ScrolledText(
-            log_frame, height=5, wrap="word", state="disabled"
+            log_tab, height=12, wrap="word", state="disabled"
         )
         self.log_text.pack(fill="both", expand=True)
 
         self._log_line(f"安装器版本：{core.INSTALLER_VERSION}")
         self._log_line(f"安装目录默认：{core.DEFAULT_INSTALL_DIR}")
         self._log_line("在线安装：优先稳定版；没有稳定版时使用最新版。")
+        self._log_line("镜像：并发测速后按吞吐 + 首字节延迟自动选择。")
 
     def _build_source_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="1. 安装来源", padding=6)
@@ -286,7 +308,10 @@ class InstallerApp:
 
         ttk.Label(
             frame,
-            text="在线安装会下载 backend 核心包和 GUI/WebUI 模块；也可选本地源码/安装包。",
+            text=(
+                "在线安装会下载 backend 核心包和 GUI/WebUI 模块；"
+                "Windows 原生 GUI 需要 GUI 仓库的 GTK4 便携预构建包。"
+            ),
             foreground="#64748b",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
@@ -300,17 +325,20 @@ class InstallerApp:
             text="原生 GUI（GTK4，推荐桌面）",
             variable=self.frontend,
             value="gui",
+            command=self._update_appearance_state,
         ).pack(side="left")
         ttk.Radiobutton(
             row,
             text="WebUI（浏览器控制台）",
             variable=self.frontend,
             value="webui",
+            command=self._update_appearance_state,
         ).pack(side="left", padx=(18, 0))
         ttk.Label(
             frame,
             text=(
-                "GUI：桌面原生，图片/文件操作更顺手；需 GTK4，Windows 暂不支持。\n"
+                "GUI：桌面原生，图片/文件操作更顺手；Linux 使用系统 GTK4，"
+                "Windows 使用便携 GTK4 预构建包。\n"
                 "WebUI：浏览器访问，无需 GTK；文件以浏览器下载/内嵌打开为主。"
             ),
             foreground="#64748b",
@@ -341,7 +369,7 @@ class InstallerApp:
         ).pack(side="left")
         ttk.Checkbutton(
             row,
-            text="下载中文字体（可选）",
+            text="下载中文字体（Noto Sans/Serif SC，自动拉取）",
             variable=self.download_fonts,
         ).pack(side="left", padx=(14, 0))
         delete = ttk.Checkbutton(
@@ -354,77 +382,61 @@ class InstallerApp:
             self.self_delete.set(False)
         delete.pack(side="left", padx=(14, 0))
 
-    def _open_mirror_dialog(self) -> None:
-        if self._mirror_window is not None:
-            try:
-                if self._mirror_window.winfo_exists():
-                    self._mirror_window.lift()
-                    return
-            except tk.TclError:
-                pass
-            self._mirror_window = None
-        window = tk.Toplevel(self.root)
-        window.title("GitHub 镜像测速")
-        window.minsize(600, 360)
-        window.transient(self.root)
-        self.root.update_idletasks()
-        x = self.root.winfo_rootx() + max(
-            0, (self.root.winfo_width() - 680) // 2
-        )
-        y = self.root.winfo_rooty() + max(
-            0, (self.root.winfo_height() - 430) // 2
-        )
-        window.geometry(f"680x430+{x}+{y}")
-        self._mirror_window = window
-        body = ttk.Frame(window, padding=12)
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(1, weight=1)
-        ttk.Label(body, text="资产 URL").grid(row=0, column=0, sticky="w")
-        ttk.Entry(body, textvariable=self.mirror_url).grid(
-            row=0, column=1, sticky="ew", padx=(8, 6)
-        )
-        self._mirror_button = ttk.Button(
-            body, text="开始测速", command=self._start_mirror_test
-        )
-        self._mirror_button.grid(row=0, column=2)
-        ttk.Label(
-            body,
-            text="并发探测前 256KB，按吞吐和首字节延迟排序；下载失败会自动换镜像。",
-            foreground="#64748b",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 8))
-        self._mirror_tree = ttk.Treeview(
-            body,
-            columns=("mirror", "speed", "latency", "state"),
-            show="headings",
-            height=8,
-        )
-        for column, title, width in (
-            ("mirror", "镜像", 150),
-            ("speed", "速度", 100),
-            ("latency", "延迟", 80),
-            ("state", "状态", 300),
-        ):
-            self._mirror_tree.heading(column, text=title)
-            self._mirror_tree.column(column, width=width, anchor="w")
-        self._mirror_tree.grid(
-            row=2, column=0, columnspan=3, sticky="nsew"
-        )
-        body.rowconfigure(2, weight=1)
-        ttk.Button(body, text="关闭", command=self._close_mirror_dialog).grid(
-            row=3, column=2, sticky="e", pady=(8, 0)
-        )
-        window.protocol("WM_DELETE_WINDOW", self._close_mirror_dialog)
+    def _build_appearance_section(self, body: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(body, text="5. 外观与渲染（原生 GUI）", padding=6)
+        frame.pack(fill="x", pady=(0, 4))
+        self.appearance_frame = frame
 
-    def _close_mirror_dialog(self) -> None:
-        window = self._mirror_window
-        self._mirror_window = None
-        self._mirror_tree = None
-        self._mirror_button = None
-        if window is not None:
-            try:
-                window.destroy()
-            except tk.TclError:
-                pass
+        skin_row = ttk.Frame(frame)
+        skin_row.pack(fill="x")
+        ttk.Label(skin_row, text="主题包").pack(side="left")
+        for value, label in (
+            ("karen", "Karen 暖色（目标机同款）"),
+            ("system", "系统 Adwaita"),
+            ("none", "不使用美化包"),
+        ):
+            radio = ttk.Radiobutton(
+                skin_row,
+                text=label,
+                variable=self.gui_skin,
+                value=value,
+                command=self._update_skin_note,
+            )
+            radio.pack(side="left", padx=(10, 0))
+            self._skin_radios.append(radio)
+
+        self.skin_note_label = ttk.Label(
+            frame, textvariable=self.skin_note, foreground="#b45309"
+        )
+        self.skin_note_label.pack(anchor="w", pady=(2, 4))
+
+        render_row = ttk.Frame(frame)
+        render_row.pack(fill="x")
+        ttk.Label(render_row, text="渲染").pack(side="left")
+        for value, label in (
+            ("auto", "自动回退（推荐）"),
+            ("cairo", "强制软件渲染"),
+            ("gl", "强制硬件渲染"),
+        ):
+            radio = ttk.Radiobutton(
+                render_row,
+                text=label,
+                variable=self.render_mode,
+                value=value,
+            )
+            radio.pack(side="left", padx=(10, 0))
+            self._render_radios.append(radio)
+
+        ttk.Label(
+            frame,
+            text=(
+                "自动模式由 GUI 启动器在初始化 GTK 前按 stage 回退："
+                "GSK_RENDERER=cairo / GDK_DEBUG=gl-disable / LIBGL_ALWAYS_SOFTWARE=1。\n"
+                "仍黑屏时可用“兼容模式启动”或桌面上的“KarenBot GUI (兼容模式)”。"
+            ),
+            foreground="#64748b",
+            justify="left",
+        ).pack(anchor="w", pady=(2, 0))
 
     def _update_source_state(self) -> None:
         mode = self.source_mode.get()
@@ -442,6 +454,33 @@ class InstallerApp:
         self.archive_button.configure(
             state="normal" if archive_enabled else "disabled"
         )
+
+    def _update_appearance_state(self) -> None:
+        enabled = self.frontend.get() == "gui"
+        state = "normal" if enabled else "disabled"
+        for radio in self._skin_radios:
+            radio.configure(state=state)
+        for radio in self._render_radios:
+            radio.configure(state=state)
+        self._update_skin_note()
+
+    def _update_skin_note(self) -> None:
+        if self.frontend.get() != "gui":
+            self.skin_note.set("WebUI 不使用 GTK 主题包。")
+            self.skin_note_label.configure(foreground="#64748b")
+            return
+        if self.gui_skin.get() == "none":
+            self.skin_note.set(
+                "注意：不使用美化包时，Windows 下 GTK4 默认外观可能较差，"
+                "安装器不提供额外方案，需要自行解决。"
+            )
+            self.skin_note_label.configure(foreground="#b91c1c")
+            return
+        self.skin_note.set(
+            "Karen 暖色最接近 Linux 目标机；Adwaita 是 GTK4 默认皮肤。"
+            "两者都不需要额外下载主题资产。"
+        )
+        self.skin_note_label.configure(foreground="#64748b")
 
     def _browse_source(self) -> None:
         path = filedialog.askdirectory(title="选择 KarenBot 源码目录")
@@ -486,6 +525,10 @@ class InstallerApp:
             self._mirror_button.configure(
                 state="disabled" if running else "normal"
             )
+        self._update_appearance_state()
+        if running:
+            for radio in self._skin_radios + self._render_radios:
+                radio.configure(state="disabled")
 
     def _queue_log(self, line: str) -> None:
         self._queue.put(("log", line))
@@ -522,15 +565,21 @@ class InstallerApp:
         ):
             return
         frontend = self.frontend.get()
-        if os.name == "nt" and frontend == "gui" and (
-            source_dir is not None or online
-        ):
-            messagebox.showwarning(
-                "Windows GUI 安装",
-                "Windows 下源码/在线安装暂不支持 GTK4 GUI。\n"
-                "请改用 WebUI，或使用包含运行环境的预构建安装包。",
-            )
-            return
+        if os.name == "nt" and frontend == "gui":
+            if source_dir is not None:
+                messagebox.showerror(
+                    "Windows GUI 安装",
+                    "Windows 下原生 GUI 不能从源码安装。\n"
+                    "请选择在线安装（下载 GTK4 便携包），或选择本地预构建 zip。",
+                )
+                return
+            if self.gui_skin.get() == "none" and not messagebox.askyesno(
+                "不使用美化包",
+                "你没有选择 Windows GTK4 主题包。\n"
+                "Windows 下默认外观可能不如 Linux，安装器不提供额外方案，"
+                "需要你自行解决界面观感问题。\n\n仍然继续？",
+            ):
+                return
 
         self._installed_dir = None
         self._installed_frontend = frontend
@@ -547,8 +596,13 @@ class InstallerApp:
             if online
             else str(source_dir or archive)
         )
+        gui_skin = self.gui_skin.get() if frontend == "gui" else "none"
         self._log_line(f"来源：{source_desc}")
-        self._log_line(f"界面：{frontend}；安装目录：{install_dir}")
+        self._log_line(
+            f"界面：{frontend}；安装目录：{install_dir}；"
+            f"主题：{core.GUI_SKINS.get(gui_skin, gui_skin)}；"
+            f"渲染：{self.render_mode.get()}"
+        )
         core.set_log_sink(self._queue_log)
         core.set_progress_sink(self._queue_progress)
         self._worker = threading.Thread(
@@ -565,6 +619,8 @@ class InstallerApp:
                 "cancel_event": self._cancel,
                 "online": online,
                 "release_tag": core.ONLINE_TAG,
+                "gui_skin": gui_skin,
+                "render_mode": self.render_mode.get(),
             },
             daemon=True,
         )
@@ -634,6 +690,7 @@ class InstallerApp:
         self._installed_dir = path
         self.open_button.configure(state="normal")
         self.launch_button.configure(state="normal")
+        self.launch_safe_button.configure(state="normal")
         self._log_line(f"安装完成：{path}")
         if self.self_delete.get() and getattr(sys, "frozen", False):
             self._delete_on_close = True
@@ -641,7 +698,8 @@ class InstallerApp:
         target = core.launch_target(path, self._installed_frontend)
         messagebox.showinfo(
             "安装完成",
-            f"KarenBot 已安装到：\n{path}\n\n启动入口：\n{target}",
+            f"KarenBot 已安装到：\n{path}\n\n启动入口：\n{target}\n\n"
+            "如果启动后黑屏/崩溃，请使用“兼容模式启动”。",
         )
 
     def _on_error(self, message: str) -> None:
@@ -667,6 +725,79 @@ class InstallerApp:
         self.status.set("正在取消…")
         self._log_line("已请求取消；正在等待当前步骤结束。")
 
+    def _open_mirror_dialog(self) -> None:
+        if self._mirror_window is not None:
+            try:
+                if self._mirror_window.winfo_exists():
+                    self._mirror_window.lift()
+                    return
+            except tk.TclError:
+                pass
+            self._mirror_window = None
+        window = tk.Toplevel(self.root)
+        window.title("GitHub 镜像测速")
+        window.minsize(680, 380)
+        window.transient(self.root)
+        self.root.update_idletasks()
+        x = self.root.winfo_rootx() + max(
+            0, (self.root.winfo_width() - 720) // 2
+        )
+        y = self.root.winfo_rooty() + max(
+            0, (self.root.winfo_height() - 450) // 2
+        )
+        window.geometry(f"720x450+{x}+{y}")
+        self._mirror_window = window
+        body = ttk.Frame(window, padding=12)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        ttk.Label(body, text="资产 URL").grid(row=0, column=0, sticky="w")
+        ttk.Entry(body, textvariable=self.mirror_url).grid(
+            row=0, column=1, sticky="ew", padx=(8, 6)
+        )
+        self._mirror_button = ttk.Button(
+            body, text="开始测速", command=self._start_mirror_test
+        )
+        self._mirror_button.grid(row=0, column=2)
+        ttk.Label(
+            body,
+            text="并发探测前 512KB，按吞吐和首字节延迟评分；下载失败会自动换镜像。",
+            foreground="#64748b",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 8))
+        self._mirror_tree = ttk.Treeview(
+            body,
+            columns=("mirror", "speed", "latency", "score", "state"),
+            show="headings",
+            height=8,
+        )
+        for column, title, width in (
+            ("mirror", "镜像", 140),
+            ("speed", "速度", 100),
+            ("latency", "延迟", 80),
+            ("score", "评分", 80),
+            ("state", "状态", 260),
+        ):
+            self._mirror_tree.heading(column, text=title)
+            self._mirror_tree.column(column, width=width, anchor="w")
+        self._mirror_tree.grid(
+            row=2, column=0, columnspan=3, sticky="nsew"
+        )
+        body.rowconfigure(2, weight=1)
+        ttk.Button(body, text="关闭", command=self._close_mirror_dialog).grid(
+            row=3, column=2, sticky="e", pady=(8, 0)
+        )
+        window.protocol("WM_DELETE_WINDOW", self._close_mirror_dialog)
+
+    def _close_mirror_dialog(self) -> None:
+        window = self._mirror_window
+        self._mirror_window = None
+        self._mirror_tree = None
+        self._mirror_button = None
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
     def _start_mirror_test(self) -> None:
         if self._mirror_worker is not None and self._mirror_worker.is_alive():
             return
@@ -685,7 +816,7 @@ class InstallerApp:
 
     def _run_mirror_test(self, url: str) -> None:
         try:
-            results = core.probe_mirrors(url, core.load_mirrors())
+            results = core.probe_mirrors(url, core.available_mirrors())
         except Exception as exc:  # noqa: BLE001
             self._queue.put(
                 ("mirror_error", f"{type(exc).__name__}: {exc}")
@@ -702,6 +833,7 @@ class InstallerApp:
             results,
             key=lambda item: (
                 not bool(item.get("ok")),
+                -float(item.get("score") or 0),
                 -float(item.get("speed") or 0),
                 float(item.get("latency") or 999),
             ),
@@ -710,10 +842,12 @@ class InstallerApp:
             if item.get("ok"):
                 speed = f"{float(item.get('speed') or 0) / 1024:.1f} KB/s"
                 latency = f"{float(item.get('latency') or 0):.2f}s"
+                score = f"{float(item.get('score') or 0) / 1024:.1f}"
                 state = "可用"
             else:
                 speed = "-"
                 latency = "-"
+                score = "-"
                 state = str(item.get("error") or "失败")[:120]
             if tree is not None:
                 tree.insert(
@@ -723,6 +857,7 @@ class InstallerApp:
                         item.get("mirror", "?"),
                         speed,
                         latency,
+                        score,
                         state,
                     ),
                 )
@@ -752,10 +887,16 @@ class InstallerApp:
             messagebox.showerror("打开失败", str(exc))
 
     def _launch_installed(self) -> None:
+        self._launch_target(safe=False)
+
+    def _launch_installed_safe(self) -> None:
+        self._launch_target(safe=True)
+
+    def _launch_target(self, *, safe: bool) -> None:
         if self._installed_dir is None:
             return
         target = core.launch_target(
-            self._installed_dir, self._installed_frontend
+            self._installed_dir, self._installed_frontend, safe=safe
         )
         if not target.is_file():
             messagebox.showerror("启动入口不存在", str(target))
@@ -803,6 +944,10 @@ def main(argv: list[str] | None = None) -> int:
                     "default_install_dir": str(core.DEFAULT_INSTALL_DIR),
                     "installer_version": core.INSTALLER_VERSION,
                     "mirrors": len(core.load_mirrors()),
+                    "gui_skins": list(core.GUI_SKINS),
+                    "render_modes": list(core.RENDER_MODES),
+                    "windows_gui_asset": core.windows_gui_asset_name(),
+                    "fonts": [item["name"] for item in core.FONT_SOURCES],
                     "tk_error": str(_TK_ERROR) if _TK_ERROR else "",
                 },
                 ensure_ascii=False,
