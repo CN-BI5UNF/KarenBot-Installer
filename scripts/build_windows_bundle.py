@@ -170,10 +170,10 @@ def main() -> int:
         if personas_target.exists():
             shutil.rmtree(personas_target)
         shutil.copytree(personas, personas_target, ignore=IGNORE)
-        print(
-            "personas: "
-            + ", ".join(sorted(item.name for item in persona_dirs))
-        )
+        names = ", ".join(sorted(item.name for item in persona_dirs))
+        # GitHub Actions 的 Windows 控制台默认 cp1252；中文人格名直接
+        # print 会抛 UnicodeEncodeError，这里转成 ASCII 转义只用于日志。
+        print("personas: " + names.encode("ascii", "backslashreplace").decode("ascii"))
 
         print("copy GTK resources from gvsbuild")
         runtime_bin = runtime / "bin"
@@ -352,7 +352,8 @@ def main() -> int:
                 "names=[x.name for x in p.iterdir() "
                 "if x.is_dir() and (x/'persona_prompt.py').is_file()]; "
                 "assert names, 'no persona_prompt.py'; "
-                "print('personas ok:', ', '.join(sorted(names)))",
+                "print('personas ok:', len(names), "
+                "ascii(sorted(names)))",
             ],
             cwd=bundle,
             env=smoke_env,
