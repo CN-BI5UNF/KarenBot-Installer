@@ -180,7 +180,7 @@ class InstallerApp:
         self.skin_note = tk.StringVar(value="")
 
     def _build_ui(self) -> None:
-        header = tk.Frame(self.root, bg="#111827", height=64)
+        header = tk.Frame(self.root, bg="#111827", height=56)
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Label(
@@ -189,7 +189,7 @@ class InstallerApp:
             bg="#111827",
             fg="#f9fafb",
             font=(self.font_family, 16, "bold"),
-        ).pack(anchor="w", padx=18, pady=(10, 0))
+        ).pack(anchor="w", padx=18, pady=(8, 0))
         tk.Label(
             header,
             text="选择来源、界面和外观；安装器本身不内置应用包。",
@@ -198,7 +198,7 @@ class InstallerApp:
             font=(self.font_family, 9),
         ).pack(anchor="w", padx=18, pady=(1, 0))
 
-        body = ttk.Frame(self.root, padding=10)
+        body = ttk.Frame(self.root, padding=8)
         body.pack(fill="both", expand=True)
 
         buttons = ttk.Frame(body)
@@ -314,8 +314,8 @@ class InstallerApp:
         self.config_inner = inner
 
     def _build_source_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="1. 安装来源", padding=6)
-        frame.pack(fill="x", pady=(0, 4))
+        frame = ttk.LabelFrame(body, text="1. 安装来源", padding=5)
+        frame.pack(fill="x", pady=(0, 3))
         frame.columnconfigure(1, weight=1)
 
         ttk.Radiobutton(
@@ -364,8 +364,8 @@ class InstallerApp:
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
     def _build_frontend_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="2. 界面版本", padding=6)
-        frame.pack(fill="x", pady=(0, 4))
+        frame = ttk.LabelFrame(body, text="2. 界面版本", padding=5)
+        frame.pack(fill="x", pady=(0, 3))
         row = ttk.Frame(frame)
         row.pack(fill="x")
         ttk.Radiobutton(
@@ -385,17 +385,16 @@ class InstallerApp:
         ttk.Label(
             frame,
             text=(
-                "GUI：桌面原生，图片/文件操作更顺手；Linux 使用系统 GTK4，"
-                "Windows 使用便携 GTK4 预构建包。\n"
-                "WebUI：浏览器访问，无需 GTK；文件以浏览器下载/内嵌打开为主。"
+                "GUI 需要 GTK4（Windows 用便携预构建包）；"
+                "WebUI 走浏览器，无需 GTK，文件以浏览器下载/内嵌打开为主。"
             ),
             foreground="#64748b",
             justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
     def _build_install_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="3. 安装位置", padding=6)
-        frame.pack(fill="x", pady=(0, 4))
+        frame = ttk.LabelFrame(body, text="3. 安装位置", padding=5)
+        frame.pack(fill="x", pady=(0, 3))
         frame.columnconfigure(1, weight=1)
         ttk.Label(frame, text="目录").grid(row=0, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.install_dir).grid(
@@ -414,8 +413,8 @@ class InstallerApp:
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
     def _build_options_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="4. 选项", padding=6)
-        frame.pack(fill="x", pady=(0, 4))
+        frame = ttk.LabelFrame(body, text="4. 选项", padding=5)
+        frame.pack(fill="x", pady=(0, 3))
         row = ttk.Frame(frame)
         row.pack(fill="x")
         ttk.Checkbutton(
@@ -439,8 +438,8 @@ class InstallerApp:
         delete.pack(side="left", padx=(14, 0))
 
     def _build_appearance_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="5. 外观与渲染（原生 GUI）", padding=6)
-        frame.pack(fill="x", pady=(0, 4))
+        frame = ttk.LabelFrame(body, text="5. 外观与渲染（原生 GUI）", padding=5)
+        frame.pack(fill="x", pady=(0, 3))
         self.appearance_frame = frame
 
         skin_row = ttk.Frame(frame)
