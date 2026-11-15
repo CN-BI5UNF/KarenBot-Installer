@@ -172,16 +172,16 @@ def test_gui_locks_all_config_widgets_while_running(monkeypatch, tmp_path):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
     try:
         app._set_running(True)
-        assert app.install_entry.cget("state") == "disabled"
-        assert app.github_mirror_box.cget("state") == "disabled"
-        assert app.source_radios[0].cget("state") == "disabled"
-        assert app.frontend_radios[0].cget("state") == "disabled"
-        assert app.self_delete_box.cget("state") == "disabled"
+        assert str(app.install_entry.cget("state")) == "disabled"
+        assert str(app.github_mirror_box.cget("state")) == "disabled"
+        assert str(app.source_radios[0].cget("state")) == "disabled"
+        assert str(app.frontend_radios[0].cget("state")) == "disabled"
+        assert str(app.self_delete_box.cget("state")) == "disabled"
         app._set_running(False)
-        assert app.install_entry.cget("state") == "normal"
-        assert app.github_mirror_box.cget("state") == "readonly"
-        assert app.source_entry.cget("state") == "normal"
-        assert app.frontend_radios[0].cget("state") == "normal"
+        assert str(app.install_entry.cget("state")) == "normal"
+        assert str(app.github_mirror_box.cget("state")) == "readonly"
+        assert str(app.source_entry.cget("state")) == "normal"
+        assert str(app.frontend_radios[0].cget("state")) == "normal"
     finally:
         root.destroy()
 
@@ -232,9 +232,9 @@ def test_gui_uninstall_button_tracks_install_marker(monkeypatch, tmp_path):
     try:
         app.install_dir.set(str(install_dir))
         app._update_uninstall_state()
-        assert app.uninstall_button.cget("state") == "normal"
+        assert str(app.uninstall_button.cget("state")) == "normal"
         app._set_running(True)
-        assert app.uninstall_button.cget("state") == "disabled"
+        assert str(app.uninstall_button.cget("state")) == "disabled"
     finally:
         root.destroy()
 

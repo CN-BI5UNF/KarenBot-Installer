@@ -407,7 +407,13 @@ def _terminate_process(proc: subprocess.Popen[str]) -> None:
             pass
     else:
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            killpg = getattr(os, "killpg", None)
+            if killpg is not None:
+                killpg(proc.pid, signal.SIGTERM)
+            else:
+                # 测试会在 Windows 上模拟 POSIX 路径；os.killpg 不存在时
+                # 至少终止当前进程，避免取消逻辑直接抛 AttributeError。
+                proc.terminate()
         except (OSError, ProcessLookupError):
             pass
     try:
