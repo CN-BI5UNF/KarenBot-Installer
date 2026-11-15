@@ -55,9 +55,9 @@ else:
 
 def _resource_path(name: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    bundled = base / name
-    if bundled.is_file():
-        return bundled
+    for candidate in (base / name, base / "vendor" / name):
+        if candidate.is_file():
+            return candidate
     return Path(__file__).with_name(name)
 
 

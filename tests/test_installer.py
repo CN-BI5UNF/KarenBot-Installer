@@ -668,6 +668,7 @@ def test_ensure_python_runtime_downloads_when_missing(tmp_path, monkeypatch):
         "label": "test",
         "key": "linux-x64",
     }
+    monkeypatch.setattr(installer, "_bundled_python_archive", lambda: None)
     monkeypatch.setattr(installer, "_find_complete_python", lambda: None)
     monkeypatch.setattr(installer, "_python_runtime_source", lambda: source)
     monkeypatch.setattr(installer, "_python_is_complete", lambda path: path.is_file())
@@ -691,6 +692,7 @@ def test_ensure_python_runtime_downloads_when_missing(tmp_path, monkeypatch):
 
 def test_ensure_python_runtime_linux_gui_requires_system(monkeypatch):
     monkeypatch.setattr(installer, "IS_WINDOWS", False)
+    monkeypatch.setattr(installer, "_bundled_python_archive", lambda: None)
     monkeypatch.setattr(installer, "_find_complete_python", lambda: None)
     with pytest.raises(SystemExit) as error:
         installer.ensure_python_runtime(Path("/tmp/karen-gui-python"), frontend="gui")
