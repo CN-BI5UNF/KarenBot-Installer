@@ -244,16 +244,17 @@ class InstallerApp:
 
         self.notebook = ttk.Notebook(body)
         self.notebook.pack(fill="both", expand=True)
-        config_tab = ttk.Frame(self.notebook, padding=8)
+        config_tab = ttk.Frame(self.notebook)
         log_tab = ttk.Frame(self.notebook, padding=6)
         self.notebook.add(config_tab, text="安装配置")
         self.notebook.add(log_tab, text="安装日志")
 
-        self._build_source_section(config_tab)
-        self._build_frontend_section(config_tab)
-        self._build_install_section(config_tab)
-        self._build_options_section(config_tab)
-        self._build_appearance_section(config_tab)
+        self._build_config_scroll(config_tab)
+        self._build_source_section(self.config_inner)
+        self._build_frontend_section(self.config_inner)
+        self._build_install_section(self.config_inner)
+        self._build_options_section(self.config_inner)
+        self._build_appearance_section(self.config_inner)
 
         self.log_text = ScrolledText(
             log_tab, height=12, wrap="word", state="disabled"
@@ -264,6 +265,49 @@ class InstallerApp:
         self._log_line(f"安装目录默认：{core.DEFAULT_INSTALL_DIR}")
         self._log_line("在线安装：优先稳定版；没有稳定版时使用最新版。")
         self._log_line("镜像：并发测速后按吞吐 + 首字节延迟自动选择。")
+
+    def _build_config_scroll(self, parent: ttk.Frame) -> None:
+        """小屏/高 DPI 下配置页可滚动，避免外观/渲染选项被裁掉。"""
+        style = ttk.Style(self.root)
+        background = style.lookup("TFrame", "background") or "#f0f0f0"
+        canvas = tk.Canvas(
+            parent,
+            highlightthickness=0,
+            borderwidth=0,
+            background=background,
+        )
+        scrollbar = ttk.Scrollbar(
+            parent, orient="vertical", command=canvas.yview
+        )
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        inner = ttk.Frame(canvas, padding=8)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_width(event) -> None:
+            canvas.itemconfigure(window, width=event.width)
+
+        def _on_wheel(event) -> None:
+            if getattr(event, "num", None) == 4:
+                canvas.yview_scroll(-3, "units")
+            elif getattr(event, "num", None) == 5:
+                canvas.yview_scroll(3, "units")
+            else:
+                delta = int(getattr(event, "delta", 0) / 120)
+                canvas.yview_scroll(-3 * delta if delta else 0, "units")
+
+        inner.bind("<Configure>", _sync_region)
+        canvas.bind("<Configure>", _sync_width)
+        for widget in (canvas, inner):
+            widget.bind("<MouseWheel>", _on_wheel)
+            widget.bind("<Button-4>", _on_wheel)
+            widget.bind("<Button-5>", _on_wheel)
+        self.config_canvas = canvas
+        self.config_inner = inner
 
     def _build_source_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="1. 安装来源", padding=6)
@@ -405,13 +449,8 @@ class InstallerApp:
             radio.pack(side="left", padx=(10, 0))
             self._skin_radios.append(radio)
 
-        self.skin_note_label = ttk.Label(
-            frame, textvariable=self.skin_note, foreground="#b45309"
-        )
-        self.skin_note_label.pack(anchor="w", pady=(2, 4))
-
         render_row = ttk.Frame(frame)
-        render_row.pack(fill="x")
+        render_row.pack(fill="x", pady=(4, 0))
         ttk.Label(render_row, text="渲染").pack(side="left")
         for value, label in (
             ("auto", "自动回退（推荐）"),
@@ -426,6 +465,11 @@ class InstallerApp:
             )
             radio.pack(side="left", padx=(10, 0))
             self._render_radios.append(radio)
+
+        self.skin_note_label = ttk.Label(
+            frame, textvariable=self.skin_note, foreground="#b45309"
+        )
+        self.skin_note_label.pack(anchor="w", pady=(3, 2))
 
         ttk.Label(
             frame,
