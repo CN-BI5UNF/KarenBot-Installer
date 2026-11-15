@@ -22,7 +22,9 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 
 ```bash
 sha=5c0ebb53f54c8a9d6ef19e18da3c46c03a533976
+want=a801720ffcf99ba7823abae159b3a3decbbe3cfb859d9168dfe11cc3c96ad5d0
 bash <(
+  ok=0
   for u in \
     "https://gh-proxy.com/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
     "https://ghproxy.net/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
@@ -31,9 +33,20 @@ bash <(
     "https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh"; do
       s="$(curl -fsSL --connect-timeout 8 --max-time 30 "$u" 2>/dev/null)" || continue
       case "$s" in
-        "#!/usr/bin/env bash"*) printf '%s\n' "$s"; break ;;
+        "#!/usr/bin/env bash"*) ;;
+        *) continue ;;
       esac
+      if command -v sha256sum >/dev/null 2>&1; then
+        h="$(printf '%s' "$s" | sha256sum | cut -d' ' -f1)"
+      else
+        h="$(printf '%s' "$s" | shasum -a 256 | cut -d' ' -f1)"
+      fi
+      [ "$h" = "$want" ] || { echo "跳过 SHA256 不匹配的源：$u" >&2; continue; }
+      printf '%s\n' "$s"
+      ok=1
+      break
   done
+  [ "$ok" = 1 ] || printf 'echo "无法下载 install.sh：请检查网络或使用代理" >&2\nexit 1\n'
 )
 ```
 
