@@ -78,7 +78,7 @@ fi
 BASE=""
 for candidate in "${BASES[@]}"; do
     echo "获取安装核心：$candidate/karen_install.py"
-    if curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 8 --max-time 120 \
+    if curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 8 --max-time 30 \
         "$candidate/karen_install.py" -o "$TMP_DIR/karen_install.py"; then
         BASE="$candidate"
         break
