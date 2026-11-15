@@ -21,9 +21,10 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 `install.sh` 后再执行：
 
 ```bash
-sha=5c0ebb53f54c8a9d6ef19e18da3c46c03a533976
+sha=6af5fa2406970d671047d5dabe45c01ffd9e0616
 want=a801720ffcf99ba7823abae159b3a3decbbe3cfb859d9168dfe11cc3c96ad5d0
-bash <(
+core=047842a9558efb0cda74ccd2fc280f8ab4229c2745f5dd4fabb6cc0316693e83
+KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
   ok=0
   for u in \
     "https://gh-proxy.com/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
@@ -50,8 +51,10 @@ bash <(
 )
 ```
 
-上面的 bootstrap 固定在 commit `5c0ebb5`（只负责下载和校验脚本，避免 CDN
-缓存到旧版本）；`install.sh` 自己仍默认从 `main` 获取最新安装核心。
+上面的命令把 bootstrap 和安装核心都固定在 commit `6af5fa2`，并分别用
+SHA256 校验脚本和 `karen_install.py`；这样即使使用第三方镜像，也不会执行
+被替换的旧脚本。想跟随 `main` 最新代码时，去掉 `KAREN_INSTALLER_REF` 和
+`KAREN_INSTALLER_SHA256` 即可。
 
 如果网络能直连 GitHub，也可以用原来的短命令：
 
