@@ -28,6 +28,8 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
+from urllib.parse import unquote
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape as xml_escape
 
 APP_NAME = "KarenBot"
@@ -52,9 +54,9 @@ INSTALLER_VERSION = "0.0.1-dev"
 USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 PROBE_BYTES = 256 * 1024
 
-# 在线安装固定使用的配套版本。backend Release 现在包含核心程序 + 后端；
-# GUI/WebUI 仍从各自仓库下载对应的界面模块。
-ONLINE_TAG = "v0.1.1-alpha.1"
+# 在线安装默认从 GitHub 查询：优先最新稳定版，没有稳定版时选择最新 Release。
+# backend 提供核心程序 + 后端；GUI/WebUI 仍从各自仓库下载界面模块。
+ONLINE_TAG = "auto"
 ONLINE_BACKEND_REPO = "CN-BI5UNF/KarenBot-backend"
 ONLINE_FRONTEND_REPOS = {
     "gui": "CN-BI5UNF/KarenBot-GUI",
@@ -448,6 +450,93 @@ def _online_archive_url(repo: str, tag: str) -> str:
     return ONLINE_ARCHIVE_TEMPLATE.format(repo=repo, tag=tag)
 
 
+def _release_tag_from_atom(data: bytes) -> str:
+    """从 GitHub releases.atom 的第一条记录取 tag。"""
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError as exc:
+        fail(f"GitHub Release feed 解析失败：{exc}")
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    for entry in root.findall("atom:entry", ns):
+        link = entry.find("atom:link", ns)
+        href = str(link.attrib.get("href") or "") if link is not None else ""
+        match = re.search(r"/releases/tag/([^/?#]+)", href)
+        if match:
+            tag = unquote(match.group(1))
+            return _validate_online_tag(tag)
+    fail("GitHub Release feed 中没有可用的版本")
+
+
+def _latest_release_tag(
+    repo: str, *, cancel_event: Any | None = None
+) -> tuple[str, str]:
+    """优先 GitHub 的 latest 稳定版，否则用 releases.atom 的最新版本。
+
+    不使用 GitHub API，避免未登录时的 60 次/小时限流。
+    """
+    _check_cancel(cancel_event)
+    latest_url = f"https://github.com/{repo}/releases/latest"
+    try:
+        with urllib.request.urlopen(
+            _request(latest_url), timeout=20
+        ) as response:
+            final_url = response.geturl()
+        match = re.search(r"/releases/tag/([^/?#]+)", final_url)
+        if match:
+            tag = _validate_online_tag(unquote(match.group(1)))
+            log(f"{repo} 选择版本：{tag}（稳定版）")
+            return tag, "稳定版"
+    except Exception as exc:  # noqa: BLE001
+        log(
+            f"{repo} 稳定版检查失败，改查 releases.atom："
+            f"{type(exc).__name__}: {exc}"
+        )
+    _check_cancel(cancel_event)
+    atom_url = f"https://github.com/{repo}/releases.atom"
+    try:
+        with urllib.request.urlopen(
+            _request(atom_url), timeout=20
+        ) as response:
+            data = response.read()
+    except Exception as exc:  # noqa: BLE001
+        fail(f"无法查询 {repo} 的 Release：{type(exc).__name__}: {exc}")
+    tag = _release_tag_from_atom(data)
+    log(f"{repo} 未找到稳定版，选择最新 Release：{tag}")
+    return tag, "最新版"
+
+
+def _resolve_online_tags(
+    frontend: str,
+    requested_tag: str,
+    *,
+    cancel_event: Any | None = None,
+) -> tuple[str, str]:
+    """返回 (backend_tag, frontend_tag)。
+
+    默认每个仓库优先最新稳定版；没有稳定版时选择最新 Release。
+    显式 --tag 时两个仓库使用同一个 tag。
+    """
+    requested = str(requested_tag or "").strip()
+    if requested and requested.lower() not in {"auto", "latest"}:
+        tag = _validate_online_tag(requested)
+        log(f"使用指定 Release 版本：{tag}")
+        return tag, tag
+
+    frontend_repo = ONLINE_FRONTEND_REPOS[frontend]
+    backend_tag, backend_kind = _latest_release_tag(
+        ONLINE_BACKEND_REPO, cancel_event=cancel_event
+    )
+    _check_cancel(cancel_event)
+    frontend_tag, frontend_kind = _latest_release_tag(
+        frontend_repo, cancel_event=cancel_event
+    )
+    log(
+        f"在线版本：backend={backend_tag}（{backend_kind}），"
+        f"{frontend}={frontend_tag}（{frontend_kind}）"
+    )
+    return backend_tag, frontend_tag
+
+
 def _prepare_online_app(
     staging: Path,
     *,
@@ -458,13 +547,16 @@ def _prepare_online_app(
     """下载并合并 backend 核心包与所选界面模块，返回 installer_kind/components。"""
     if frontend not in ONLINE_FRONTEND_REPOS:
         fail(f"不支持的界面：{frontend}")
-    tag = _validate_online_tag(release_tag)
-    backend_url = _online_archive_url(ONLINE_BACKEND_REPO, tag)
+    backend_tag, frontend_tag = _resolve_online_tags(
+        frontend,
+        release_tag,
+        cancel_event=cancel_event,
+    )
+    backend_url = _online_archive_url(ONLINE_BACKEND_REPO, backend_tag)
     frontend_repo = ONLINE_FRONTEND_REPOS[frontend]
-    frontend_url = _online_archive_url(frontend_repo, tag)
+    frontend_url = _online_archive_url(frontend_repo, frontend_tag)
     downloads = staging / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
-    log(f"在线安装版本：{tag}")
     log("下载核心程序 + 后端包…")
     backend_archive = download(
         backend_url,
@@ -497,19 +589,18 @@ def _prepare_online_app(
         frontend_target,
         ignore=_IGNORE,
     )
-    component_version = tag.lstrip("v")
     components = {
         "backend": {
             "repo": ONLINE_BACKEND_REPO,
             "dir": "backend",
-            "tag": tag,
-            "version": component_version,
+            "tag": backend_tag,
+            "version": backend_tag.lstrip("v"),
         },
         frontend: {
             "repo": frontend_repo,
             "dir": frontend,
-            "tag": tag,
-            "version": component_version,
+            "tag": frontend_tag,
+            "version": frontend_tag.lstrip("v"),
         },
     }
     return "online-release", components

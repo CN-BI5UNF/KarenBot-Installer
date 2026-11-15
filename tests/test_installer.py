@@ -315,3 +315,38 @@ def test_install_online_composes_backend_and_frontend(tmp_path, monkeypatch):
     assert manifest["installer"] == "online-release"
     assert manifest["components"]["backend"]["tag"] == "v0.1.1-alpha.1"
     assert manifest["components"]["webui"]["repo"] == installer.ONLINE_FRONTEND_REPOS["webui"]
+
+
+def test_release_tag_from_atom():
+    data = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <link rel="alternate" href="https://github.com/demo/repo/releases/tag/v1.2.3"/>
+      </entry>
+    </feed>"""
+    assert installer._release_tag_from_atom(data) == "v1.2.3"
+
+
+def test_resolve_online_tags_uses_release_policy(monkeypatch):
+    def fake_latest(repo, **_kwargs):
+        if repo == installer.ONLINE_BACKEND_REPO:
+            return "v1.2.0", "稳定版"
+        return "v1.1.0", "最新版"
+
+    monkeypatch.setattr(installer, "_latest_release_tag", fake_latest)
+    backend_tag, frontend_tag = installer._resolve_online_tags(
+        "webui", "auto"
+    )
+    assert backend_tag == "v1.2.0"
+    assert frontend_tag == "v1.1.0"
+
+
+def test_online_explicit_tag_bypasses_release_queries(monkeypatch):
+    def fail_lookup(*_args, **_kwargs):
+        raise AssertionError("explicit tag must not query GitHub")
+
+    monkeypatch.setattr(installer, "_latest_release_tag", fail_lookup)
+    assert installer._resolve_online_tags("gui", "v9.9.9") == (
+        "v9.9.9",
+        "v9.9.9",
+    )

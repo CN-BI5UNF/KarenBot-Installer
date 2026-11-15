@@ -41,9 +41,16 @@ Windows 使用 GitHub Actions 产出的 `KarenBot-Installer.exe`，不需要本�
 Python；也可以在本机用 PyInstaller 构建（见下文）。Linux GUI 是可选入口，
 终端用户仍推荐 CLI 或直接使用 `install.sh`。
 
+### GUI 与 WebUI 怎么选
+
+- **原生 GUI**：桌面原生窗口，图片预览、默认应用打开、文件夹定位更顺手；
+  需要系统 GTK4/libadwaita/PyGObject，Windows 原生 GUI 暂不支持。
+- **WebUI**：浏览器访问，不需要 GTK，局域网内手机/平板也能用；文件以浏览器
+  下载、内嵌打开为主，需要保持服务运行并管理访问令牌。
+
 GUI 功能：
 
-- 在线安装（GitHub Release `v0.1.1-alpha.1` 的 backend 核心包 + GUI/WebUI）；
+- 在线安装（自动选择最新稳定版，无稳定版时使用最新 Release；下载 backend 核心包 + GUI/WebUI）；
 - 本地源码目录 / 本地 tar/zip；
 - 原生 GUI 或 WebUI；
 - 安装目录、快捷方式、中文字体、安装后自删除；
@@ -56,7 +63,7 @@ GUI 功能：
 |---|---|
 | `--frontend gui\|webui` | 选择原生 GUI 或 WebUI |
 | `--online` | 从 GitHub Release 在线安装；未指定源码/安装包时默认开启 |
-| `--tag` | 在线安装使用的 Release tag，默认 `v0.1.1-alpha.1` |
+| `--tag` | 指定 Online Release tag；默认 `auto`（每个仓库优先稳定版，否则最新版） |
 | `--dir` | 安装目录，Linux 默认 `~/.local/opt/karenbot`，Windows 默认 `%LOCALAPPDATA%\Programs\KarenBot` |
 | `--source-dir` | 从本地源码安装（测试/离线） |
 | `--archive` | 从本地 tar/zip 安装包安装 |
@@ -124,8 +131,9 @@ python gui_install.py --smoke-test   # Linux 需要 DISPLAY/xvfb
 
 ## 当前限制
 
-- 在线安装固定使用 `v0.1.1-alpha.1`：backend 提供核心程序 + 后端，GUI/WebUI
-  各自提供界面模块；版本不匹配时需要先更新安装器或显式指定 `--tag`。
+- 在线安装默认自动选择每个仓库的最新**稳定版**；没有稳定版时选择最新
+  Release。backend 提供核心程序 + 后端，GUI/WebUI 各自提供界面模块。
+  如果两个仓库的最新版本不兼容，可显式指定 `--tag` 使用同一版本。
 - **Windows 源码/在线 GUI 不支持**：GTK4/PyGObject 需要 Windows 便携运行时；
   在线 WebUI 安装需要系统 Python 3.10+，或使用预构建安装包。
 - **Windows GTK4 应用包尚未构建**：安装器已能识别预构建 `.exe` 包，但应用

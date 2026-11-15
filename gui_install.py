@@ -168,7 +168,7 @@ class InstallerApp:
         self.status = tk.StringVar(value="就绪")
 
     def _build_ui(self) -> None:
-        header = tk.Frame(self.root, bg="#111827", height=66)
+        header = tk.Frame(self.root, bg="#111827", height=60)
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Label(
@@ -233,7 +233,7 @@ class InstallerApp:
         ttk.Label(status_frame, textvariable=self.status).pack(anchor="w")
 
         log_frame = ttk.LabelFrame(body, text="安装日志", padding=5)
-        log_frame.pack(fill="both", expand=True, pady=(0, 6))
+        log_frame.pack(fill="both", expand=True, pady=(0, 4))
         self.log_text = ScrolledText(
             log_frame, height=5, wrap="word", state="disabled"
         )
@@ -241,16 +241,16 @@ class InstallerApp:
 
         self._log_line(f"安装器版本：{core.INSTALLER_VERSION}")
         self._log_line(f"安装目录默认：{core.DEFAULT_INSTALL_DIR}")
-        self._log_line(f"在线安装版本：{core.ONLINE_TAG}（核心程序 + 后端 + 所选界面）")
+        self._log_line("在线安装：优先稳定版；没有稳定版时使用最新版。")
 
     def _build_source_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="1. 安装来源", padding=8)
-        frame.pack(fill="x", pady=(0, 6))
+        frame = ttk.LabelFrame(body, text="1. 安装来源", padding=6)
+        frame.pack(fill="x", pady=(0, 4))
         frame.columnconfigure(1, weight=1)
 
         ttk.Radiobutton(
             frame,
-            text=f"在线安装（GitHub Release {core.ONLINE_TAG}）",
+            text="在线安装（自动选择稳定版/最新版）",
             variable=self.source_mode,
             value="online",
             command=self._update_source_state,
@@ -288,11 +288,11 @@ class InstallerApp:
             frame,
             text="在线安装会下载 backend 核心包和 GUI/WebUI 模块；也可选本地源码/安装包。",
             foreground="#64748b",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
     def _build_frontend_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="2. 界面版本", padding=8)
-        frame.pack(fill="x", pady=(0, 6))
+        frame = ttk.LabelFrame(body, text="2. 界面版本", padding=6)
+        frame.pack(fill="x", pady=(0, 4))
         row = ttk.Frame(frame)
         row.pack(fill="x")
         ttk.Radiobutton(
@@ -309,13 +309,17 @@ class InstallerApp:
         ).pack(side="left", padx=(18, 0))
         ttk.Label(
             frame,
-            text="GUI 需要系统 GTK4/libadwaita；WebUI 通过浏览器打开。",
+            text=(
+                "GUI：桌面原生，图片/文件操作更顺手；需 GTK4，Windows 暂不支持。\n"
+                "WebUI：浏览器访问，无需 GTK；文件以浏览器下载/内嵌打开为主。"
+            ),
             foreground="#64748b",
-        ).pack(anchor="w", pady=(3, 0))
+            justify="left",
+        ).pack(anchor="w", pady=(2, 0))
 
     def _build_install_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="3. 安装位置", padding=8)
-        frame.pack(fill="x", pady=(0, 6))
+        frame = ttk.LabelFrame(body, text="3. 安装位置", padding=6)
+        frame.pack(fill="x", pady=(0, 4))
         frame.columnconfigure(1, weight=1)
         ttk.Label(frame, text="目录").grid(row=0, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.install_dir).grid(
@@ -326,8 +330,8 @@ class InstallerApp:
         )
 
     def _build_options_section(self, body: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(body, text="4. 选项", padding=8)
-        frame.pack(fill="x", pady=(0, 6))
+        frame = ttk.LabelFrame(body, text="4. 选项", padding=6)
+        frame.pack(fill="x", pady=(0, 4))
         row = ttk.Frame(frame)
         row.pack(fill="x")
         ttk.Checkbutton(
@@ -539,7 +543,7 @@ class InstallerApp:
         self.status.set("准备安装…")
         self._clear_log()
         source_desc = (
-            f"在线 Release {core.ONLINE_TAG}"
+            "在线安装（自动选择稳定版/最新版）"
             if online
             else str(source_dir or archive)
         )

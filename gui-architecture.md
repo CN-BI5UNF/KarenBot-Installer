@@ -94,7 +94,7 @@ KarenBot/Python/GTK 包；只负责安装引导。
 - 已支持：在线 Release 安装（`KarenBot-backend` 核心包 + `KarenBot-GUI|WebUI`
   界面模块）、本地源码/安装包安装、镜像测速、字体下载、快捷方式、自删除、
   Windows/Linux 单文件构建。
-- 在线安装固定使用 `v0.1.1-alpha.1` 配套版本；backend Release 提供核心程序 +
-  后端，界面模块仍从各自仓库下载。
+- 在线安装运行时查询 GitHub Release，优先选择最新稳定版；没有稳定版时选择
+  最新 Release。backend 提供核心程序 + 后端，界面模块仍从各自仓库下载。
 - 待构建：Windows GTK4 便携应用包。安装器已能识别并安装预构建包，但应用
   本身的 Windows 构建链是独立任务。
