@@ -100,6 +100,9 @@ jobs:
       - name: Bundle stripped portable Python
         run: python scripts/fetch_bundled_python.py
 
+      - name: Verify bundled Python resource
+        run: python -c "import karen_install; assert karen_install.has_bundled_python(); print('bundled python ok')"
+
       - name: Build installer (pinned toolchain)
         shell: pwsh
         run: ./scripts/build_windows.ps1

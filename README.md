@@ -182,15 +182,19 @@ Cairo 软件渲染开始，桌面快捷方式也提供“KarenBot GUI (兼容模
 
 `.github/workflows/build-installer.yml` 使用公开仓库的免费标准 runner：
 
-- `windows-2022` → `KarenBot-Installer.exe`（x64，windowed，无黑框，带文件版本信息）；
+- `windows-2022` → `KarenBot-Installer.exe`（x64，windowed，内置 stripped Python，≤50 MiB）；
+- `windows-2022` + gvsbuild GTK4 / CPython 3.14 → `KarenBot-Windows-x64.zip`（GTK4 便携包，Release 资产，不放进 exe）；
 - `ubuntu-24.04` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-x64`（x64，保留 console）；
 - `ubuntu-24.04-arm` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-arm64`（arm64，保留 console）；
 - `workflow_dispatch` 手动触发；PR 只跑 verify；
-- 推送 `v*` tag 时自动把三个产物 + `SHA256SUMS.txt` 附加到 GitHub Release。
+- 推送 `v*` tag 时自动把四个产物 + `SHA256SUMS.txt` 附加到 GitHub Release。
 
 Windows 构建使用 `requirements-build.txt` 固定 PyInstaller 版本，由
 `scripts/build_windows.ps1` 打包、`scripts/verify_windows_artifact.ps1` 校验
-PE x64、文件版本、大小和 SHA256。Linux 在 Ubuntu 22.04 容器内构建，最低
+PE x64、文件版本、大小和 SHA256，并由 `scripts/check_artifact_size.py`
+强制检查 ≤50 MiB。Windows GUI 便携包由
+`scripts/build_windows_bundle.py` 用 gvsbuild GTK4 2026.8.0 +
+CPython 3.14.10 组装，CI 还会用安装器核心实际安装并运行一次启动器。Linux 在 Ubuntu 22.04 容器内构建，最低
 glibc 2.35（Ubuntu 22.04 / Debian 12 及以上）。
 
 **不要在本机直接 PyInstaller 打包**（内存不够时容易失败）；本地只做语法/

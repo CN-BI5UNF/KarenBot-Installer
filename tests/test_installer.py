@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.server
 import io
 import json
+import os
 import socketserver
 import tarfile
 import threading
@@ -748,3 +749,24 @@ def test_windows_bundle_asset_url_points_to_installer_repo():
     assert "CN-BI5UNF/KarenBot-Installer" in url
     assert url.endswith("/KarenBot-Windows-x64.zip")
     assert "/releases/download/v0.1.0/" in url
+
+
+def test_portable_env_supports_root_python_layout(tmp_path):
+    runtime = tmp_path / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    python = runtime / "python.exe"
+    python.write_bytes(b"")
+    env = installer._portable_env(python)
+    assert env["GTK_DATA_PREFIX"] == str(runtime)
+    assert env["XDG_DATA_DIRS"] == str(runtime / "share")
+    assert env["PATH"] == f"{runtime / 'bin'}{os.pathsep}{runtime}"
+
+
+def test_portable_env_supports_bin_python_layout(tmp_path):
+    runtime = tmp_path / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    python = runtime / "bin" / "python.exe"
+    python.write_bytes(b"")
+    env = installer._portable_env(python)
+    assert env["GTK_DATA_PREFIX"] == str(runtime)
+    assert env["PATH"] == str(runtime / "bin")
