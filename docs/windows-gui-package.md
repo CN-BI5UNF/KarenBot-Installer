@@ -2,8 +2,9 @@
 
 KarenBot 安装器不在 Windows 上从源码安装原生 GUI。GTK4 + libadwaita +
 PyGObject 在 Windows 上需要一整套便携运行时，因此由 **本仓库的 GitHub
-Actions（`build-windows-bundle` job）** 用 MSYS2 UCRT64 组装，附加到安装器
-自己的 Release；安装器只负责下载、校验和安装。GUI 仓库不需要发布任何资产。
+Actions（`build-windows-bundle` job）** 用 gvsbuild GTK4 +
+python-build-standalone 组装，附加到安装器自己的 Release；安装器只负责
+下载、校验和安装。GUI 仓库不需要发布任何资产。
 
 资产名固定为：
 
@@ -32,16 +33,17 @@ KarenBot-Windows-x64/
   main.py                          # KarenBot 宿主入口
   windows-bundle.json              # 本次打包的 backend/GUI/Python/GTK 版本
   runtime/
+    python.exe
+    pythonw.exe
+    python314.dll
+    Lib/                           # 标准库 + site-packages（pip、gi、后端依赖）
     bin/
-      python.exe
-      pythonw.exe
-      libgtk-4-1.dll
-      libadwaita-1-0.dll
-      libgobject-2.0-0.dll
+      gtk-4-1.dll
+      adwaita-1-0.dll
+      gobject-2.0-0.dll
       gdk-pixbuf-query-loaders.exe
-      ...                          # 依赖 DLL 闭包
+      ...                          # gvsbuild 的 GTK/Pango/GDK DLL
     lib/
-      python3.XX/                  # 标准库 + site-packages（pip、gi、后端依赖）
       girepository-1.0/
         Gtk-4.0.typelib
         Adw-1.typelib
@@ -51,17 +53,16 @@ KarenBot-Windows-x64/
     share/
       glib-2.0/schemas/            # 含编译后的 gschemas.compiled
       icons/
-      themes/
       gtk-4.0/
-    etc/fonts/                     # 可选的 fontconfig 配置
+    etc/fonts/
 ```
 
 安装器按 `windows-gui-package.json` 检查：
 
 - `required_dirs`: `backend`, `gui`；
 - `python_candidates`: `runtime/python.exe` 等；
-- `required_dlls`: `libgtk-4-1.dll`, `libadwaita-1-0.dll`,
-  `libgobject-2.0-0.dll`；
+- `required_dlls`: `gtk-4-1.dll`, `adwaita-1-0.dll`,
+  `gobject-2.0-0.dll`；
 - `typelib_dirs` + `required_typelibs`: `Gtk-4.0.typelib`, `Adw-1.typelib`。
 
 缺任何一项都会直接失败，并提示按本契约重新打包，避免安装后黑屏/缺字。
@@ -71,29 +72,35 @@ KarenBot-Windows-x64/
 `.github/workflows/build-installer.yml` 的 `build-windows-bundle` job：
 
 1. checkout 本仓库、`KarenBot-backend`、`KarenBot-GUI`（tag 可手动指定）；
-2. `msys2/setup-msys2@v2` 安装 UCRT64 工具链：
+2. 下载并校验 **gvsbuild GTK4 2026.8.0 x64**（MSVC ABI，含 GTK4、
+   libadwaita、PyGObject/PyCairo cp314 wheels 和全部依赖）：
 
-```text
-mingw-w64-ucrt-x86_64-python
-mingw-w64-ucrt-x86_64-python-pip
-mingw-w64-ucrt-x86_64-python-gobject
-mingw-w64-ucrt-x86_64-gtk4
-mingw-w64-ucrt-x86_64-libadwaita
-mingw-w64-ucrt-x86_64-gdk-pixbuf2
-mingw-w64-ucrt-x86_64-librsvg
-mingw-w64-ucrt-x86_64-adwaita-icon-theme
-mingw-w64-ucrt-x86_64-hicolor-icon-theme
-```
+   ```text
+   https://github.com/wingtk/gvsbuild/releases/download/2026.8.0/GTK4_Gvsbuild_2026.8.0_x64.zip
+   SHA256 1f95a92d037f5292da05e6ab1037032ff21ddb7b20d4ac8e83e3674c864c07b0
+   ```
 
-3. 运行 `scripts/build_windows_bundle.sh`：
-   - 用 MSYS2 Python 安装 backend 依赖；
+3. 下载并校验 **python-build-standalone CPython 3.14.10**（stripped install_only）：
+
+   ```text
+   cpython-3.14.10+20261110-x86_64-pc-windows-msvc-install_only_stripped.tar.gz
+   SHA256 32b6cf90a03e2bc15fda8d2ab7ff78c4870f138887d612932650ce764efaab8f
+   ```
+
+4. 运行 `scripts/build_windows_bundle.py`：
+   - 解压 Python 和 gvsbuild；
    - 复制 `backend/` + `gui/`；
-   - 复制 Python 标准库、site-packages、GTK/Adwaita DLL 与依赖闭包；
-   - 复制 typelib、Gio 模块、gdk-pixbuf loaders、icons/themes/schemas；
+   - 安装 gvsbuild 的 `PyGObject` / `PyCairo` wheels；
+   - `pip install` backend 依赖（使用 CPython MSVC ABI，PyPI wheel 均可用，
+     不再受 MSYS2 mingw ABI 限制）；
+   - 复制 GTK DLL、typelib、gdk-pixbuf loaders、Gio 模块、icons、schemas、
+     fontconfig；
+   - 复制 VC++ runtime DLL；
+   - 生成 gdk-pixbuf `loaders.cache`；
    - 写 `windows-bundle.json`；
-   - 在打包环境里做 `import gi`、backend 依赖和 `python -m gui --version` 冒烟；
+   - 冒烟 `import gi`、backend 依赖、`python -m gui --version`；
    - 生成 `KarenBot-Windows-x64.zip`。
-4. 上传 artifact；推送 `v*` tag 时由 `release` job 附加到安装器 Release。
+5. 上传 artifact；推送 `v*` tag 时由 `release` job 附加到安装器 Release。
 
 安装器安装后会按最终安装路径重新生成
 `runtime/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache`，避免打包机绝对路径失效。
@@ -103,7 +110,7 @@ mingw-w64-ucrt-x86_64-hicolor-icon-theme
 安装器生成的 `launch-gui.cmd` / `launch-gui-safe.cmd` 会设置：
 
 ```text
-PATH=<app>\runtime\bin;%PATH%
+PATH=<app>\runtime\bin;<app>\runtime;%PATH%
 XDG_DATA_DIRS=<app>\runtime\share
 GI_TYPELIB_PATH=<app>\runtime\lib\girepository-1.0
 GSETTINGS_SCHEMA_DIR=<app>\runtime\share\glib-2.0\schemas
@@ -129,4 +136,5 @@ FONTCONFIG_FILE=%LOCALAPPDATA%\KarenBot\fonts\fonts.conf
 
 Windows 安装器内置一个 **stripped Python 3.12.16**（约 22 MB），解压到
 `<安装目录>/python-runtime`，用于没有完整全局 Python 的用户；安装器 exe
-成品仍要求 ≤ 50 MiB。GTK4 大运行时不在 exe 内，而是上面的 Release 资产。
+成品由 CI 强制检查 ≤ 50 MiB。GTK4 大运行时不在 exe 内，而是上面的
+Release 资产。

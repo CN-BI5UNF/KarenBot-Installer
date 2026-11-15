@@ -147,7 +147,7 @@ Windows 源码安装不现实：GTK4/PyGObject 需要一整套便携运行时。
 `windows-gui-package.json` 契约校验：
 
 - `runtime/python.exe`；
-- `libgtk-4-1.dll`、`libadwaita-1-0.dll`、`libgobject-2.0-0.dll`；
+- `gtk-4-1.dll`、`adwaita-1-0.dll`、`gobject-2.0-0.dll`；
 - `Gtk-4.0.typelib`、`Adw-1.typelib`；
 - `backend/` + `gui/`。
 

@@ -203,9 +203,9 @@ DEFAULT_WINDOWS_PACKAGE: dict[str, Any] = {
         "python.exe",
     ],
     "required_dlls": [
-        "libgtk-4-1.dll",
-        "libadwaita-1-0.dll",
-        "libgobject-2.0-0.dll",
+        "gtk-4-1.dll",
+        "adwaita-1-0.dll",
+        "gobject-2.0-0.dll",
     ],
     "typelib_dirs": [
         "runtime/lib/girepository-1.0",
@@ -1700,9 +1700,14 @@ def _render_env(mode: str) -> dict[str, str]:
 
 
 def _portable_env(python: Path) -> dict[str, str]:
-    prefix = python.parent.parent
+    if python.parent.name.casefold() == "bin":
+        prefix = python.parent.parent
+        path_dirs = [str(python.parent)]
+    else:
+        prefix = python.parent
+        path_dirs = [str(prefix / "bin"), str(prefix)]
     return {
-        "PATH": str(python.parent),
+        "PATH": os.pathsep.join(path_dirs),
         "XDG_DATA_DIRS": str(prefix / "share"),
         "GI_TYPELIB_PATH": str(prefix / "lib" / "girepository-1.0"),
         "GSETTINGS_SCHEMA_DIR": str(prefix / "share" / "glib-2.0" / "schemas"),
@@ -2298,6 +2303,15 @@ def install(
         if download_fonts:
             stage("下载中文字体…")
             install_fonts(cancel_event=cancel_event)
+        elif IS_WINDOWS:
+            # 即使跳过字体下载，也写一份只追加 Windows Fonts 的配置，
+            # 避免 gvsbuild 自带的 fonts.conf 占位符导致缺字。
+            try:
+                root = _font_dir()
+                root.mkdir(parents=True, exist_ok=True)
+                _write_fontconfig(root)
+            except OSError as exc:
+                log(f"fontconfig 写入失败（可忽略）：{exc}")
         if frontend == "gui":
             stage("应用 GUI 主题包…")
             apply_gui_skin(gui_skin)

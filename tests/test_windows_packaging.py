@@ -16,7 +16,7 @@ def test_windows_gui_package_contract_is_valid():
     assert contract["schema"] == 1
     assert contract["asset_name"] == "KarenBot-Windows-x64.zip"
     assert "runtime/python.exe" in contract["python_candidates"]
-    assert "libgtk-4-1.dll" in contract["required_dlls"]
+    assert "gtk-4-1.dll" in contract["required_dlls"]
     assert "Gtk-4.0.typelib" in contract["required_typelibs"]
     assert "Adw-1.typelib" in contract["required_typelibs"]
     assert contract["runtime_env"]["XDG_DATA_DIRS"] == "runtime/share"
@@ -116,24 +116,24 @@ def test_workflow_builds_windows_bundle_asset():
     )
     assert "build-windows-bundle" in workflow
     assert "KarenBot-Windows-x64.zip" in workflow
-    assert "msys2/setup-msys2@v2" in workflow
-    assert "mingw-w64-ucrt-x86_64-gtk4" in workflow
+    assert "gvsbuild" in workflow
     assert "fetch_bundled_python.py" in workflow
     assert "check_artifact_size.py" in workflow
     assert "--max-mib 50" in workflow
 
 
-def test_windows_bundle_script_uses_msys2_and_gtk():
-    script = (INSTALLER / "scripts" / "build_windows_bundle.sh").read_text(
+def test_windows_bundle_script_uses_gvsbuild_and_standalone_python():
+    script = (INSTALLER / "scripts" / "build_windows_bundle.py").read_text(
         encoding="utf-8"
     )
-    assert "MSYSTEM_PREFIX" in script
-    assert "libgtk-4-1.dll" in script
-    assert "libadwaita-1-0.dll" in script
+    assert "gvsbuild" in script
+    assert "pygobject" in script
+    assert "python.exe" in script
     assert "girepository-1.0" in script
     assert "gdk-pixbuf-query-loaders.exe" in script
     assert "windows-bundle.json" in script
-    assert "-m gui --version" in script
+    assert "-m" in script and "gui" in script
+    assert "KarenBot-Windows-x64" in script
 
 
 def test_spec_can_bundle_vendor_python():

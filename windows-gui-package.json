@@ -12,9 +12,9 @@
     "python.exe"
   ],
   "required_dlls": [
-    "libgtk-4-1.dll",
-    "libadwaita-1-0.dll",
-    "libgobject-2.0-0.dll"
+    "gtk-4-1.dll",
+    "adwaita-1-0.dll",
+    "gobject-2.0-0.dll"
   ],
   "typelib_dirs": [
     "runtime/lib/girepository-1.0",
@@ -25,12 +25,15 @@
     "Adw-1.typelib"
   ],
   "runtime_env": {
-    "PATH": "runtime/bin",
+    "PATH": "runtime/bin;runtime",
     "XDG_DATA_DIRS": "runtime/share",
     "GI_TYPELIB_PATH": "runtime/lib/girepository-1.0",
     "GSETTINGS_SCHEMA_DIR": "runtime/share/glib-2.0/schemas",
     "GTK_DATA_PREFIX": "runtime",
-    "GTK_EXE_PREFIX": "runtime"
+    "GTK_EXE_PREFIX": "runtime",
+    "GDK_PIXBUF_MODULEDIR": "runtime/lib/gdk-pixbuf-2.0/2.10.0/loaders",
+    "GDK_PIXBUF_MODULE_FILE": "runtime/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache",
+    "GIO_MODULE_DIR": "runtime/lib/gio/modules"
   },
   "launcher": "runtime/pythonw.exe -m gui",
   "font_env": "FONTCONFIG_FILE=%LOCALAPPDATA%\\KarenBot\\fonts\\fonts.conf",

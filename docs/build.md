@@ -11,7 +11,7 @@
 |---|---|---|
 | `verify` | `ubuntu-24.04` | 静态检查 + 核心/契约测试 |
 | `build-windows` | `windows-2022` | `KarenBot-Installer.exe` + SHA256（内置 stripped Python，≤50 MiB） |
-| `build-windows-bundle` | `windows-2022` + MSYS2 UCRT64 | `KarenBot-Windows-x64.zip`（GTK4 便携包，Release 资产，不放进 exe） |
+| `build-windows-bundle` | `windows-2022` + gvsbuild GTK4 / Python 3.14 | `KarenBot-Windows-x64.zip`（GTK4 便携包，Release 资产，不放进 exe） |
 | `build-linux-x64` | `ubuntu-24.04` + `ubuntu:22.04` 容器 | `KarenBot-Installer-linux-x64` |
 | `build-linux-arm64` | `ubuntu-24.04-arm` + `ubuntu:22.04` 容器 | `KarenBot-Installer-linux-arm64` |
 | `release` | `ubuntu-latest` | 推送 `v*` tag 时附加到 Release |
@@ -27,7 +27,8 @@ PyInstaller 版本；Windows job 会先用 `scripts/fetch_bundled_python.py`
 - `--check` 退出码；
 - SHA256。
 
-`build-windows-bundle` 在 MSYS2 UCRT64 里组装 GTK4/PyGObject/后端依赖，
+`build-windows-bundle` 下载 gvsbuild GTK4 2026.8.0 和 python-build-standalone
+CPython 3.14.10，安装 gvsbuild 的 PyGObject/PyCairo wheels 与后端依赖，
 产物 `KarenBot-Windows-x64.zip` 作为安装器 Release 资产，不进入安装器 exe；
 详细目录契约见 `docs/windows-gui-package.md`。
 

@@ -482,7 +482,7 @@ def _make_portable_app(root: Path) -> Path:
     (runtime / "bin").mkdir(parents=True)
     (runtime / "lib" / "girepository-1.0").mkdir(parents=True)
     (runtime / "python.exe").write_bytes(b"fake")
-    for name in ("libgtk-4-1.dll", "libadwaita-1-0.dll", "libgobject-2.0-0.dll"):
+    for name in ("gtk-4-1.dll", "adwaita-1-0.dll", "gobject-2.0-0.dll"):
         (runtime / "bin" / name).write_bytes(b"fake")
     for name in ("Gtk-4.0.typelib", "Adw-1.typelib"):
         (runtime / "lib" / "girepository-1.0" / name).write_bytes(b"fake")
@@ -494,7 +494,7 @@ def test_validate_portable_gui_accepts_contract(tmp_path, monkeypatch):
     app = _make_portable_app(tmp_path)
     installer._validate_portable_gui(app, app / "runtime" / "python.exe")
 
-    (app / "runtime" / "bin" / "libgtk-4-1.dll").unlink()
+    (app / "runtime" / "bin" / "gtk-4-1.dll").unlink()
     with pytest.raises(SystemExit):
         installer._validate_portable_gui(app, app / "runtime" / "python.exe")
 

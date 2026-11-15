@@ -222,31 +222,44 @@ jobs:
           ref: ${{ env.GUI_TAG }}
           path: gui-src
 
-      - uses: msys2/setup-msys2@v2
+      - uses: actions/setup-python@v5
         with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-python
-            mingw-w64-ucrt-x86_64-python-pip
-            mingw-w64-ucrt-x86_64-python-gobject
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-gdk-pixbuf2
-            mingw-w64-ucrt-x86_64-librsvg
-            mingw-w64-ucrt-x86_64-adwaita-icon-theme
-            mingw-w64-ucrt-x86_64-hicolor-icon-theme
-            p7zip
-            zip
+          python-version: "3.12"
+
+      - name: Download gvsbuild GTK4 runtime
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:RUNNER_TEMP "GTK4_Gvsbuild_2026.8.0_x64.zip"
+          gh release download 2026.8.0 -R wingtk/gvsbuild `
+            -p "GTK4_Gvsbuild_2026.8.0_x64.zip" -D $env:RUNNER_TEMP --clobber
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($hash -ne "1f95a92d037f5292da05e6ab1037032ff21ddb7b20d4ac8e83e3674c864c07b0") {
+            throw "gvsbuild sha256 mismatch: $hash"
+          }
+
+      - name: Download Python 3.14 portable runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:RUNNER_TEMP "python314.tar.gz"
+          $url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.14.10%2B20261110-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($hash -ne "32b6cf90a03e2bc15fda8d2ab7ff78c4870f138887d612932650ce764efaab8f") {
+            throw "python runtime sha256 mismatch: $hash"
+          }
 
       - name: Build Windows GTK4 portable bundle
-        shell: msys2 {0}
-        env:
-          BACKEND_DIR: backend
-          GUI_DIR: gui-src
-          BACKEND_TAG: ${{ env.BACKEND_TAG }}
-          GUI_TAG: ${{ env.GUI_TAG }}
-        run: bash scripts/build_windows_bundle.sh
+        run: |
+          python scripts/build_windows_bundle.py `
+            --gvsbuild-zip "$env:RUNNER_TEMP\GTK4_Gvsbuild_2026.8.0_x64.zip" `
+            --python-archive "$env:RUNNER_TEMP\python314.tar.gz" `
+            --backend-dir backend --gui-dir gui-src `
+            --out KarenBot-Windows-x64.zip `
+            --backend-tag "$env:BACKEND_TAG" --gui-tag "$env:GUI_TAG"
 
       - name: Show bundle
         shell: pwsh
