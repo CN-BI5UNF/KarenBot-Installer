@@ -158,6 +158,7 @@ def test_spec_trims_tcl_data_and_embeds_icon():
     assert "tzdata" in spec
     assert "tcltest" in spec
     assert "decimal" in spec
+    assert "unicodedata" in spec
     # concurrent.futures 需要 multiprocessing，不能排除。
     assert "不能排除 multiprocessing" in spec
     assert "karenbot.ico" in spec

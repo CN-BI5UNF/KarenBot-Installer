@@ -199,9 +199,21 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
   不能用于可执行资产校验；
 - Windows GUI 便携包必须拿到 GitHub 直连的 SHA256 清单，否则报错中止；
   确认风险时可设置 `KAREN_ALLOW_UNVERIFIED=1`；
-- 人格资产缺少可信哈希时，回退下载主仓库源码包并强制直连；
-- backend/frontend 的 GitHub 自动源码归档没有发布方哈希，安装器会明确提示
-  只能依赖 HTTPS 传输完整性；敏感环境请使用 `--mirror direct`。
+- 人格资产缺少可信哈希时，回退下载主仓库源码包；回退包在无哈希时强制直连；
+- backend/frontend 的 GitHub 自动源码归档没有发布方哈希，安装器默认**优先直连
+  GitHub**，只有直连不可用时才回退第三方镜像；可用下面的环境变量显式提供哈希：
+
+| 环境变量 | 作用 |
+|---|---|
+| `KAREN_BACKEND_SHA256` | 校验 backend 源码归档 |
+| `KAREN_GUI_SHA256` / `KAREN_WEBUI_SHA256` | 校验所选界面模块源码归档 |
+| `KAREN_PERSONAS_SHA256` | 校验人格回退用的主仓库源码归档 |
+| `KAREN_WINDOWS_GUI_SHA256` | 校验自定义/覆盖的 Windows GUI 便携包 |
+| `KAREN_REQUIRE_VERIFIED=1` | 严格模式：缺少上述哈希时直接中止，不允许未校验下载 |
+| `KAREN_ALLOW_UNVERIFIED=1` | 明确允许未校验下载（仅用于测试/可信网络） |
+
+`install.sh` 还支持 `KAREN_INSTALLER_SHA256` 校验 `karen_install.py`；README
+顶部的一行式命令已经同时固定了 commit 和核心哈希。
 
 Release 流水线会为 Windows 便携包、人格包和安装器本体生成 `SHA256SUMS.txt`。
 

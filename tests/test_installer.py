@@ -1124,3 +1124,125 @@ def test_prepare_windows_gui_allows_explicit_unverified_opt_in(
     with pytest.raises(SystemExit) as error:
         installer._prepare_windows_gui_app(tmp_path, cancel_event=None)
     assert "simulated-download-failure" in error.value.message
+
+
+def test_prioritize_direct_moves_working_direct_first():
+    candidates = [
+        {"mirror": "proxy", "url": "https://proxy.test/a"},
+        {"mirror": "direct", "url": "https://github.com/a"},
+        {"mirror": "other", "url": "https://other.test/a"},
+    ]
+    ordered = installer._prioritize_direct(candidates)
+    assert [item["mirror"] for item in ordered] == [
+        "direct",
+        "proxy",
+        "other",
+    ]
+    # 探测失败时 direct 不在列表里，保持原顺序。
+    assert installer._prioritize_direct(candidates[::2]) == candidates[::2]
+
+
+class _DownloadResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.headers: dict[str, str] = {}
+
+    def read(self, _size: int = -1) -> bytes:
+        payload, self.payload = self.payload, b""
+        return payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_download_prefers_direct_candidate(monkeypatch, tmp_path):
+    targets: list[str] = []
+    candidates = [
+        {"mirror": "proxy", "url": "https://proxy.test/asset"},
+        {"mirror": "direct", "url": "https://github.com/asset"},
+    ]
+    monkeypatch.setattr(
+        installer, "rank_mirrors", lambda *_args, **_kwargs: candidates
+    )
+
+    def fake_request(url, **_kwargs):
+        targets.append(url)
+        return url
+
+    monkeypatch.setattr(installer, "_request", fake_request)
+    monkeypatch.setattr(
+        installer.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _DownloadResponse(b"payload"),
+    )
+    installer.download(
+        "https://github.com/asset",
+        tmp_path / "asset.bin",
+        prefer_direct=True,
+    )
+    assert targets[0] == "https://github.com/asset"
+
+
+def test_env_sha256_rejects_malformed_values(monkeypatch):
+    monkeypatch.setenv("KAREN_BACKEND_SHA256", "not-a-hash")
+    with pytest.raises(SystemExit) as error:
+        installer._env_sha256("KAREN_BACKEND_SHA256")
+    assert "SHA256" in error.value.message
+
+
+def test_env_sha256_accepts_lowercase_hash(monkeypatch):
+    digest = "a" * 64
+    monkeypatch.setenv("KAREN_BACKEND_SHA256", digest.upper())
+    assert installer._env_sha256("KAREN_BACKEND_SHA256") == digest
+
+
+def test_require_verified_blocks_unhashed_online_sources(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        installer,
+        "_resolve_online_tags",
+        lambda *_args, **_kwargs: ("v1.0.0", "v1.0.0"),
+    )
+    monkeypatch.setenv("KAREN_REQUIRE_VERIFIED", "1")
+    monkeypatch.delenv("KAREN_BACKEND_SHA256", raising=False)
+    monkeypatch.delenv("KAREN_WEBUI_SHA256", raising=False)
+    with pytest.raises(SystemExit) as error:
+        installer._prepare_online_app(
+            tmp_path,
+            frontend="webui",
+            release_tag="auto",
+            cancel_event=None,
+        )
+    assert "KAREN_REQUIRE_VERIFIED" in error.value.message
+
+
+def test_online_sources_use_explicit_hashes(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        installer,
+        "_resolve_online_tags",
+        lambda *_args, **_kwargs: ("v1.0.0", "v1.0.0"),
+    )
+    backend_hash = "b" * 64
+    frontend_hash = "c" * 64
+    monkeypatch.setenv("KAREN_BACKEND_SHA256", backend_hash)
+    monkeypatch.setenv("KAREN_WEBUI_SHA256", frontend_hash)
+    captured: list[dict] = []
+
+    def fake_download(url, destination, **kwargs):
+        captured.append({"url": url, **kwargs})
+        installer.fail("stop-after-capture")
+
+    monkeypatch.setattr(installer, "download", fake_download)
+    with pytest.raises(SystemExit):
+        installer._prepare_online_app(
+            tmp_path,
+            frontend="webui",
+            release_tag="auto",
+            cancel_event=None,
+        )
+    assert captured[0]["expected_sha256"] == backend_hash
+    assert captured[0]["prefer_direct"] is False
+    assert captured[1]["expected_sha256"] == frontend_hash
+    assert captured[1]["prefer_direct"] is False

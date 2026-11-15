@@ -4,9 +4,9 @@
 Windows 使用 windowed 子系统（无黑框），并写入文件版本信息；Linux 保留
 console，方便 `--check` / `--smoke-test` 和终端启动时看到错误。
 
-体积优化：剔除安装器不使用的 decimal/unittest/pdb，以及 Tcl 的时区库、
-tcltest 和无关的消息表。安装器只使用 Tkinter 基础控件，这些数据对功能
-没有影响，但会拖慢单文件冷启动解压。
+体积优化：剔除安装器不使用的 decimal/unicodedata/unittest/pdb，以及 Tcl
+的时区库、tcltest 和无关的消息表。安装器只使用 Tkinter 基础控件，这些
+数据对功能没有影响，但会拖慢单文件冷启动解压。
 
 Tcl 的 encoding 表全部保留：Windows 的 ANSI 代码页因系统区域设置而异，
 删掉非中文编码会让部分语言的系统上 Tk 初始化失败。
@@ -40,6 +40,7 @@ a = Analysis(
         # 注意：不能排除 multiprocessing —— concurrent.futures 包的 __init__
         # 会无条件导入 ProcessPoolExecutor，冻结后会 ModuleNotFoundError。
         "decimal",
+        "unicodedata",
         "unittest",
         "pdb",
         "_wmi",

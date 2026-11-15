@@ -1311,6 +1311,21 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _prioritize_direct(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把可用的 GitHub 直连排到最前；探测失败的直连不会出现在列表里。"""
+    direct = [
+        item
+        for item in candidates
+        if item.get("mirror") == "direct" or item.get("name") == "direct"
+    ]
+    if not direct:
+        return candidates
+    rest = [item for item in candidates if item not in direct]
+    return direct + rest
+
+
 def download(
     url: str,
     destination: Path,
@@ -1319,6 +1334,7 @@ def download(
     cancel_event: Any | None = None,
     ranked: list[dict[str, Any]] | None = None,
     mirrors: list[dict[str, Any]] | None = None,
+    prefer_direct: bool = False,
 ) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     explicit_ranking = ranked is not None
@@ -1327,6 +1343,8 @@ def download(
         if ranked is None:
             stage(f"自动测速并选择镜像：{url}")
             candidates = rank_mirrors(url, mirrors, refresh=attempt > 0)
+            if prefer_direct:
+                candidates = _prioritize_direct(candidates)
         else:
             candidates = ranked
         if not candidates:
@@ -1990,6 +2008,21 @@ def _unverified_allowed() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _require_verified() -> bool:
+    value = os.environ.get("KAREN_REQUIRE_VERIFIED", "").strip().casefold()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _env_sha256(name: str) -> str:
+    """读取调用方显式提供的 SHA256；格式错误直接中止，避免静默跳过校验。"""
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return ""
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        fail(f"{name} 必须是 64 位十六进制 SHA256，当前值：{value}")
+    return value
+
+
 def _windows_bundle_tag(
     bundle_tag: str, cancel_event: Any | None
 ) -> tuple[str, str]:
@@ -2080,6 +2113,7 @@ def ensure_personas(
                 WINDOWS_BUNDLE_REPO, tag, require_trusted=True
             )
             expected = checksums.get(PERSONAS_ASSET_NAME, "")
+            fallback_expected = _env_sha256("KAREN_PERSONAS_SHA256")
             asset_ok = False
             force_direct = not expected and not _unverified_allowed()
             if checksums and not expected:
@@ -2120,15 +2154,25 @@ def ensure_personas(
                     force_direct = True
                     _remove_tree(extract_root)
             if not asset_ok:
+                if _require_verified() and not fallback_expected:
+                    fail(
+                        "KAREN_REQUIRE_VERIFIED=1：人格资产没有可信 SHA256，"
+                        "且未设置 KAREN_PERSONAS_SHA256，拒绝未校验的主仓库源码包。"
+                    )
                 archive = downloads / "karenbot-main.tar.gz"
                 ranked = (
                     _direct_ranking(PERSONAS_BRANCH_ARCHIVE)
-                    if force_direct
+                    if (
+                        force_direct
+                        and not fallback_expected
+                        and not _unverified_allowed()
+                    )
                     else None
                 )
                 download(
                     PERSONAS_BRANCH_ARCHIVE,
                     archive,
+                    expected_sha256=fallback_expected,
                     cancel_event=cancel_event,
                     ranked=ranked,
                 )
@@ -2168,16 +2212,29 @@ def _prepare_windows_gui_app(
             bundle_tag, cancel_event
         )
         asset_url = _windows_gui_asset_url(bundle_version)
-    expected_sha256 = ""
+    expected_sha256 = _env_sha256("KAREN_WINDOWS_GUI_SHA256")
+    if override and expected_sha256:
+        log(f"自定义 Windows GUI 包 SHA256：{expected_sha256}")
+    if override and _require_verified() and not expected_sha256:
+        fail(
+            "KAREN_REQUIRE_VERIFIED=1：自定义 Windows GUI 包缺少 "
+            "KAREN_WINDOWS_GUI_SHA256。"
+        )
     if not override:
         checksums = fetch_release_checksums(
             WINDOWS_BUNDLE_REPO,
             bundle_version,
             require_trusted=True,
         )
-        expected_sha256 = checksums.get(asset_name, "")
+        expected_sha256 = expected_sha256 or checksums.get(asset_name, "")
         if expected_sha256:
             log(f"Windows GUI 便携包 SHA256：{expected_sha256}")
+        elif _require_verified():
+            fail(
+                "KAREN_REQUIRE_VERIFIED=1：Windows GUI 便携包没有可信 SHA256。\n"
+                "请设置 KAREN_WINDOWS_GUI_SHA256，或从 GitHub 直连获取 "
+                "SHA256SUMS.txt 后重试。"
+            )
         elif _unverified_allowed():
             log(
                 "警告：Release 未提供可信 SHA256，"
@@ -2305,24 +2362,43 @@ def _prepare_online_app(
     frontend_url = _online_archive_url(frontend_repo, frontend_tag)
     downloads = staging / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
-    # GitHub 自动生成的 tag 源码归档没有发布方签名/哈希；这里如实提示，
-    # 以免用户误以为源码包和 Windows 便携包一样经过 SHA256 校验。
-    log(
-        "提示：backend/frontend 使用 GitHub 源码归档，"
-        "上游未提供发布哈希，安装器只能依赖 HTTPS 传输完整性。"
-    )
+    backend_expected = _env_sha256("KAREN_BACKEND_SHA256")
+    frontend_expected = _env_sha256(f"KAREN_{frontend.upper()}_SHA256")
+    if _require_verified() and (not backend_expected or not frontend_expected):
+        fail(
+            "KAREN_REQUIRE_VERIFIED=1：backend/frontend 源码归档缺少 SHA256。\n"
+            "请设置 KAREN_BACKEND_SHA256 和 "
+            f"KAREN_{frontend.upper()}_SHA256 后重试。"
+        )
+    if not backend_expected or not frontend_expected:
+        # GitHub 自动生成的 tag 源码归档没有发布方签名/哈希。默认优先直连，
+        # 直连不可用时才回退第三方镜像；敏感环境应显式提供哈希。
+        log(
+            "警告：backend/frontend 使用 GitHub 源码归档，上游未提供发布哈希。"
+            "安装器会优先直连 GitHub，直连不可用时才回退第三方镜像；"
+            "可用 KAREN_BACKEND_SHA256 / KAREN_GUI_SHA256 / KAREN_WEBUI_SHA256 "
+            "指定哈希，或设置 KAREN_REQUIRE_VERIFIED=1 强制校验。"
+        )
     stage("自动测速并下载 backend 核心包…")
     backend_archive = download(
         backend_url,
         downloads / "backend.tar.gz",
+        expected_sha256=backend_expected,
         cancel_event=cancel_event,
+        prefer_direct=(
+            not backend_expected and not _unverified_allowed()
+        ),
     )
     _check_cancel(cancel_event)
     stage(f"自动测速并下载 {frontend.upper()} 界面模块…")
     frontend_archive = download(
         frontend_url,
         downloads / "frontend.tar.gz",
+        expected_sha256=frontend_expected,
         cancel_event=cancel_event,
+        prefer_direct=(
+            not frontend_expected and not _unverified_allowed()
+        ),
     )
     _check_cancel(cancel_event)
 
