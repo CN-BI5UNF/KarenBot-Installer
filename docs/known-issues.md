@@ -151,3 +151,55 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 - 安装前和替换前各检查一次 `app/` 下的运行中进程和 exe/dll 占用；
 - 删除 `app.old` 失败时给出具体路径并中止，不再静默忽略；
 - 替换失败会提示先关闭 KarenBot，避免下载几百 MB 后才崩溃。
+
+## 14. 取消/断电后 venv 半残，重装一直失败
+
+**现象**：创建 venv 阶段取消或断电后，`<安装目录>/venv` 目录还在，但
+`python.exe`/`pip` 不完整；再次安装时 `_create_venv` 只判断目录存在就复用，
+随后 `pip install` 必定失败。
+
+**处理**：托管 venv 在复用前执行完整性探测（能运行并导入 `ssl`/`sqlite3`）；
+不完整则自动删除重建。用户通过 `--venv` 显式指定的环境不会被自动删除。
+
+## 15. 中文用户名下 fontconfig 启动慢/缺字
+
+**现象**：`%LOCALAPPDATA%\KarenBot\fonts` 路径含中文，libfontconfig 读取
+`FONTCONFIG_FILE` 或写缓存异常，GTK 每次启动重新扫描字体。
+
+**处理**：Windows 下检测字体目录是否为纯 ASCII；不是则改用
+`<安装目录>\fonts`（安装目录本身已通过 ASCII 校验），启动器随之设置新的
+`FONTCONFIG_FILE`。
+
+## 16. 镜像返回 HTTP 200 错误页却被测速当成“快”
+
+**现象**：公共反代限流时返回 `{"error": ...}` 或 `Too Many Requests`，
+体积小、延迟低，测速评分反而很高，真正下载才失败。
+
+**处理**：探测时校验 HTTP 状态码、`Content-Type`、文件魔数（gzip/zip/exe/
+字体等）和错误文本；`.tar.gz` 必须是 gzip 魔数，`.zip/.whl` 必须是 `PK`。
+
+## 17. 下载到 90% 断线后从头开始
+
+**处理**：失败/取消时保留 `.part`；下一次尝试发送 `Range: bytes=<已有>-`，
+服务端返回 206 时追加写入，返回 200 时覆盖重下；最终仍以 SHA256 校验。
+
+## 18. 无哈希源码包静默走第三方镜像
+
+**处理**：backend/frontend 源码归档没有发布哈希时默认仅 GitHub 直连；
+GUI 首次在线安装会弹窗让用户选择“允许镜像加速 / 仅直连 / 取消”，CLI 可用
+`--allow-unverified` 或 `KAREN_ALLOW_UNVERIFIED=1` 放行，也可用
+`KAREN_BACKEND_SHA256` / `KAREN_GUI_SHA256` / `KAREN_WEBUI_SHA256` 提供哈希。
+
+## 19. 安装完成前关闭窗口导致旧版本不回滚
+
+**现象**：升级到一半点右上角关闭，daemon 线程被直接结束，`app.old` 没有
+换回 `app`。
+
+**处理**：关闭时先请求取消，然后每 100ms 等待工作线程完成回滚和 staging
+清理；最多等 30 秒才强制退出。
+
+## 20. Windows 杀软误报/启动慢
+
+**处理**：进程占用检测改用 Toolhelp32 快照（ctypes），快捷方式清理直接
+删除 `.lnk`，不再为这两件事启动 PowerShell；创建快捷方式合并为一次
+PowerShell 调用，并移除了 `-ExecutionPolicy Bypass`。

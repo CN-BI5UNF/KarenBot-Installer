@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.server
 import io
 import json
@@ -119,7 +120,7 @@ def test_install_local_source_builds_launchers(tmp_path):
 
 def test_install_fonts_writes_fontconfig(tmp_path, monkeypatch):
     root = tmp_path / "fonts"
-    monkeypatch.setattr(installer, "_font_dir", lambda: root)
+    monkeypatch.setattr(installer, "_font_dir", lambda *_args, **_kwargs: root)
 
     def fake_download(url, destination, expected_sha256="", **_kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -439,7 +440,7 @@ def test_launcher_sets_fontconfig_and_renderer(tmp_path, monkeypatch):
     font_root = tmp_path / "fonts"
     font_root.mkdir()
     (font_root / "fonts.conf").write_text("<fontconfig/>", encoding="utf-8")
-    monkeypatch.setattr(installer, "_font_dir", lambda: font_root)
+    monkeypatch.setattr(installer, "_font_dir", lambda *_args, **_kwargs: font_root)
 
     source = tmp_path / "source"
     (source / "backend").mkdir(parents=True)
@@ -1030,10 +1031,13 @@ def test_windows_shortcut_uses_packaged_icon(tmp_path, monkeypatch):
         lambda command, **_kwargs: captured.append(command),
     )
     installer._install_windows_shortcut(install_dir, "gui")
-    assert captured
+    assert len(captured) == 1
+    assert "-ExecutionPolicy" not in captured[0]
     script = captured[0][-1]
     assert "IconLocation" in script
     assert "karenbot.ico" in script
+    assert "KarenBot GUI.lnk" in script
+    assert "KarenBot GUI (兼容模式).lnk" in script
 
 
 def test_windows_self_delete_retries_and_verifies():
@@ -1063,7 +1067,7 @@ def test_uninstall_removes_install_artifacts(tmp_path, monkeypatch):
     skin_dir = tmp_path / "config" / "karen-gui"
     skin_dir.mkdir(parents=True)
     (skin_dir / "skin").write_text("karen\n", encoding="utf-8")
-    monkeypatch.setattr(installer, "_font_dir", lambda: font_root)
+    monkeypatch.setattr(installer, "_font_dir", lambda *_args, **_kwargs: font_root)
     monkeypatch.setattr(installer, "_gui_skin_dirs", lambda: [skin_dir])
     monkeypatch.setattr(installer, "_remove_shortcuts", lambda: None)
 
@@ -1249,6 +1253,242 @@ def test_online_sources_use_explicit_hashes(monkeypatch, tmp_path):
             cancel_event=None,
         )
     assert captured[0]["expected_sha256"] == backend_hash
-    assert captured[0]["prefer_direct"] is False
+    assert captured[0]["ranked"] is None
     assert captured[1]["expected_sha256"] == frontend_hash
-    assert captured[1]["prefer_direct"] is False
+    assert captured[1]["ranked"] is None
+
+
+# ---------------------------------------------------------------------------
+# 审计修复：venv 自愈、字体路径、测速校验、断点续传、无哈希源码策略
+# ---------------------------------------------------------------------------
+
+
+def test_create_venv_rebuilds_broken_managed_env(tmp_path, monkeypatch):
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("broken", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(installer.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        installer,
+        "run",
+        lambda command, **_kwargs: calls.append(command),
+    )
+    installer._create_venv(
+        venv,
+        frontend="webui",
+        base_python=Path(sys.executable),
+        managed=True,
+    )
+    assert calls
+    assert calls[0][:3] == [sys.executable, "-m", "venv"]
+    assert not (venv / "bin" / "python").exists()
+
+
+def test_create_venv_does_not_delete_explicit_env(tmp_path, monkeypatch):
+    venv = tmp_path / "custom-venv"
+    venv.mkdir()
+    marker = venv / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(installer, "_venv_is_usable", lambda _venv: False)
+    monkeypatch.setattr(
+        installer,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("不应重建显式 venv"),
+    )
+    installer._create_venv(
+        venv,
+        frontend="webui",
+        base_python=Path(sys.executable),
+        managed=False,
+    )
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_font_dir_falls_back_for_non_ascii_localappdata(monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\张三\AppData\Local")
+    install_dir = Path(r"C:\KarenBot")
+    assert installer._font_dir(install_dir) == install_dir / "fonts"
+    assert installer._font_dir() == (
+        Path(installer._ascii_install_suggestion()) / "fonts"
+    )
+
+
+def test_probe_payload_rejects_html_archive():
+    problem = installer._probe_payload_problem(
+        "https://mirror.test/KarenBot-Windows-x64.zip",
+        b"<!doctype html><html>rate limit</html>",
+        "text/html",
+    )
+    assert problem and "zip" in problem
+
+
+def test_probe_payload_accepts_gzip_archive():
+    assert (
+        installer._probe_payload_problem(
+            "https://mirror.test/backend.tar.gz",
+            b"\x1f\x8b\x08" + b"x" * 300,
+            "text/html",
+        )
+        is None
+    )
+
+
+def test_probe_payload_rejects_plain_text_error():
+    problem = installer._probe_payload_problem(
+        "https://mirror.test/asset.bin",
+        b"Too Many Requests" * 40,
+        "text/plain",
+    )
+    assert problem and "错误文本" in problem
+
+
+def test_default_probe_url_matches_windows_asset(monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    windows = installer.default_probe_url("gui")
+    assert "/releases/latest/download/" in windows
+    assert installer.windows_gui_asset_name() in windows
+    assert installer.default_probe_url("webui") == installer.DEFAULT_PROBE_URL
+
+
+def _capture_online_sources(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        installer,
+        "_resolve_online_tags",
+        lambda *_args, **_kwargs: ("v1.0.0", "v1.0.0"),
+    )
+    captured: list[dict] = []
+
+    def fake_download(url, destination, **kwargs):
+        captured.append({"url": url, **kwargs})
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"fake")
+        return destination
+
+    monkeypatch.setattr(installer, "download", fake_download)
+    monkeypatch.setattr(
+        installer,
+        "extract_archive",
+        lambda *_args, **_kwargs: installer.fail("stop-after-capture"),
+    )
+    with pytest.raises(SystemExit):
+        installer._prepare_online_app(
+            tmp_path,
+            frontend="webui",
+            release_tag="auto",
+            cancel_event=None,
+        )
+    return captured
+
+
+def test_unverified_online_sources_default_to_direct(monkeypatch, tmp_path):
+    monkeypatch.delenv(installer.UNVERIFIED_ENV, raising=False)
+    monkeypatch.delenv("KAREN_BACKEND_SHA256", raising=False)
+    monkeypatch.delenv("KAREN_WEBUI_SHA256", raising=False)
+    captured = _capture_online_sources(monkeypatch, tmp_path)
+    assert captured[0]["ranked"][0]["mirror"] == "direct"
+    assert captured[1]["ranked"][0]["mirror"] == "direct"
+
+
+def test_unverified_online_sources_use_mirrors_after_opt_in(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(installer.UNVERIFIED_ENV, "1")
+    monkeypatch.delenv("KAREN_BACKEND_SHA256", raising=False)
+    monkeypatch.delenv("KAREN_WEBUI_SHA256", raising=False)
+    captured = _capture_online_sources(monkeypatch, tmp_path)
+    assert captured[0]["ranked"] is None
+    assert captured[1]["ranked"] is None
+
+
+class _RangeResponse:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        status: int = 206,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self._chunks = list(chunks)
+        self.status = status
+        self.headers = headers or {}
+
+    def read(self, _size: int = -1) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_download_resumes_partial_file(monkeypatch, tmp_path):
+    payload = b"0123456789abcdef"
+    destination = tmp_path / "asset.bin"
+    part = destination.with_name(destination.name + ".part")
+    part.write_bytes(payload[:8])
+    requests: list[dict] = []
+
+    def fake_request(url, **kwargs):
+        requests.append(kwargs)
+        return url
+
+    monkeypatch.setattr(installer, "_request", fake_request)
+    monkeypatch.setattr(
+        installer.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _RangeResponse(
+            [payload[8:]],
+            status=206,
+            headers={
+                "Content-Range": f"bytes 8-{len(payload) - 1}/{len(payload)}",
+                "Content-Length": str(len(payload) - 8),
+            },
+        ),
+    )
+    installer.download(
+        "https://mirror.test/asset.bin",
+        destination,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+        ranked=installer._direct_ranking("https://mirror.test/asset.bin"),
+    )
+    assert destination.read_bytes() == payload
+    assert requests and requests[0]["headers"] == {"Range": "bytes=8-"}
+    assert not part.exists()
+
+
+def test_download_keeps_partial_file_for_next_mirror(monkeypatch, tmp_path):
+    destination = tmp_path / "asset.bin"
+    monkeypatch.setattr(
+        installer,
+        "_request",
+        lambda url, **_kwargs: url,
+    )
+    monkeypatch.setattr(
+        installer.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _RangeResponse(
+            [b"01234567"],
+            status=200,
+            headers={"Content-Length": "16"},
+        ),
+    )
+    with pytest.raises(SystemExit):
+        installer.download(
+            "https://mirror.test/asset.bin",
+            destination,
+            ranked=installer._direct_ranking(
+                "https://mirror.test/asset.bin"
+            ),
+        )
+    part = destination.with_name(destination.name + ".part")
+    assert part.read_bytes() == b"01234567"
+
+
+def test_windows_process_scan_uses_ctypes_without_powershell():
+    source = Path(installer.__file__).read_text(encoding="utf-8")
+    assert "CreateToolhelp32Snapshot" in source
+    assert "QueryFullProcessImageNameW" in source
+    assert "-ExecutionPolicy" not in source

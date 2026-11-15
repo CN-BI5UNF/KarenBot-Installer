@@ -17,6 +17,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -162,6 +163,14 @@ class InstallerApp:
         self._config_widgets: list[tuple[tk.Widget, str]] = []
         self._mirror_rows: dict[str, str] = {}
         self._mirror_apply_button: ttk.Button | None = None
+        self._closing = False
+        self._close_deadline = 0.0
+        self._log_file = Path(tempfile.gettempdir()) / "karenbot-install.log"
+        self._log_handle = None
+        try:
+            self._log_handle = self._log_file.open("w", encoding="utf-8")
+        except OSError:
+            self._log_handle = None
         self._build_vars()
         self._build_ui()
         self._update_source_state()
@@ -190,12 +199,13 @@ class InstallerApp:
         self.render_mode = tk.StringVar(value="auto")
         self.pypi_mirror = tk.StringVar(value="auto")
         self.github_mirror = tk.StringVar(value="auto")
-        self.mirror_url = tk.StringVar(value=DEFAULT_PROBE_URL)
+        self.mirror_url = tk.StringVar(value=core.default_probe_url("gui"))
         self.status = tk.StringVar(value="就绪")
         self.progress_step = tk.StringVar(value="准备安装…")
         # 进度弹窗单独一行显示下载速度/ETA，避免和阶段标题重复。
         self.dialog_status = tk.StringVar(value="")
         self.skin_note = tk.StringVar(value="")
+        self.log_hint = tk.StringVar(value=f"自动保存：{self._log_file}")
 
     def _build_ui(self) -> None:
         # 不锁死高度：Windows 高 DPI / 不同字体度量下固定 56px 会把
@@ -285,6 +295,19 @@ class InstallerApp:
         self._build_options_section(self.config_inner)
         self._build_appearance_section(self.config_inner)
 
+        log_tools = ttk.Frame(log_tab)
+        log_tools.pack(fill="x", pady=(0, 4))
+        ttk.Button(
+            log_tools, text="复制日志", command=self._copy_log
+        ).pack(side="left")
+        ttk.Button(
+            log_tools, text="保存日志…", command=self._save_log
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            log_tools,
+            textvariable=self.log_hint,
+            foreground="#64748b",
+        ).pack(side="left", padx=(8, 0))
         self.log_text = ScrolledText(
             log_tab, height=12, wrap="word", state="disabled"
         )
@@ -614,7 +637,20 @@ class InstallerApp:
             radio.configure(state=state)
         for radio in self._render_radios:
             radio.configure(state=state)
+        self._sync_probe_url()
         self._update_skin_note()
+
+    def _sync_probe_url(self) -> None:
+        """界面切换时把默认测速 URL 对准实际要下载的资产类型。"""
+        current = self.mirror_url.get().strip()
+        known = {
+            "",
+            core.DEFAULT_PROBE_URL,
+            core.default_probe_url("gui"),
+            core.default_probe_url("webui"),
+        }
+        if current in known:
+            self.mirror_url.set(core.default_probe_url(self.frontend.get()))
 
     def _update_skin_note(self) -> None:
         if self.frontend.get() != "gui":
@@ -664,11 +700,58 @@ class InstallerApp:
         self.log_text.insert("end", line + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+        if self._log_handle is not None:
+            try:
+                self._log_handle.write(line + "\n")
+                self._log_handle.flush()
+            except OSError:
+                try:
+                    self._log_handle.close()
+                except OSError:
+                    pass
+                self._log_handle = None
 
     def _clear_log(self) -> None:
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
+        if self._log_handle is not None:
+            try:
+                self._log_handle.seek(0)
+                self._log_handle.truncate()
+                self._log_handle.flush()
+            except OSError:
+                pass
+
+    def _log_text_value(self) -> str:
+        return self.log_text.get("1.0", "end-1c")
+
+    def _copy_log(self) -> None:
+        text = self._log_text_value()
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except tk.TclError as exc:
+            messagebox.showerror("复制失败", str(exc))
+            return
+        self.status.set("日志已复制到剪贴板")
+
+    def _save_log(self) -> None:
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="保存安装日志",
+            defaultextension=".log",
+            initialfile="karenbot-install.log",
+            filetypes=[("日志文件", "*.log"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(self._log_text_value(), encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        self.status.set(f"日志已保存：{path}")
 
     def _set_running(self, running: bool) -> None:
         self._running = running
@@ -691,6 +774,9 @@ class InstallerApp:
             for radio in self._skin_radios + self._render_radios:
                 radio.configure(state="disabled")
             self.uninstall_button.configure(state="disabled")
+            self.open_button.configure(state="disabled")
+            self.launch_button.configure(state="disabled")
+            self.launch_safe_button.configure(state="disabled")
         else:
             self._update_source_state()
             self._update_appearance_state()
@@ -710,15 +796,39 @@ class InstallerApp:
             self.uninstall_button.configure(state="disabled")
             return
         raw = self.install_dir.get().strip()
+        install_dir = Path(raw).expanduser() if raw else None
         enabled = False
-        if raw:
+        if install_dir is not None:
             try:
-                enabled = core._looks_like_karenbot_install(
-                    Path(raw).expanduser()
-                )
+                enabled = core._looks_like_karenbot_install(install_dir)
             except (OSError, ValueError):
                 enabled = False
         self.uninstall_button.configure(state="normal" if enabled else "disabled")
+        if not enabled or install_dir is None:
+            self._installed_dir = None
+            self.open_button.configure(state="disabled")
+            self.launch_button.configure(state="disabled")
+            self.launch_safe_button.configure(state="disabled")
+            return
+        marker = core.read_install_marker(install_dir) or {}
+        frontend = str(marker.get("frontend") or "").casefold()
+        if frontend not in {"gui", "webui"}:
+            try:
+                modules = json.loads(
+                    (install_dir / "app" / "modules.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                frontend = str(modules.get("frontend") or "gui").casefold()
+            except (OSError, ValueError):
+                frontend = "gui"
+        if frontend not in {"gui", "webui"}:
+            frontend = "gui"
+        self._installed_dir = install_dir
+        self._installed_frontend = frontend
+        self.open_button.configure(state="normal")
+        self.launch_button.configure(state="normal")
+        self.launch_safe_button.configure(state="normal")
 
     def _queue_log(self, line: str) -> None:
         self._queue.put(("log", line))
@@ -728,6 +838,47 @@ class InstallerApp:
 
     def _queue_status(self, message: str) -> None:
         self._queue.put(("stage", message))
+
+    def _confirm_unverified_source(
+        self, *, online: bool, frontend: str
+    ) -> bool:
+        """无发布哈希的源码包只允许直连；使用第三方镜像必须显式确认。"""
+        if not online:
+            return True
+        if os.name == "nt" and frontend == "gui":
+            # Windows 便携包本身强制要求可信 SHA256，不需要这个提示。
+            return True
+        enabled = os.environ.get(core.UNVERIFIED_ENV, "").strip().casefold()
+        if enabled in {"1", "true", "yes", "on"}:
+            return True
+        required = os.environ.get(
+            "KAREN_REQUIRE_VERIFIED", ""
+        ).strip().casefold()
+        if required in {"1", "true", "yes", "on"}:
+            # 核心会给出明确的缺少哈希错误。
+            return True
+        backend_hash = os.environ.get("KAREN_BACKEND_SHA256", "").strip()
+        frontend_hash = os.environ.get(
+            f"KAREN_{frontend.upper()}_SHA256", ""
+        ).strip()
+        if backend_hash and frontend_hash:
+            return True
+        answer = messagebox.askyesnocancel(
+            "源码包没有发布哈希",
+            "backend/frontend 使用 GitHub 自动源码归档，上游没有发布 SHA256。\n\n"
+            "【是】允许第三方镜像加速（快，但镜像可能篡改源码）\n"
+            "【否】仅使用 GitHub 直连（更安全，部分网络可能连不上）\n"
+            "【取消】中止安装\n\n"
+            "也可以通过 KAREN_BACKEND_SHA256 / "
+            f"KAREN_{frontend.upper()}_SHA256 提供哈希。",
+        )
+        if answer is None:
+            return False
+        if answer:
+            os.environ[core.UNVERIFIED_ENV] = "1"
+        else:
+            os.environ.pop(core.UNVERIFIED_ENV, None)
+        return True
 
     def _start_install(self) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -795,9 +946,13 @@ class InstallerApp:
             ):
                 return
 
+        if not self._confirm_unverified_source(online=online, frontend=frontend):
+            return
         self._installed_dir = None
         self._installed_frontend = frontend
         self._delete_on_close = False
+        self._closing = False
+        self._close_deadline = 0.0
         self._cancel.clear()
         self._progress_started = None
         self._progress_done = 0
@@ -811,6 +966,7 @@ class InstallerApp:
         self.status.set("准备安装…")
         self._open_progress_dialog()
         self._clear_log()
+        self.notebook.select(1)
         source_desc = (
             "在线安装（自动选择稳定版/最新版）"
             if online
@@ -976,17 +1132,18 @@ class InstallerApp:
         self.open_button.configure(state="normal")
         self.launch_button.configure(state="normal")
         self.launch_safe_button.configure(state="normal")
-        self._update_uninstall_state()
+        self.uninstall_button.configure(state="normal")
         self._log_line(f"安装完成：{path}")
         if self.self_delete.get() and getattr(sys, "frozen", False):
             self._delete_on_close = True
             self._log_line("关闭安装器窗口后会自删除。")
         target = core.launch_target(path, self._installed_frontend)
-        messagebox.showinfo(
-            "安装完成",
-            f"KarenBot 已安装到：\n{path}\n\n启动入口：\n{target}\n\n"
-            "如果启动后黑屏/崩溃，请使用“兼容模式启动”。",
-        )
+        if not self._closing:
+            messagebox.showinfo(
+                "安装完成",
+                f"KarenBot 已安装到：\n{path}\n\n启动入口：\n{target}\n\n"
+                "如果启动后黑屏/崩溃，请使用“兼容模式启动”。",
+            )
 
     def _on_error(self, message: str) -> None:
         self._worker = None
@@ -995,7 +1152,8 @@ class InstallerApp:
         self.progress.stop()
         self.status.set("安装失败")
         self._log_line("错误：" + message)
-        messagebox.showerror("安装失败", message[:2000])
+        if not self._closing:
+            messagebox.showerror("安装失败", message[:2000])
 
     def _on_cancelled(self) -> None:
         self._worker = None
@@ -1032,6 +1190,8 @@ class InstallerApp:
         ):
             return
         self._cancel.clear()
+        self._closing = False
+        self._close_deadline = 0.0
         self._progress_started = None
         self._progress_done = 0
         self._progress_total = None
@@ -1044,6 +1204,7 @@ class InstallerApp:
         self.status.set("准备卸载…")
         self._open_progress_dialog()
         self._clear_log()
+        self.notebook.select(1)
         self._log_line(f"卸载：{install_dir}")
         core.set_log_sink(self._queue_log)
         core.set_progress_sink(self._queue_progress)
@@ -1082,8 +1243,10 @@ class InstallerApp:
         self.open_button.configure(state="disabled")
         self.launch_button.configure(state="disabled")
         self.launch_safe_button.configure(state="disabled")
+        self.uninstall_button.configure(state="disabled")
         self._log_line(f"已卸载：{path}")
-        messagebox.showinfo("卸载完成", f"KarenBot 已卸载：\n{path}")
+        if not self._closing:
+            messagebox.showinfo("卸载完成", f"KarenBot 已卸载：\n{path}")
 
     def _cancel_install(self) -> None:
         if self._worker is None or not self._worker.is_alive():
@@ -1154,16 +1317,25 @@ class InstallerApp:
             justify="left",
             wraplength=540,
         ).pack(anchor="w", pady=(10, 12))
+        actions = ttk.Frame(body)
+        actions.pack(fill="x", pady=(10, 0))
         ttk.Button(
-            body, text="取消安装", command=self._cancel_install
-        ).pack(anchor="e")
+            actions, text="查看日志", command=self._show_log_tab
+        ).pack(side="left")
+        ttk.Button(
+            actions, text="取消安装", command=self._cancel_install
+        ).pack(side="right")
         window.update_idletasks()
         height = max(230, window.winfo_reqheight())
         window.minsize(width, height)
         window.geometry(f"{width}x{height}+{x}+{y}")
         self._progress_window = window
+
+    def _show_log_tab(self) -> None:
         try:
-            window.grab_set()
+            self.root.deiconify()
+            self.root.lift()
+            self.notebook.select(1)
         except tk.TclError:
             pass
 
@@ -1389,16 +1561,55 @@ class InstallerApp:
             messagebox.showerror("启动失败", str(exc))
 
     def _on_close(self) -> None:
+        if self._closing:
+            return
         if self._worker is not None and self._worker.is_alive():
             if not messagebox.askyesno(
                 "任务进行中",
-                "安装/卸载仍在进行，确定退出？未完成的临时文件会保留。",
+                "安装/卸载仍在进行，确定退出？\n"
+                "安装器会先请求取消，并等待回滚和临时文件清理完成。",
             ):
                 return
+            self._closing = True
+            self._close_deadline = time.monotonic() + 30.0
             self._cancel.set()
+            self.cancel_button.configure(state="disabled")
+            self.progress_step.set("正在取消并清理临时文件…")
+            self.status.set("正在取消并清理…")
+            self._log_line("正在等待后台任务结束并回滚…")
+            self._wait_worker_then_close()
+            return
+        self._finish_close()
+
+    def _wait_worker_then_close(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            if time.monotonic() < self._close_deadline:
+                self.root.after(100, self._wait_worker_then_close)
+                return
+            self._log_line(
+                "后台任务 30 秒内未退出，强制关闭；临时文件可能残留。"
+            )
+            self._finish_close(force=True)
+            return
+        self._finish_close()
+
+    def _finish_close(self, force: bool = False) -> None:
+        if (
+            not force
+            and self._worker is not None
+            and self._worker.is_alive()
+        ):
+            return
+        self._closing = True
         self._close_progress_dialog()
         if self._delete_on_close:
             core.self_delete_installer()
+        if self._log_handle is not None:
+            try:
+                self._log_handle.close()
+            except OSError:
+                pass
+            self._log_handle = None
         self.root.destroy()
 
 

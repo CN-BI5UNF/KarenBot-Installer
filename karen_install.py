@@ -31,12 +31,13 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, NoReturn
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape as xml_escape
 
@@ -107,6 +108,16 @@ PERSONAS_BRANCH_ARCHIVE = (
 DEFAULT_PROBE_URL = (
     f"https://github.com/{ONLINE_BACKEND_REPO}/archive/refs/heads/main.tar.gz"
 )
+
+
+def default_probe_url(frontend: str = "gui") -> str:
+    """Windows GUI 实际下载的是 Release 资产，测速应命中同一类节点。"""
+    if IS_WINDOWS and frontend == "gui":
+        return (
+            f"https://github.com/{WINDOWS_BUNDLE_REPO}/releases/latest/"
+            f"download/{windows_gui_asset_name()}"
+        )
+    return DEFAULT_PROBE_URL
 
 GUI_SKINS = {
     "karen": "Karen 暖色（内置，最接近 Linux 目标机）",
@@ -578,6 +589,100 @@ def ensure_writable_dir(path: Path, label: str = "安装目录") -> None:
         )
 
 
+def _windows_processes_under(root_text: str) -> list[str]:
+    """用 Toolhelp32 快照枚举进程，避免拉起 PowerShell 触发杀软误报。"""
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(PROCESSENTRY32W),
+    ]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(PROCESSENTRY32W),
+    ]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    root_norm = os.path.normcase(root_text)
+    prefix = os.path.normcase(root_text.rstrip("\\/") + "\\")
+    self_path = os.path.normcase(str(sys.executable))
+    found: list[str] = []
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return found
+    entry = PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(entry)
+    try:
+        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            pid = int(entry.th32ProcessID)
+            name = ctypes.wstring_at(entry.szExeFile)
+            if pid != os.getpid():
+                process = kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+                )
+                if process:
+                    try:
+                        capacity = wintypes.DWORD(32768)
+                        buffer = ctypes.create_unicode_buffer(capacity.value)
+                        if kernel32.QueryFullProcessImageNameW(
+                            process, 0, buffer, ctypes.byref(capacity)
+                        ):
+                            path = buffer.value
+                            path_norm = os.path.normcase(path)
+                            if path_norm != self_path and (
+                                path_norm == root_norm
+                                or path_norm.startswith(prefix)
+                            ):
+                                found.append(f"PID {pid}|{name}|{path}")
+                    finally:
+                        kernel32.CloseHandle(process)
+            more = kernel32.Process32NextW(
+                snapshot, ctypes.byref(entry)
+            )
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return found
+
+
 def _processes_under(root: Path) -> list[str]:
     """列出正在从 ``root`` 下运行的进程；用于覆盖安装前拦截。"""
     try:
@@ -585,52 +690,11 @@ def _processes_under(root: Path) -> list[str]:
     except OSError:
         root_text = str(root)
     if IS_WINDOWS:
-        # 只匹配 python/pythonw/karenbot*.exe：否则运行本脚本的 powershell
-        # 自己的命令行里就包含 $root，会被误判成“KarenBot 仍在运行”。
-        script = (
-            "$ErrorActionPreference = 'SilentlyContinue'\n"
-            f"$root = {_powershell_quote(root_text)}\n"
-            f"$self = {_powershell_quote(str(sys.executable))}\n"
-            "Get-CimInstance Win32_Process | Where-Object {\n"
-            "  $_.ProcessId -ne $PID -and\n"
-            "  $_.ExecutablePath -ne $self -and\n"
-            "  $_.Name -match '^(python|pythonw|karenbot).*\\.exe$' -and (\n"
-            "    ($_.ExecutablePath -and $_.ExecutablePath.StartsWith("
-            "$root, [System.StringComparison]::OrdinalIgnoreCase)) -or\n"
-            "    ($_.CommandLine -and $_.CommandLine.IndexOf("
-            "$root, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)\n"
-            "  )\n"
-            "} | ForEach-Object {\n"
-            "  '{0}|{1}|{2}' -f $_.ProcessId, $_.Name, $_.ExecutablePath\n"
-            "}\n"
-        )
         try:
-            result = subprocess.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    script,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                creationflags=_creation_flags(),
-            )
-        except (OSError, subprocess.SubprocessError):
-            result = None
-        if result is not None:
-            found = [
-                line.strip()
-                for line in result.stdout.splitlines()
-                if line.strip()
-            ]
-            if found:
-                return found
-        return []
+            return _windows_processes_under(root_text)
+        except (OSError, AttributeError):
+            # 非 Windows 上模拟 IS_WINDOWS 的测试，或 ctypes 不可用。
+            return []
     found: list[str] = []
     proc_root = Path("/proc")
     if not proc_root.is_dir():
@@ -667,27 +731,47 @@ def _processes_under(root: Path) -> list[str]:
 
 
 def _first_locked_file(root: Path) -> Path | None:
-    """Windows 下探测 exe/dll 是否被运行中的进程占用。
+    """Windows 下抽样探测核心 exe/dll 是否被运行中的进程占用。
 
-    以追加方式打开文件可以触发共享冲突；只读属性导致的 PermissionError
-    不是“被占用”，先按文件属性排除，避免误报。
+    不再递归打开数百个 .dll/.pyd：那会触发杀软的文件写监控，而且
+    _processes_under 已经覆盖了最常见的“进程仍在运行”场景。这里只
+    检查启动链上的关键文件；目录替换失败时仍会给出明确的错误。
     """
     if not IS_WINDOWS or not root.is_dir():
         return None
-    for pattern in ("*.exe", "*.dll", "*.pyd"):
-        for path in root.rglob(pattern):
-            try:
-                if not path.stat().st_mode & stat.S_IWRITE:
-                    continue
-            except OSError:
+    candidates: list[Path] = [
+        root / "runtime" / "python.exe",
+        root / "runtime" / "pythonw.exe",
+        root / "runtime" / "bin" / "python.exe",
+        root / "runtime" / "bin" / "pythonw.exe",
+        root / "runtime" / "bin" / "gtk-4-1.dll",
+        root / "runtime" / "bin" / "adwaita-1-0.dll",
+        root / "runtime" / "bin" / "gobject-2.0-0.dll",
+    ]
+    candidates.extend(root.glob("*.exe"))
+    runtime = root / "runtime"
+    if runtime.is_dir():
+        candidates.extend(runtime.glob("*.exe"))
+    seen: set[str] = set()
+    for path in candidates:
+        if not path.is_file():
+            continue
+        key = str(path).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not path.stat().st_mode & stat.S_IWRITE:
                 continue
-            try:
-                with path.open("ab"):
-                    pass
-            except PermissionError:
-                return path
-            except OSError:
-                continue
+        except OSError:
+            continue
+        try:
+            with path.open("ab"):
+                pass
+        except PermissionError:
+            return path
+        except OSError:
+            continue
     return None
 
 
@@ -696,7 +780,8 @@ def ensure_app_not_running(install_dir: Path) -> None:
     app = install_dir / "app"
     if not app.is_dir():
         return
-    processes = _processes_under(app)
+    # 扫描整个安装目录：WebUI 的 python 在 <install>/venv 下，不在 app/ 内。
+    processes = _processes_under(install_dir)
     if processes:
         detail = "\n".join(processes[:10])
         fail(
@@ -998,6 +1083,68 @@ def mirror_score(speed: float, latency: float) -> float:
     return max(float(speed), 0.0) / (1.0 + max(float(latency), 0.0))
 
 
+_BINARY_MAGIC: dict[str, tuple[bytes, ...]] = {
+    ".tar.gz": (b"\x1f\x8b",),
+    ".tgz": (b"\x1f\x8b",),
+    ".gz": (b"\x1f\x8b",),
+    ".bz2": (b"BZh",),
+    ".xz": (b"\xfd7zXZ\x00",),
+    ".zip": (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"),
+    ".whl": (b"PK\x03\x04",),
+    ".exe": (b"MZ",),
+    ".ico": (b"\x00\x00\x01\x00",),
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".otf": (b"OTTO", b"\x00\x01\x00\x00", b"true"),
+    ".ttf": (b"\x00\x01\x00\x00", b"true", b"ttcf"),
+}
+
+_TEXT_CONTENT_TYPES = (
+    "text/html",
+    "text/plain",
+    "text/xml",
+    "application/json",
+    "application/xml",
+)
+
+
+def _probe_payload_problem(
+    url: str, data: bytes, content_type: str
+) -> str | None:
+    """识别“HTTP 200 但正文是错误页/限流文本”的镜像响应。"""
+    path = urlsplit(url).path.lower()
+    binary_suffix = ""
+    for suffix in _BINARY_MAGIC:
+        if path.endswith(suffix):
+            binary_suffix = suffix
+            break
+    magic = _BINARY_MAGIC.get(binary_suffix, ())
+    if magic and any(data.startswith(item) for item in magic):
+        return None
+    if path.endswith(".tar") and len(data) >= 262 and data[257:262] == b"ustar":
+        return None
+    if magic:
+        return f"内容不是有效的 {binary_suffix}（可能是镜像错误页）"
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type in _TEXT_CONTENT_TYPES:
+        head = data[:512].lstrip().lower()
+        if head.startswith((b"<!doctype", b"<html", b"<", b"{", b"[")):
+            return f"镜像返回了 {media_type} 错误页"
+        lowered = head
+        for marker in (
+            b"too many requests",
+            b"rate limit",
+            b"invalid url",
+            b"forbidden",
+            b"not found",
+            b"error",
+        ):
+            if marker in lowered:
+                return f"镜像返回了错误文本：{marker.decode()}"
+    if len(data) < 256:
+        return f"响应过短（{len(data)} 字节）"
+    return None
+
+
 def probe_mirror(
     url: str, mirror: dict[str, Any], *, timeout: float = PROBE_TIMEOUT
 ) -> dict[str, Any]:
@@ -1010,6 +1157,12 @@ def probe_mirror(
             timeout=timeout,
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = getattr(response, "status", 200) or 200
+            if status not in (200, 206):
+                raise OSError(f"HTTP {status}")
+            content_type = str(
+                response.headers.get("Content-Type") or ""
+            )
             first_byte = time.perf_counter() - started
             chunks: list[bytes] = []
             remaining = PROBE_BYTES
@@ -1022,15 +1175,17 @@ def probe_mirror(
         data = b"".join(chunks)
         if not data:
             raise OSError("响应为空")
-        head = data[:512].lstrip().lower()
-        if head.startswith((b"<!doctype", b"<html")):
-            raise OSError("镜像返回 HTML 错误页")
+        problem = _probe_payload_problem(target, data, content_type)
+        if problem:
+            raise OSError(problem)
         elapsed = max(time.perf_counter() - started, 0.001)
         speed = len(data) / elapsed
         return {
             "ok": True,
             "mirror": mirror.get("name", "?"),
             "url": target,
+            "status": status,
+            "content_type": content_type,
             "latency": first_byte,
             "bytes": len(data),
             "elapsed": elapsed,
@@ -1311,6 +1466,24 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+class _InvalidDownload(OSError):
+    """服务端返回了错误页/错误区间；对应 .part 不能继续续传。"""
+
+
+def _parse_content_range(value: str) -> tuple[int | None, int | None]:
+    match = re.match(
+        r"bytes\s+(?:(\d+)-(\d+)|\*)/(\d+|\*)",
+        value.strip(),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None, None
+    start = int(match.group(1)) if match.group(1) else None
+    total_text = match.group(3)
+    total = int(total_text) if total_text and total_text != "*" else None
+    return start, total
+
+
 def _prioritize_direct(
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1362,44 +1535,102 @@ def download(
             temp = destination.with_name(destination.name + ".part")
             try:
                 _check_cancel(cancel_event)
-                log(f"下载 {target}")
-                with urllib.request.urlopen(
-                    _request(target), timeout=DOWNLOAD_TIMEOUT
-                ) as response, temp.open("wb") as handle:
-                    total = 0
-                    first_chunk = True
-                    length = response.headers.get("Content-Length")
-                    expected_total = (
-                        int(length) if length and length.isdigit() else None
+                if (
+                    temp.is_file()
+                    and expected_sha256
+                    and sha256_file(temp).lower() == expected_sha256.lower()
+                ):
+                    temp.replace(destination)
+                    log(f"下载完成（复用已校验的临时文件）：{destination}")
+                    return destination
+                existing = temp.stat().st_size if temp.is_file() else 0
+                log(
+                    f"下载 {target}"
+                    + (f"（续传 {existing} 字节）" if existing else "")
+                )
+                headers = (
+                    {"Range": f"bytes={existing}-"} if existing > 0 else None
+                )
+                try:
+                    response = urllib.request.urlopen(
+                        _request(target, headers=headers),
+                        timeout=DOWNLOAD_TIMEOUT,
                     )
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 416 and existing:
+                        temp.unlink(missing_ok=True)
+                        raise _InvalidDownload(
+                            "续传位置无效，已重新开始"
+                        ) from exc
+                    raise
+                with response:
+                    status = getattr(response, "status", 200) or 200
+                    content_range = str(
+                        response.headers.get("Content-Range") or ""
+                    )
+                    range_start, range_total = _parse_content_range(
+                        content_range
+                    )
+                    resume = status == 206 and existing > 0
+                    if resume and range_start is None:
+                        raise _InvalidDownload("续传响应缺少 Content-Range")
+                    if resume and range_start != existing:
+                        raise _InvalidDownload(
+                            f"续传区间不匹配：{range_start} != {existing}"
+                        )
+                    if not resume:
+                        existing = 0
+                        mode = "wb"
+                    else:
+                        mode = "ab"
+                    total = existing
+                    expected_total = range_total
+                    if expected_total is None:
+                        length = response.headers.get("Content-Length")
+                        if length and length.isdigit():
+                            length_int = int(length)
+                            expected_total = (
+                                existing + length_int if resume else length_int
+                            )
+                    if expected_total is not None and expected_total < existing:
+                        raise _InvalidDownload("续传文件比目标资产还大")
                     if expected_total:
                         ensure_disk_space(
                             destination.parent,
-                            expected_total,
+                            max(expected_total - existing, 0),
                             "下载目录",
                         )
-                    _emit_progress(0, expected_total)
+                    _emit_progress(total, expected_total)
                     last_report = 0.0
-                    while True:
-                        _check_cancel(cancel_event)
-                        chunk = response.read(DOWNLOAD_CHUNK)
-                        if not chunk:
-                            break
-                        if first_chunk:
-                            first_chunk = False
-                            head = chunk[:512].lstrip().lower()
-                            if head.startswith((b"<!doctype", b"<html")):
-                                raise OSError("镜像返回 HTML 错误页")
-                        handle.write(chunk)
-                        total += len(chunk)
-                        _emit_progress(total, expected_total)
-                        now = time.monotonic()
-                        if now - last_report >= 1.0:
-                            log(f"  已下载 {total / 1024 / 1024:.1f} MB")
-                            last_report = now
+                    with temp.open(mode) as handle:
+                        first_chunk = True
+                        while True:
+                            _check_cancel(cancel_event)
+                            chunk = response.read(DOWNLOAD_CHUNK)
+                            if not chunk:
+                                break
+                            if first_chunk:
+                                first_chunk = False
+                                head = chunk[:512].lstrip().lower()
+                                if head.startswith(
+                                    (b"<!doctype", b"<html")
+                                ):
+                                    raise _InvalidDownload(
+                                        "镜像返回 HTML 错误页"
+                                    )
+                            handle.write(chunk)
+                            total += len(chunk)
+                            _emit_progress(total, expected_total)
+                            now = time.monotonic()
+                            if now - last_report >= 1.0:
+                                log(
+                                    f"  已下载 {total / 1024 / 1024:.1f} MB"
+                                )
+                                last_report = now
                 if total <= 0:
-                    raise OSError("下载内容为空")
+                    raise _InvalidDownload("下载内容为空")
                 if expected_total is not None and total != expected_total:
+                    # 网络中途断开时保留 .part，换镜像可继续续传。
                     raise OSError(
                         f"下载不完整：{total} / {expected_total} 字节"
                     )
@@ -1418,10 +1649,16 @@ def download(
                 )
                 return destination
             except InstallCancelled:
-                temp.unlink(missing_ok=True)
+                # 保留 .part：取消后重新安装可以从断点继续。
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except _InvalidDownload as exc:
                 temp.unlink(missing_ok=True)
+                errors.append(
+                    f"{candidate.get('mirror', '?')}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 超时/连接重置等保留已下载部分，交给下一个镜像续传。
                 errors.append(
                     f"{candidate.get('mirror', '?')}: {type(exc).__name__}: {exc}"
                 )
@@ -2370,24 +2607,41 @@ def _prepare_online_app(
             "请设置 KAREN_BACKEND_SHA256 和 "
             f"KAREN_{frontend.upper()}_SHA256 后重试。"
         )
-    if not backend_expected or not frontend_expected:
-        # GitHub 自动生成的 tag 源码归档没有发布方签名/哈希。默认优先直连，
-        # 直连不可用时才回退第三方镜像；敏感环境应显式提供哈希。
-        log(
-            "警告：backend/frontend 使用 GitHub 源码归档，上游未提供发布哈希。"
-            "安装器会优先直连 GitHub，直连不可用时才回退第三方镜像；"
-            "可用 KAREN_BACKEND_SHA256 / KAREN_GUI_SHA256 / KAREN_WEBUI_SHA256 "
-            "指定哈希，或设置 KAREN_REQUIRE_VERIFIED=1 强制校验。"
-        )
+    backend_ranked = None
+    frontend_ranked = None
+    if not backend_expected:
+        if _unverified_allowed():
+            log(
+                "警告：backend 源码归档没有发布哈希，已按 "
+                f"{UNVERIFIED_ENV}=1 允许第三方镜像。"
+            )
+        else:
+            backend_ranked = _direct_ranking(backend_url)
+            log(
+                "backend 源码归档没有发布哈希；默认仅 GitHub 直连。"
+                f"如需镜像加速，请显式设置 {UNVERIFIED_ENV}=1 或提供 "
+                "KAREN_BACKEND_SHA256。"
+            )
+    if not frontend_expected:
+        if _unverified_allowed():
+            log(
+                f"警告：{frontend} 源码归档没有发布哈希，已按 "
+                f"{UNVERIFIED_ENV}=1 允许第三方镜像。"
+            )
+        else:
+            frontend_ranked = _direct_ranking(frontend_url)
+            log(
+                f"{frontend} 源码归档没有发布哈希；默认仅 GitHub 直连。"
+                f"如需镜像加速，请显式设置 {UNVERIFIED_ENV}=1 或提供 "
+                f"KAREN_{frontend.upper()}_SHA256。"
+            )
     stage("自动测速并下载 backend 核心包…")
     backend_archive = download(
         backend_url,
         downloads / "backend.tar.gz",
         expected_sha256=backend_expected,
         cancel_event=cancel_event,
-        prefer_direct=(
-            not backend_expected and not _unverified_allowed()
-        ),
+        ranked=backend_ranked,
     )
     _check_cancel(cancel_event)
     stage(f"自动测速并下载 {frontend.upper()} 界面模块…")
@@ -2396,9 +2650,7 @@ def _prepare_online_app(
         downloads / "frontend.tar.gz",
         expected_sha256=frontend_expected,
         cancel_event=cancel_event,
-        prefer_direct=(
-            not frontend_expected and not _unverified_allowed()
-        ),
+        ranked=frontend_ranked,
     )
     _check_cancel(cancel_event)
 
@@ -2462,16 +2714,45 @@ def _venv_python(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
+def _venv_is_usable(venv: Path) -> bool:
+    """检查 venv 是否完整；取消/断电可能留下只有目录、没有解释器的残骸。"""
+    python = _venv_python(venv)
+    if not python.is_file():
+        return False
+    check = (
+        "import sys, ssl, sqlite3; "
+        "assert sys.prefix != sys.base_prefix"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-c", check],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=_creation_flags(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def _create_venv(
     venv: Path,
     *,
     frontend: str,
     base_python: Path,
     cancel_event: Any | None = None,
+    managed: bool = False,
 ) -> None:
     if venv.exists():
-        log(f"复用已有 venv：{venv}")
-        return
+        if not managed or _venv_is_usable(venv):
+            log(f"复用已有 venv：{venv}")
+            return
+        log(f"检测到残损 venv，正在清理重建：{venv}")
+        if venv.is_file():
+            venv.unlink()
+        else:
+            _remove_tree(venv, strict=True)
     uv = shutil.which("uv")
     if uv:
         command = [uv, "venv", "--python", str(base_python), str(venv)]
@@ -2542,20 +2823,28 @@ def _check_gui_runtime(venv: Path) -> None:
         )
 
 
-def _font_dir() -> Path:
+def _font_dir(install_dir: Path | None = None) -> Path:
     if IS_WINDOWS:
         base = Path(
             os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
         )
-        return base / "KarenBot" / "fonts"
+        candidate = base / "KarenBot" / "fonts"
+        if str(candidate).isascii():
+            return candidate
+        # 中文用户名会让 %LOCALAPPDATA% 带非 ASCII 字符；libfontconfig
+        # 对这类路径的 ANSI/UTF-8 处理不可靠，回退到已通过 ASCII 校验的
+        # 安装目录。
+        if install_dir is not None and str(install_dir).isascii():
+            return install_dir / "fonts"
+        return Path(_ascii_install_suggestion()) / "fonts"
     data_home = Path(
         os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
     )
     return data_home / "KarenBot" / "fonts"
 
 
-def _fontconfig_path() -> Path:
-    return _font_dir() / "fonts.conf"
+def _fontconfig_path(install_dir: Path | None = None) -> Path:
+    return _font_dir(install_dir) / "fonts.conf"
 
 
 def _write_fontconfig(root: Path) -> None:
@@ -2581,9 +2870,11 @@ def _write_fontconfig(root: Path) -> None:
     )
 
 
-def install_fonts(cancel_event: Any | None = None) -> None:
+def install_fonts(
+    cancel_event: Any | None = None, install_dir: Path | None = None
+) -> None:
     """下载 GUI 实际使用的 Noto Sans SC / Noto Serif SC 可变字体。"""
-    root = _font_dir()
+    root = _font_dir(install_dir)
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -2989,6 +3280,52 @@ def _windows_shortcut_script(
     )
 
 
+def _windows_shortcuts_script(
+    entries: Iterable[tuple[str, Path, int]],
+    working_dir: Path,
+    icon: Path | None = None,
+) -> str:
+    """一次 PowerShell 调用创建全部快捷方式，减少冷启动和杀软告警。"""
+    items = []
+    for name, target, window_style in entries:
+        items.append(
+            "@{ Name = "
+            + _powershell_quote(name)
+            + "; Target = "
+            + _powershell_quote(str(target))
+            + f"; Style = {int(window_style)} }}"
+        )
+    icon_line = ""
+    if icon is not None:
+        icon_line = (
+            f"    $s.IconLocation = {_powershell_quote(str(icon))}\n"
+        )
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$ws = New-Object -ComObject WScript.Shell\n"
+        "$dirs = @(\n"
+        "  [Environment]::GetFolderPath('Programs'),\n"
+        "  [Environment]::GetFolderPath('Desktop')\n"
+        ")\n"
+        "$items = @(\n  "
+        + ",\n  ".join(items)
+        + "\n)\n"
+        "foreach ($item in $items) {\n"
+        "  foreach ($dir in $dirs) {\n"
+        "    if (-not $dir) { continue }\n"
+        "    $path = Join-Path $dir $item.Name\n"
+        "    $s = $ws.CreateShortcut($path)\n"
+        "    $s.TargetPath = $item.Target\n"
+        f"    $s.WorkingDirectory = {_powershell_quote(str(working_dir))}\n"
+        "    $s.WindowStyle = $item.Style\n"
+        f"{icon_line}"
+        "    $s.Description = 'KarenBot'\n"
+        "    $s.Save()\n"
+        "  }\n"
+        "}\n"
+    )
+
+
 def _install_linux_shortcut(
     install_dir: Path,
     frontend: str,
@@ -3098,35 +3435,26 @@ def _install_windows_shortcut(
                 1,
             ),
         )
-    written: list[Path] = []
-    for name, target, window_style in entries:
-        script = _windows_shortcut_script(
-            target,
-            install_dir,
-            name,
-            icon,
-            window_style=window_style,
+    script = _windows_shortcuts_script(entries, install_dir, icon)
+    try:
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            creationflags=_creation_flags(),
         )
-        try:
-            subprocess.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    script,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                creationflags=_creation_flags(),
-            )
-        except (OSError, subprocess.CalledProcessError) as exc:
-            log(f"创建 Windows 快捷方式失败（可手动创建）：{exc}")
-            continue
-        written.append(Path(name))
+    except (OSError, subprocess.CalledProcessError) as exc:
+        log(f"创建 Windows 快捷方式失败（可手动创建）：{exc}")
+        return []
+    written = [Path(name) for name, _target, _style in entries]
+    for name in written:
         log(f"已创建开始菜单/桌面快捷方式：{name}")
     return written
 
@@ -3194,6 +3522,17 @@ def _write_install_marker(
     )
 
 
+def read_install_marker(install_dir: Path) -> dict[str, Any] | None:
+    """读取安装标记；缺失/损坏时返回 None，供 GUI 恢复启动入口。"""
+    try:
+        data = json.loads(
+            (install_dir / INSTALL_MARKER_NAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _looks_like_karenbot_install(install_dir: Path) -> bool:
     marker = install_dir / INSTALL_MARKER_NAME
     if marker.is_file():
@@ -3219,43 +3558,56 @@ def _shortcut_names() -> tuple[str, ...]:
     )
 
 
+def _windows_shell_folder(
+    csidl: int, env_name: str, fallback: Path
+) -> Path:
+    """优先用 SHGetFolderPathW，避免被 OneDrive/重定向后的桌面路径骗到。"""
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        result = ctypes.windll.shell32.SHGetFolderPathW(
+            None, csidl, None, 0, buffer
+        )
+        if result == 0 and buffer.value:
+            return Path(buffer.value)
+    except (AttributeError, OSError):
+        pass
+    value = os.environ.get(env_name)
+    return Path(value) if value else fallback
+
+
 def _remove_shortcuts() -> None:
     names = _shortcut_names()
     if IS_WINDOWS:
         windows_names = [name for name in names if name.endswith(".lnk")]
-        script = (
-            "$ErrorActionPreference = 'SilentlyContinue'\n"
-            "$dirs = @(\n"
-            "  [Environment]::GetFolderPath('Programs'),\n"
-            "  [Environment]::GetFolderPath('Desktop')\n"
-            ")\n"
-            "foreach ($dir in $dirs) {\n"
-            "  if (-not $dir) { continue }\n"
-            "  foreach ($name in @("
-            + ",".join(_powershell_quote(name) for name in windows_names)
-            + ")) {\n"
-            "    Remove-Item -LiteralPath (Join-Path $dir $name) -Force\n"
-            "  }\n"
-            "}\n"
+        programs = _windows_shell_folder(
+            0x0002,
+            "APPDATA",
+            Path.home() / "AppData" / "Roaming",
         )
-        try:
-            subprocess.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    script,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                creationflags=_creation_flags(),
+        if programs.name.casefold() != "programs":
+            programs = (
+                programs
+                / "Microsoft"
+                / "Windows"
+                / "Start Menu"
+                / "Programs"
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            log(f"清理 Windows 快捷方式失败（可手动删除）：{exc}")
+        desktop = _windows_shell_folder(
+            0x0010,
+            "USERPROFILE",
+            Path.home(),
+        )
+        if desktop.name.casefold() != "desktop":
+            desktop = desktop / "Desktop"
+        for directory in (programs, desktop):
+            for name in windows_names:
+                path = directory / name
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    log(f"删除快捷方式失败（可手动删除）：{path}：{exc}")
         return
     applications = Path.home() / ".local" / "share" / "applications"
     for name in names:
@@ -3270,8 +3622,8 @@ def _remove_shortcuts() -> None:
             log(f"删除快捷方式失败（可手动删除）：{path}：{exc}")
 
 
-def _clean_fonts() -> None:
-    root = _font_dir()
+def _clean_fonts(install_dir: Path | None = None) -> None:
+    root = _font_dir(install_dir)
     for item in FONT_SOURCES:
         try:
             (root / str(item["name"])).unlink(missing_ok=True)
@@ -3338,7 +3690,7 @@ def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
     except OSError as exc:
         log(f"删除安装标记失败（可手动删除）：{exc}")
     _remove_shortcuts()
-    _clean_fonts()
+    _clean_fonts(install_dir)
     _clean_skins()
     try:
         install_dir.rmdir()
@@ -3560,6 +3912,7 @@ def install(
                 frontend=frontend,
                 base_python=base_python,
                 cancel_event=cancel_event,
+                managed=venv is None,
             )
             stage("安装 Python 依赖…")
             pypi_index = resolve_pypi_index(pypi_mirror)
@@ -3575,12 +3928,12 @@ def install(
             log("跳过依赖安装（--skip-deps）")
         if download_fonts:
             stage("下载中文字体…")
-            install_fonts(cancel_event=cancel_event)
+            install_fonts(cancel_event=cancel_event, install_dir=install_dir)
         elif IS_WINDOWS:
             # 即使跳过字体下载，也写一份只追加 Windows Fonts 的配置，
             # 避免 gvsbuild 自带的 fonts.conf 占位符导致缺字。
             try:
-                root = _font_dir()
+                root = _font_dir(install_dir)
                 root.mkdir(parents=True, exist_ok=True)
                 _write_fontconfig(root)
             except OSError as exc:
@@ -3590,7 +3943,7 @@ def install(
             apply_gui_skin(gui_skin)
         _check_cancel(cancel_event)
         stage("写入启动入口…")
-        fontconf = _fontconfig_path()
+        fontconf = _fontconfig_path(install_dir)
         _write_launchers(
             install_dir,
             target_app,
@@ -3833,6 +4186,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--list-mirrors", action="store_true", help="列出内置镜像后退出"
     )
     parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="允许从第三方镜像下载没有发布哈希的源码包（有篡改风险）",
+    )
+    parser.add_argument(
+        "--require-verified",
+        action="store_true",
+        help="拒绝任何未校验的可执行/源码资产（等同 KAREN_REQUIRE_VERIFIED=1）",
+    )
+    parser.add_argument(
         "--uninstall",
         action="store_true",
         help="卸载 --dir 指向的 KarenBot（同时清理快捷方式、字体和主题偏好）",
@@ -3864,6 +4227,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_mirrors:
         _print_mirrors()
         return 0
+    if args.allow_unverified and args.require_verified:
+        print(
+            "--allow-unverified 与 --require-verified 不能同时使用",
+            file=sys.stderr,
+        )
+        return 2
+    if args.allow_unverified:
+        os.environ[UNVERIFIED_ENV] = "1"
+    if args.require_verified:
+        os.environ["KAREN_REQUIRE_VERIFIED"] = "1"
     if args.uninstall:
         target = uninstall(Path(args.dir))
         print(f"已卸载：{target}")
@@ -3915,6 +4288,8 @@ def main(argv: list[str] | None = None) -> int:
                     "render_mode": args.renderer,
                     "pypi_mirror": args.pypi_mirror,
                     "mirror": args.mirror,
+                    "allow_unverified": args.allow_unverified,
+                    "require_verified": args.require_verified,
                     "self_delete": args.self_delete,
                     "online": not (args.source_dir or args.archive),
                     "tag": args.tag,

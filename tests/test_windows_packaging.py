@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -163,6 +164,8 @@ def test_spec_trims_tcl_data_and_embeds_icon():
     assert "不能排除 multiprocessing" in spec
     assert "karenbot.ico" in spec
     assert "icon=" in spec
+    assert "sqlite3" in spec
+    assert "pydoc" in spec
 
 
 def test_windows_bundle_ships_shortcut_icon():
@@ -181,3 +184,18 @@ def test_release_manifest_includes_installer_sources():
     assert "gui_install.py" in workflow
     assert "install.sh" in workflow
     assert "artifacts/SHA256SUMS.txt" in workflow
+
+
+def test_manifest_version_matches_windows_version_info():
+    manifest = (INSTALLER / "packaging" / "windows-manifest.xml").read_text(
+        encoding="utf-8"
+    )
+    info = (INSTALLER / "packaging" / "windows-version-info.txt").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(
+        r"filevers=\((\d+), (\d+), (\d+), (\d+)\)", info
+    )
+    assert match is not None
+    version = ".".join(match.groups())
+    assert f'version="{version}"' in manifest

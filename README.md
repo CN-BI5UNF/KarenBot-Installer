@@ -130,10 +130,11 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 7. **渲染回退**：启动入口在 GTK 初始化前设置渲染环境；GUI 自带的
    `gui.launcher` 还会按 stage 自动回退到 Cairo 软件渲染。另提供
    `launch-gui-safe` / “KarenBot GUI (兼容模式)”入口。
-8. **快捷方式与自删除**：Linux `.desktop`，Windows PowerShell 创建开始
-   菜单/桌面快捷方式；便携包没有 exe 时使用内置 `karenbot.ico`。打包版
-   安装器默认保留自身；启用自删除后会在退出后重试删除，避免被占用时静默
-   失败。
+8. **快捷方式与自删除**：Linux `.desktop`，Windows 一次 PowerShell 调用
+   创建全部开始菜单/桌面快捷方式；进程检测和快捷方式清理改用 ctypes /
+   直接删除，不再额外拉起 PowerShell。便携包没有 exe 时使用内置
+   `karenbot.ico`。打包版安装器默认保留自身；启用自删除后会在退出后重试
+   删除，避免被占用时静默失败。
 9. **可取消与实时日志**：下载、解压、`venv`/`pip` 子进程都会响应“取消”；
    `pip` 输出实时转发到“安装日志”页，失败时能看到真实报错。
 10. **安装前预检**：检查目录可写、磁盘余量（GUI 约 1.2 GB / WebUI 约
@@ -141,6 +142,14 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
     占用失败。
 11. **卸载**：CLI `--uninstall` 或 GUI “卸载…” 按钮会清理程序目录、
     启动器、快捷方式、字体和主题偏好，但只对带安装标记的目录生效。
+12. **残损环境自愈**：被取消/杀软中断后留下的半残 `venv` 会在下次安装时
+    自动检测并重建，不需要手工删除。
+13. **断点续传**：下载中断时保留 `.part`，同一目标换镜像或再次下载会发
+    `Range` 请求续传；最终仍用 SHA256 校验完整性。
+14. **日志与诊断**：安装日志实时落盘到 `%TEMP%\karenbot-install.log`，
+    GUI 提供“复制日志 / 保存日志 / 查看日志”；进度窗不再阻塞主窗口。
+15. **已有安装可直接管理**：启动安装器时如果目标目录已安装，会直接启用
+    “打开安装目录 / 启动 / 兼容模式启动”，不需要先重装一次。
 
 ## 已知问题处理
 
@@ -182,6 +191,8 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `--gui-skin karen\|system\|none` | GUI 主题包；默认 `karen`（目标机同款） |
 | `--renderer auto\|cairo\|gl` | 渲染模式；`cairo` 强制软件渲染，黑屏/崩溃时使用 |
 | `--mirror <名称>` | 固定使用某个镜像；`--list-mirrors` 查看名称 |
+| `--allow-unverified` | 允许无发布哈希的源码包走第三方镜像（有篡改风险） |
+| `--require-verified` | 严格模式：任何未校验的可执行/源码资产都中止 |
 | `--windows-gui-asset URL` | 覆盖 Windows GUI 预构建包 URL（本地路径或测试镜像） |
 | `--bundle-tag <tag>` | Windows GUI 便携包所在的安装器 Release tag；默认 `auto` |
 | `--uninstall` | 卸载 `--dir` 指向的 KarenBot，并清理快捷方式/字体/主题偏好 |
@@ -203,8 +214,9 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 - Windows GUI 便携包必须拿到 GitHub 直连的 SHA256 清单，否则报错中止；
   确认风险时可设置 `KAREN_ALLOW_UNVERIFIED=1`；
 - 人格资产缺少可信哈希时，回退下载主仓库源码包；回退包在无哈希时强制直连；
-- backend/frontend 的 GitHub 自动源码归档没有发布方哈希，安装器默认**优先直连
-  GitHub**，只有直连不可用时才回退第三方镜像；可用下面的环境变量显式提供哈希：
+- backend/frontend 的 GitHub 自动源码归档没有发布方哈希，安装器默认**仅使用
+  GitHub 直连**；需要第三方镜像加速时必须显式设置 `KAREN_ALLOW_UNVERIFIED=1`
+  或提供下面的哈希（GUI 会弹窗确认）：
 
 | 环境变量 | 作用 |
 |---|---|
@@ -243,7 +255,8 @@ Windows 源码安装不现实：GTK4/PyGObject 需要一整套便携运行时。
 `gui/fonts.py` 使用的字体一致）到：
 
 - Linux：`$XDG_DATA_HOME/KarenBot/fonts`（默认 `~/.local/share/KarenBot/fonts`）
-- Windows：`%LOCALAPPDATA%\KarenBot\fonts`
+- Windows：`%LOCALAPPDATA%\KarenBot\fonts`；如果用户名导致该路径含中文，
+  自动改用 `<安装目录>\fonts`（安装目录已通过纯 ASCII 校验）
 
 并生成只追加该目录的 `fonts.conf`。启动器会设置 `FONTCONFIG_FILE`，GUI
 不会再回退到 Windows 默认宋体/黑体。字体下载失败不会阻塞安装。

@@ -54,6 +54,11 @@ def _make_app(tmp_path: Path, monkeypatch):
         "askyesno",
         lambda *args, **kwargs: True,
     )
+    monkeypatch.setattr(
+        gui_install.messagebox,
+        "askyesnocancel",
+        lambda *args, **kwargs: False,
+    )
     source = tmp_path / "source"
     (source / "backend").mkdir(parents=True)
     (source / "gui").mkdir()
@@ -258,4 +263,120 @@ def test_gui_reports_uninstall_success(monkeypatch, tmp_path):
         assert messages and messages[-1][0] == "info"
         assert app._installed_dir is None
     finally:
+        root.destroy()
+
+
+def test_gui_existing_install_enables_launch_buttons(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    install_dir = tmp_path / "install"
+    (install_dir / "app").mkdir(parents=True)
+    (install_dir / ".karen-installer.json").write_text(
+        '{"frontend": "webui", "installer": "online-release"}',
+        encoding="utf-8",
+    )
+    try:
+        app.install_dir.set(str(install_dir))
+        app._update_uninstall_state()
+        assert str(app.open_button.cget("state")) == "normal"
+        assert str(app.launch_button.cget("state")) == "normal"
+        assert str(app.launch_safe_button.cget("state")) == "normal"
+        assert app._installed_dir == install_dir
+        assert app._installed_frontend == "webui"
+    finally:
+        root.destroy()
+
+
+def test_gui_log_copy_and_save(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    target = tmp_path / "saved.log"
+    monkeypatch.setattr(
+        gui_install.filedialog,
+        "asksaveasfilename",
+        lambda **_kwargs: str(target),
+    )
+    try:
+        app._log_line("copy-save-marker")
+        assert "copy-save-marker" in app._log_text_value()
+        app._copy_log()
+        assert "copy-save-marker" in root.clipboard_get()
+        app._save_log()
+        assert "copy-save-marker" in target.read_text(encoding="utf-8")
+    finally:
+        root.destroy()
+
+
+def test_gui_progress_dialog_is_non_modal(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    try:
+        app._open_progress_dialog()
+        assert app._progress_window is not None
+        assert app._progress_window.grab_current() is None
+        app._close_progress_dialog()
+    finally:
+        root.destroy()
+
+
+def test_gui_close_waits_for_worker_rollback(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+
+    class _Worker:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+    worker = _Worker()
+    app._worker = worker
+    closed: list[bool] = []
+    real_destroy = root.destroy
+    root.destroy = lambda: closed.append(True)
+    try:
+        app._on_close()
+        assert app._closing is True
+        assert app._cancel.is_set()
+        assert not closed
+        worker.alive = False
+        app._wait_worker_then_close()
+        assert closed
+    finally:
+        root.destroy = real_destroy
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_gui_unverified_prompt_controls_env(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    monkeypatch.delenv(karen_install.UNVERIFIED_ENV, raising=False)
+    monkeypatch.delenv("KAREN_REQUIRE_VERIFIED", raising=False)
+    monkeypatch.delenv("KAREN_BACKEND_SHA256", raising=False)
+    monkeypatch.delenv("KAREN_WEBUI_SHA256", raising=False)
+    try:
+        monkeypatch.setattr(
+            gui_install.messagebox,
+            "askyesnocancel",
+            lambda *args, **kwargs: True,
+        )
+        assert app._confirm_unverified_source(online=True, frontend="webui")
+        assert os.environ[karen_install.UNVERIFIED_ENV] == "1"
+
+        monkeypatch.setattr(
+            gui_install.messagebox,
+            "askyesnocancel",
+            lambda *args, **kwargs: False,
+        )
+        assert app._confirm_unverified_source(online=True, frontend="webui")
+        assert karen_install.UNVERIFIED_ENV not in os.environ
+
+        monkeypatch.setattr(
+            gui_install.messagebox,
+            "askyesnocancel",
+            lambda *args, **kwargs: None,
+        )
+        assert not app._confirm_unverified_source(
+            online=True, frontend="webui"
+        )
+    finally:
+        os.environ.pop(karen_install.UNVERIFIED_ENV, None)
         root.destroy()
