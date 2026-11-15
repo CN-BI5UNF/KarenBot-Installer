@@ -17,6 +17,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -41,6 +42,13 @@ if IS_WINDOWS:
         os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
     )
     DEFAULT_INSTALL_DIR = _LOCALAPPDATA / "Programs" / "KarenBot"
+    # 中文用户名会让 %LOCALAPPDATA% 带中文字符，venv/pip/cmd 都可能失败。
+    if not str(DEFAULT_INSTALL_DIR).isascii():
+        DEFAULT_INSTALL_DIR = Path(
+            os.environ.get("PUBLIC") or r"C:\Users\Public"
+        ) / "KarenBot"
+    if not str(DEFAULT_INSTALL_DIR).isascii():
+        DEFAULT_INSTALL_DIR = Path(r"C:\KarenBot")
 else:
     DEFAULT_INSTALL_DIR = Path.home() / ".local" / "opt" / "karenbot"
 
@@ -121,6 +129,52 @@ FONT_SOURCES: tuple[dict[str, Any], ...] = (
     },
 )
 
+# 用户全局 Python 缺失/不完整时，下载到安装目录的便携 Python。
+# 来源：astral-sh/python-build-standalone 的 install_only 构建（含 pip/venv）。
+PYTHON_RUNTIME_VERSION = "3.12.16"
+PYTHON_RUNTIME_RELEASE = "20261110"
+PYTHON_RUNTIME_DIRNAME = "python-runtime"
+_PYTHON_RUNTIME_BASE = (
+    "https://github.com/astral-sh/python-build-standalone/releases/download/"
+    f"{PYTHON_RUNTIME_RELEASE}"
+)
+PYTHON_RUNTIME_SOURCES: dict[str, dict[str, str]] = {
+    "windows-x64": {
+        "label": "Windows x64",
+        "archive": (
+            f"cpython-{PYTHON_RUNTIME_VERSION}%2B{PYTHON_RUNTIME_RELEASE}"
+            "-x86_64-pc-windows-msvc-install_only.tar.gz"
+        ),
+        "sha256": "e23fe5b16926de1d81661b1a97352e89fb167549c55a6825796ccd0f32ec7f1b",
+    },
+    "windows-arm64": {
+        "label": "Windows ARM64",
+        "archive": (
+            f"cpython-{PYTHON_RUNTIME_VERSION}%2B{PYTHON_RUNTIME_RELEASE}"
+            "-aarch64-pc-windows-msvc-install_only.tar.gz"
+        ),
+        "sha256": "7122bf62a0cf601527ba62e19ca715d64db86b269765da23937e9ac7f968f39c",
+    },
+    "linux-x64": {
+        "label": "Linux x64",
+        "archive": (
+            f"cpython-{PYTHON_RUNTIME_VERSION}%2B{PYTHON_RUNTIME_RELEASE}"
+            "-x86_64-unknown-linux-gnu-install_only.tar.gz"
+        ),
+        "sha256": "c2f87d4b4e8db3abddb0f116c6ccfc503d0cbdbb9ee8faacddad1b679ec12e99",
+    },
+    "linux-arm64": {
+        "label": "Linux ARM64",
+        "archive": (
+            f"cpython-{PYTHON_RUNTIME_VERSION}%2B{PYTHON_RUNTIME_RELEASE}"
+            "-aarch64-unknown-linux-gnu-install_only.tar.gz"
+        ),
+        "sha256": "4792f81750282597fb2a3389fe18b945ed2ba6aad5e45ad406d122c58cb33081",
+    },
+}
+for _runtime_key, _runtime_value in PYTHON_RUNTIME_SOURCES.items():
+    _runtime_value["url"] = f"{_PYTHON_RUNTIME_BASE}/{_runtime_value['archive']}"
+
 DEFAULT_WINDOWS_PACKAGE: dict[str, Any] = {
     "schema": 1,
     "asset_name": WINDOWS_GUI_ASSET_NAME,
@@ -148,6 +202,7 @@ _PACKAGE_CONTRACT_CACHE: dict[str, Any] | None = None
 _MIRROR_OVERRIDE: str | None = None
 _LOG_SINK: Callable[[str], None] | None = None
 _PROGRESS_SINK: Callable[[int, int | None], None] | None = None
+_STATUS_SINK: Callable[[str], None] | None = None
 
 
 class InstallFailure(SystemExit):
@@ -172,6 +227,23 @@ def set_progress_sink(sink: Callable[[int, int | None], None] | None) -> None:
     """GUI 用：下载进度 (已下载字节, 总字节或 None)。"""
     global _PROGRESS_SINK
     _PROGRESS_SINK = sink
+
+
+def set_status_sink(sink: Callable[[str], None] | None) -> None:
+    """GUI 用：当前安装阶段（测速、下载、建 venv、安装主题等）。"""
+    global _STATUS_SINK
+    _STATUS_SINK = sink
+
+
+def stage(message: str) -> None:
+    """记录并上报当前阶段；GUI 用它更新进度弹窗。"""
+    log(message)
+    sink = _STATUS_SINK
+    if sink is not None:
+        try:
+            sink(message)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def reset_runtime_caches() -> None:
@@ -247,6 +319,217 @@ def run(command: list[str], *, cwd: Path | None = None) -> None:
         check=True,
         creationflags=_creation_flags(),
     )
+
+
+def _ascii_install_suggestion() -> str:
+    if IS_WINDOWS:
+        public = Path(os.environ.get("PUBLIC") or r"C:\Users\Public")
+        return str(public / "KarenBot")
+    return str(DEFAULT_INSTALL_DIR)
+
+
+def path_problem(path: Path, label: str = "路径") -> str | None:
+    """Windows 下的中文/非 ASCII 路径是 venv、pip 和 cmd 的高发故障源。"""
+    if not IS_WINDOWS:
+        return None
+    text = str(path)
+    if text.isascii():
+        return None
+    return (
+        f"{label}包含中文或其他非 ASCII 字符：{text}\n"
+        "Windows 下这会导致 venv/pip/cmd 无法正常工作。\n"
+        f"请改用只含英文、数字和空格的路径，例如：{_ascii_install_suggestion()}"
+    )
+
+
+def _validate_install_path(path: Path, label: str) -> None:
+    problem = path_problem(path, label)
+    if problem:
+        fail(problem)
+
+
+def ensure_writable_dir(path: Path, label: str = "安装目录") -> None:
+    """提前检查权限，避免装到一半才在 venv 阶段报 PermissionError。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix=".karen-write-test-", dir=str(path)
+        ):
+            pass
+    except OSError as exc:
+        fail(
+            f"{label}不可写：{path}\n"
+            "请选择当前用户有写权限的目录。Windows 推荐：\n"
+            f"  {_ascii_install_suggestion()}\n"
+            "（默认目录位于用户 AppData，通常不需要管理员权限。）\n"
+            f"原始错误：{exc}"
+        )
+
+
+def _python_runtime_key() -> str | None:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if IS_WINDOWS or system.startswith("win"):
+        if machine in {"amd64", "x86_64", "x64"}:
+            return "windows-x64"
+        if machine in {"arm64", "aarch64"}:
+            return "windows-arm64"
+        return None
+    if system == "linux":
+        if machine in {"amd64", "x86_64", "x64"}:
+            return "linux-x64"
+        if machine in {"arm64", "aarch64"}:
+            return "linux-arm64"
+    return None
+
+
+def _python_runtime_source() -> dict[str, str] | None:
+    key = _python_runtime_key()
+    if key is None:
+        return None
+    source = dict(PYTHON_RUNTIME_SOURCES[key])
+    source["key"] = key
+    return source
+
+
+def _python_is_complete(python: Path) -> bool:
+    if not python.is_file():
+        return False
+    check = (
+        "import sys, venv, ensurepip, ssl, sqlite3; "
+        "assert sys.version_info >= (3, 10)"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-c", check],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=_creation_flags(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _find_complete_python() -> Path | None:
+    candidates: list[Path] = []
+    if not getattr(sys, "frozen", False) and sys.executable:
+        candidates.append(Path(sys.executable))
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found))
+    py_launcher = shutil.which("py")
+    if py_launcher:
+        try:
+            result = subprocess.run(
+                [py_launcher, "-3", "-c", "import sys; print(sys.executable)"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                creationflags=_creation_flags(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            result = None
+        if result is not None and result.returncode == 0:
+            value = result.stdout.strip().splitlines()
+            if value:
+                candidates.append(Path(value[-1]))
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        if _python_is_complete(candidate):
+            return candidate
+    return None
+
+
+def _portable_runtime_python(install_dir: Path) -> Path | None:
+    root = install_dir / PYTHON_RUNTIME_DIRNAME
+    for rel in ("python.exe", "bin/python3", "bin/python"):
+        candidate = root / rel
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _locate_runtime_root(extract_root: Path) -> Path:
+    candidates = [
+        extract_root / "python",
+        extract_root,
+        *[path for path in extract_root.iterdir() if path.is_dir()],
+    ]
+    for candidate in candidates:
+        if (
+            (candidate / "python.exe").is_file()
+            or (candidate / "bin" / "python3").is_file()
+            or (candidate / "bin" / "python").is_file()
+        ):
+            return candidate
+    fail("便携 Python 压缩包结构异常：找不到 python.exe / bin/python3")
+
+
+def ensure_python_runtime(
+    install_dir: Path,
+    *,
+    frontend: str,
+    cancel_event: Any | None = None,
+) -> Path:
+    """优先系统 Python；缺失/不完整时下载便携 Python 到安装目录。"""
+    stage("检查 Python 环境…")
+    existing = _portable_runtime_python(install_dir)
+    if existing is not None and _python_is_complete(existing):
+        log(f"复用安装目录内的便携 Python：{existing}")
+        return existing
+    system = _find_complete_python()
+    if system is not None:
+        log(f"使用系统 Python：{system}")
+        return system
+    if frontend == "gui" and not IS_WINDOWS:
+        fail(
+            "系统 Python 3.10+ 不完整，且原生 GUI 还需要系统 PyGObject/GTK4。\n"
+            "便携 Python 无法加载系统 PyGObject，请先安装：\n"
+            "  sudo apt install python3 python3-venv python3-pip "
+            "python3-gi gir1.2-gtk-4.0 gir1.2-adw-1\n"
+            "然后重新运行安装器。"
+        )
+    source = _python_runtime_source()
+    if source is None:
+        fail(
+            "系统 Python 3.10+ 不完整，当前平台也没有可自动下载的便携 Python。\n"
+            "请先安装 Python 3.10+ 后重试。"
+        )
+    stage(
+        f"未找到完整的 Python 3.10+，自动下载便携 Python "
+        f"{PYTHON_RUNTIME_VERSION}（{source['label']}）…"
+    )
+    archive = install_dir / f".python-runtime-{PYTHON_RUNTIME_VERSION}.tar.gz"
+    extract_root = install_dir / ".python-runtime-extract"
+    try:
+        download(
+            source["url"],
+            archive,
+            expected_sha256=source["sha256"],
+            cancel_event=cancel_event,
+        )
+        extract_archive(archive, extract_root, allow_symlinks=True)
+        runtime_root = _locate_runtime_root(extract_root)
+        target = install_dir / PYTHON_RUNTIME_DIRNAME
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        runtime_root.rename(target)
+    finally:
+        archive.unlink(missing_ok=True)
+        shutil.rmtree(extract_root, ignore_errors=True)
+    python = _portable_runtime_python(install_dir)
+    if python is None or not _python_is_complete(python):
+        fail("便携 Python 下载完成但校验失败；请重试或手动安装 Python 3.10+。")
+    log(f"便携 Python 已安装：{python}（未改动系统 Python）")
+    stage("Python 环境准备完成")
+    return python
 
 
 # ---------------------------------------------------------------------------
@@ -492,9 +775,18 @@ def download(
     mirrors: list[dict[str, Any]] | None = None,
 ) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    candidates = ranked if ranked is not None else rank_mirrors(url, mirrors)
+    if ranked is None:
+        stage(f"自动测速并选择镜像：{url}")
+        candidates = rank_mirrors(url, mirrors)
+    else:
+        candidates = ranked
     if not candidates:
-        fail("所有镜像都不可用；可以检查网络或手动指定 --mirror <名称>")
+        stage("GitHub 镜像测速失败")
+        fail(
+            "GitHub 镜像测速全部失败。请检查网络、代理、DNS 或防火墙；\n"
+            "如果使用代理，请确认 HTTPS_PROXY/HTTP_PROXY 配置正确。\n"
+            "也可以稍后重试，或用 --mirror direct 固定 GitHub 直连。"
+        )
     errors: list[str] = []
     for candidate in candidates:
         target = str(candidate.get("url") or "")
@@ -556,7 +848,12 @@ def download(
             errors.append(
                 f"{candidate.get('mirror', '?')}: {type(exc).__name__}: {exc}"
             )
-    fail("下载失败：\n" + "\n".join(errors))
+    fail(
+        "下载失败：\n"
+        + "\n".join(errors)
+        + "\n\n如果错误都是超时/连接失败，请检查网络、代理、DNS 或防火墙；"
+        + "如果使用代理，请确认 HTTPS_PROXY/HTTP_PROXY 配置正确。"
+    )
 
 
 def download_from_sources(
@@ -587,7 +884,9 @@ def download_from_sources(
     fail("所有下载来源都失败：\n" + "\n".join(errors))
 
 
-def _safe_tar_extract(archive: Path, destination: Path) -> None:
+def _safe_tar_extract(
+    archive: Path, destination: Path, *, allow_symlinks: bool = False
+) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
     with tarfile.open(archive, "r:*") as tar:
@@ -596,7 +895,19 @@ def _safe_tar_extract(archive: Path, destination: Path) -> None:
             if target != root and root not in target.parents:
                 fail(f"压缩包包含越界路径：{member.name}")
             if member.issym() or member.islnk():
-                fail(f"压缩包包含链接，拒绝解压：{member.name}")
+                if not allow_symlinks:
+                    fail(f"压缩包包含链接，拒绝解压：{member.name}")
+                link = Path(member.linkname)
+                if link.is_absolute():
+                    fail(f"压缩包包含绝对链接，拒绝解压：{member.name}")
+                base = (
+                    destination / Path(member.name).parent
+                    if member.issym()
+                    else destination
+                )
+                link_target = (base / link).resolve()
+                if link_target != root and root not in link_target.parents:
+                    fail(f"压缩包链接越界，拒绝解压：{member.name}")
             if member.isdev():
                 fail(f"压缩包包含设备文件，拒绝解压：{member.name}")
         tar.extractall(destination)
@@ -615,11 +926,15 @@ def _safe_zip_extract(archive: Path, destination: Path) -> None:
         zf.extractall(destination)
 
 
-def extract_archive(archive: Path, destination: Path) -> None:
+def extract_archive(
+    archive: Path, destination: Path, *, allow_symlinks: bool = False
+) -> None:
     if archive.suffix.lower() in {".zip"}:
         _safe_zip_extract(archive, destination)
     else:
-        _safe_tar_extract(archive, destination)
+        _safe_tar_extract(
+            archive, destination, allow_symlinks=allow_symlinks
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -785,7 +1100,12 @@ def _fetch_github_page(
             errors.append(
                 f"{mirror.get('name', '?')}: {type(exc).__name__}: {exc}"
             )
-    fail("无法访问 GitHub：" + "\n".join(errors))
+    fail(
+        "无法访问 GitHub：\n"
+        + "\n".join(errors)
+        + "\n请检查网络、代理、DNS 或防火墙；如果使用代理，请确认 "
+        + "HTTPS_PROXY/HTTP_PROXY 配置正确。"
+    )
 
 
 def _release_tag_from_atom(data: bytes) -> str:
@@ -898,7 +1218,7 @@ def _prepare_windows_gui_app(
     asset_name = windows_gui_asset_name()
     downloads = staging / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
-    log(f"下载 Windows GUI 便携包：{asset_name}")
+    stage(f"自动测速并下载 Windows GUI 便携包：{asset_name}")
     local_asset = Path(asset_url).expanduser()
     if "://" not in asset_url and local_asset.is_file():
         archive = downloads / asset_name
@@ -936,7 +1256,9 @@ def _prepare_windows_gui_app(
             "Windows GUI 预构建包中没有找到 runtime/python.exe；"
             "请按 docs/windows-gui-package.md 的目录契约打包。"
         )
+    stage("校验 GTK4 便携运行时…")
     _validate_portable_gui(staging / "app", portable)
+    stage("Windows GUI 便携运行时校验通过")
     components = {
         "backend": {
             "repo": ONLINE_BACKEND_REPO,
@@ -984,14 +1306,14 @@ def _prepare_online_app(
     frontend_url = _online_archive_url(frontend_repo, frontend_tag)
     downloads = staging / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
-    log("下载核心程序 + 后端包…")
+    stage("自动测速并下载 backend 核心包…")
     backend_archive = download(
         backend_url,
         downloads / "backend.tar.gz",
         cancel_event=cancel_event,
     )
     _check_cancel(cancel_event)
-    log(f"下载 {frontend.upper()} 界面包…")
+    stage(f"自动测速并下载 {frontend.upper()} 界面模块…")
     frontend_archive = download(
         frontend_url,
         downloads / "frontend.tar.gz",
@@ -1006,7 +1328,7 @@ def _prepare_online_app(
     core_root = _find_core_root(backend_extract)
     frontend_root = _find_frontend_root(frontend_extract, frontend)
     app_root = staging / "app"
-    log("合并核心程序、后端和界面模块…")
+    stage("合并核心程序、后端和界面模块…")
     shutil.copytree(core_root, app_root, ignore=_IGNORE)
     frontend_target = app_root / frontend
     if frontend_target.exists():
@@ -1071,33 +1393,20 @@ def _venv_python(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
-def _base_python() -> Path:
-    """冻结版 exe 不能 `-m venv` 自己，必须找系统 Python。"""
-    if not getattr(sys, "frozen", False):
-        return Path(sys.executable)
-    for name in ("python3", "python"):
-        found = shutil.which(name)
-        if found:
-            return Path(found)
-    fail(
-        "当前是打包版安装器，但系统找不到 Python 3.10+。\n"
-        "请先安装 Python，或使用包含完整运行环境的预构建安装包。"
-    )
-
-
-def _create_venv(venv: Path, *, frontend: str) -> None:
+def _create_venv(
+    venv: Path, *, frontend: str, base_python: Path
+) -> None:
     if venv.exists():
         log(f"复用已有 venv：{venv}")
         return
-    base = _base_python()
     uv = shutil.which("uv")
     if uv:
-        command = [uv, "venv", "--python", str(base), str(venv)]
+        command = [uv, "venv", "--python", str(base_python), str(venv)]
         if frontend == "gui" and not IS_WINDOWS:
             command.insert(2, "--system-site-packages")
         run(command)
         return
-    command = [str(base), "-m", "venv", str(venv)]
+    command = [str(base_python), "-m", "venv", str(venv)]
     if frontend == "gui" and not IS_WINDOWS:
         command.insert(3, "--system-site-packages")
     run(command)
@@ -1228,7 +1537,6 @@ def _gui_skin_dirs() -> list[Path]:
         bases.append(
             Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
         )
-        bases.append(Path.home() / ".config")
     result: list[Path] = []
     for base in bases:
         path = base / "karen-gui"
@@ -1698,14 +2006,17 @@ def install(
     if render_mode not in RENDER_MODES:
         fail(f"未知渲染模式：{render_mode}")
     _check_cancel(cancel_event)
+    stage("准备安装…")
     install_dir = install_dir.expanduser().resolve()
-    install_dir.mkdir(parents=True, exist_ok=True)
+    _validate_install_path(install_dir, "安装目录")
+    ensure_writable_dir(install_dir, "安装目录")
     staging = Path(tempfile.mkdtemp(prefix=".karen-install-", dir=str(install_dir)))
     try:
         installer_kind = "local-source"
         components: dict[str, Any] | None = None
         if source_dir is not None:
             source = source_dir.expanduser().resolve()
+            _validate_install_path(source, "源码目录")
             if not source.is_dir():
                 fail(f"源码目录不存在：{source}")
             if (
@@ -1719,19 +2030,21 @@ def install(
                     "Windows 原生 GUI 不能从源码安装：需要 GTK4/PyGObject 便携运行时。\n"
                     "请选择在线安装（下载预构建包），或使用本地预构建 zip。"
                 )
-            log(f"复制源码：{source}")
+            stage(f"复制源码：{source}")
             shutil.copytree(source, staging / "app", ignore=_IGNORE)
         elif archive is not None:
             installer_kind = "local-archive"
             archive = archive.expanduser().resolve()
+            _validate_install_path(archive, "安装包路径")
             if not archive.is_file():
                 fail(f"压缩包不存在：{archive}")
-            log(f"解压安装包：{archive}")
+            stage(f"解压安装包：{archive}")
             extract_root = staging / "extract"
             extract_archive(archive, extract_root)
             app_root = _find_app_root(extract_root)
             shutil.copytree(app_root, staging / "app", ignore=_IGNORE)
         elif online:
+            stage("在线安装：解析 Release 版本…")
             installer_kind, components = _prepare_online_app(
                 staging,
                 frontend=frontend,
@@ -1745,6 +2058,7 @@ def install(
             )
         _check_cancel(cancel_event)
         app_root = staging / "app"
+        stage("检查安装包类型…")
         portable_python = (
             _portable_python(app_root)
             if frontend == "gui" and IS_WINDOWS
@@ -1813,17 +2127,31 @@ def install(
         )
         _check_cancel(cancel_event)
         if not skip_deps:
-            _create_venv(target_venv, frontend=frontend)
+            base_python = ensure_python_runtime(
+                install_dir,
+                frontend=frontend,
+                cancel_event=cancel_event,
+            )
+            stage("创建 Python 虚拟环境…")
+            _create_venv(
+                target_venv,
+                frontend=frontend,
+                base_python=base_python,
+            )
+            stage("安装 Python 依赖…")
             _install_dependencies(target_venv, target_app)
             if frontend == "gui":
                 _check_gui_runtime(target_venv)
         else:
             log("跳过依赖安装（--skip-deps）")
         if download_fonts:
+            stage("下载中文字体…")
             install_fonts(cancel_event=cancel_event)
         if frontend == "gui":
+            stage("应用 GUI 主题包…")
             apply_gui_skin(gui_skin)
         _check_cancel(cancel_event)
+        stage("写入启动入口…")
         fontconf = _fontconfig_path()
         _write_launchers(
             install_dir,
@@ -1836,6 +2164,7 @@ def install(
             fontconf=fontconf if fontconf.is_file() else None,
         )
         if create_shortcut:
+            stage("创建快捷方式…")
             _install_shortcut(
                 install_dir,
                 frontend,
@@ -1843,7 +2172,7 @@ def install(
             )
         if old_app.exists():
             shutil.rmtree(old_app, ignore_errors=True)
-        log(f"安装完成：{install_dir}")
+        stage(f"安装完成：{install_dir}")
         log(f"启动：{launch_target(install_dir, frontend)}")
         if frontend == "gui":
             log(f"兼容模式：{launch_target(install_dir, 'gui', safe=True)}")

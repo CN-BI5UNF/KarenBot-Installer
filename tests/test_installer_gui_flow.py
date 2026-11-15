@@ -140,3 +140,29 @@ def test_mirror_dialog_renders_results(monkeypatch, tmp_path):
         assert app._mirror_tree is not None
     finally:
         root.destroy()
+
+
+def test_gui_updates_progress_step(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    try:
+        app._on_stage("自动测速并下载 backend 核心包…")
+        assert app.progress_step.get() == "自动测速并下载 backend 核心包…"
+        assert app.status.get() == "自动测速并下载 backend 核心包…"
+    finally:
+        root.destroy()
+
+
+def test_gui_rejects_non_ascii_or_invalid_path(monkeypatch, tmp_path):
+    root, app, messages = _make_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        gui_install.core,
+        "path_problem",
+        lambda path, label="路径": f"{label}包含中文：{path}",
+    )
+    try:
+        app._start_install()
+        assert messages and messages[-1][0] == "error"
+        assert app._worker is None
+        assert app._progress_window is None
+    finally:
+        root.destroy()

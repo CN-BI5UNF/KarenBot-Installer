@@ -39,6 +39,10 @@ def test_gui_wires_core_sinks_cancel_and_options():
     assert "gui_skin" in source
     assert "render_mode" in source
     assert "launch_safe_button" in source
+    assert "_open_progress_dialog" in source
+    assert "path_problem" in source
+    assert "ensure_writable_dir" in source
+    assert "set_status_sink" in source
 
 
 def test_gui_has_windows_compatibility_hooks():

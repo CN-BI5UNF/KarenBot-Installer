@@ -51,7 +51,9 @@ python3 gui_install.py
 ```
 
 Windows 使用 GitHub Actions 产出的 `KarenBot-Installer.exe`，不需要本机
-Python；也可以在本机用 PyInstaller 构建（见下文，仅验证用）。
+Python；也可以在本机用 PyInstaller 构建（见下文，仅验证用）。Linux 的
+`KarenBot-Installer-linux-*` 是 GUI 入口；带 CLI 参数时 `install.sh` 会改用
+Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 
 ### GUI 与 WebUI 怎么选
 
@@ -79,6 +81,29 @@ Python；也可以在本机用 PyInstaller 构建（见下文，仅验证用）�
    `launch-gui-safe` / “KarenBot GUI (兼容模式)”入口。
 7. **快捷方式与自删除**：Linux `.desktop`，Windows PowerShell 创建开始
    菜单/桌面快捷方式；打包版安装器默认安装后自删除。
+
+## 已知问题处理
+
+针对实际用户反馈，安装器内置了以下保护：
+
+1. **Windows 中文路径**：安装目录、源码目录、安装包路径会检查非 ASCII
+   字符；发现中文时直接提示修改，并给出 `C:\Users\Public\KarenBot` 示例。
+   Windows 默认目录如果因为用户名是中文而带中文，会自动改用
+   `%PUBLIC%\KarenBot`，避免 venv/pip/cmd 在中文路径下失败。
+2. **自动测速与步骤提示**：安装开始时自动测速并选择镜像，不需要用户先点
+   “镜像测速”。GUI 会弹出“正在安装”进度窗口，实时显示“自动测速 / 下载
+   backend / 下载界面模块 / 创建 venv / 下载字体 / 应用主题 / 写入启动入口”
+   等阶段；所有镜像都失败时会明确提示检查网络、代理、DNS 或防火墙。
+3. **权限预检**：安装前先验证安装目录可写。默认 per-user 目录不需要管理员；
+   如果用户选了 `C:\Program Files` 等不可写目录，会立即提示改用
+   `%LOCALAPPDATA%\Programs\KarenBot` 或 `%PUBLIC%\KarenBot`，不会等到
+   venv 阶段才报错。
+4. **Python 环境自举**：安装前检测 Python 3.10+ 是否含 `venv`/`ensurepip`/
+   `ssl`/`sqlite3`。缺失时自动下载 python-build-standalone 的便携 Python
+   （3.12.16，压缩包约 50MB，解压约 340MB）到
+   `<安装目录>/python-runtime`，只用于本安装，不改动用户全局 Python。
+   Linux 原生 GUI 例外：它仍需要系统 PyGObject/GTK4，安装器会给出 apt
+   安装命令。
 
 ## 常用参数
 

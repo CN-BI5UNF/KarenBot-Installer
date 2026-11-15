@@ -586,3 +586,125 @@ def test_latest_release_tag_falls_back_to_atom(monkeypatch):
         ("owner/repo", "releases/latest"),
         ("owner/repo", "releases.atom"),
     ]
+
+
+def test_path_problem_rejects_non_ascii_on_windows(monkeypatch):
+    import tempfile
+
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    bad = Path(tempfile.gettempdir()) / "张三" / "KarenBot"
+    problem = installer.path_problem(bad, "安装目录")
+    assert problem is not None
+    assert "中文" in problem
+    assert installer.path_problem(Path(r"C:\Users\Public\KarenBot"), "安装目录") is None
+
+
+def test_install_rejects_non_ascii_install_dir(tmp_path, monkeypatch):
+    import tempfile
+
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    with pytest.raises(SystemExit) as error:
+        installer.install(
+            frontend="webui",
+            install_dir=Path(tempfile.gettempdir()) / "中文安装" / "KarenBot",
+            source_dir=None,
+            archive=None,
+            venv=None,
+            skip_deps=True,
+            create_shortcut=False,
+            download_fonts=False,
+        )
+    assert "非 ASCII" in error.value.message
+
+
+def test_ensure_writable_dir_reports_permission_error(tmp_path):
+    target = tmp_path / "not-a-directory"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(SystemExit) as error:
+        installer.ensure_writable_dir(target)
+    assert "不可写" in error.value.message
+
+
+def test_python_runtime_source_platforms(monkeypatch):
+    monkeypatch.setattr(installer.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(installer.platform, "machine", lambda: "AMD64")
+    assert installer._python_runtime_key() == "windows-x64"
+    monkeypatch.setattr(installer.platform, "machine", lambda: "ARM64")
+    assert installer._python_runtime_key() == "windows-arm64"
+    monkeypatch.setattr(installer.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(installer.platform, "machine", lambda: "aarch64")
+    assert installer._python_runtime_key() == "linux-arm64"
+    source = installer._python_runtime_source()
+    assert source is not None
+    assert source["url"].endswith(".tar.gz")
+    assert len(source["sha256"]) == 64
+
+
+def test_ensure_python_runtime_uses_existing_portable(tmp_path, monkeypatch):
+    runtime = tmp_path / "python-runtime" / "bin" / "python3"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("", encoding="utf-8")
+    monkeypatch.setattr(installer, "_python_is_complete", lambda path: path.is_file())
+    assert (
+        installer.ensure_python_runtime(tmp_path, frontend="webui")
+        == runtime
+    )
+
+
+def test_ensure_python_runtime_downloads_when_missing(tmp_path, monkeypatch):
+    source = {
+        "url": "https://example.test/python.tar.gz",
+        "sha256": "0" * 64,
+        "label": "test",
+        "key": "linux-x64",
+    }
+    monkeypatch.setattr(installer, "_find_complete_python", lambda: None)
+    monkeypatch.setattr(installer, "_python_runtime_source", lambda: source)
+    monkeypatch.setattr(installer, "_python_is_complete", lambda path: path.is_file())
+
+    def fake_download(_url, destination, **_kwargs):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(destination, "w:gz") as tar:
+            data = b"fake"
+            info = tarfile.TarInfo("python/bin/python3")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        return destination
+
+    monkeypatch.setattr(installer, "download", fake_download)
+    python = installer.ensure_python_runtime(tmp_path, frontend="webui")
+    assert python == tmp_path / "python-runtime" / "bin" / "python3"
+    assert python.is_file()
+    assert not (tmp_path / ".python-runtime-extract").exists()
+    assert not list(tmp_path.glob(".python-runtime-*.tar.gz"))
+
+
+def test_ensure_python_runtime_linux_gui_requires_system(monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", False)
+    monkeypatch.setattr(installer, "_find_complete_python", lambda: None)
+    with pytest.raises(SystemExit) as error:
+        installer.ensure_python_runtime(Path("/tmp/karen-gui-python"), frontend="gui")
+    assert "PyGObject" in error.value.message
+
+
+def test_stage_sink_receives_messages():
+    messages: list[str] = []
+    installer.set_status_sink(messages.append)
+    try:
+        installer.stage("自动测速")
+    finally:
+        installer.set_status_sink(None)
+    assert messages == ["自动测速"]
+
+
+def test_allow_symlinks_still_rejects_escaping_links(tmp_path):
+    archive = tmp_path / "link.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        info = tarfile.TarInfo("python/escape")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "../../etc/passwd"
+        tar.addfile(info)
+    with pytest.raises(SystemExit):
+        installer._safe_tar_extract(
+            archive, tmp_path / "out", allow_symlinks=True
+        )

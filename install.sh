@@ -39,8 +39,10 @@ case "$(uname -m 2>/dev/null || true)" in
     aarch64 | arm64) ARCH="arm64" ;;
     *) ARCH="" ;;
 esac
-if [ -n "$ARCH" ] && [ -x "$HERE/KarenBot-Installer-linux-$ARCH" ]; then
-    run_installer "$HERE/KarenBot-Installer-linux-$ARCH" "$@"
+# 冻结版是 GUI 入口（只接受 --check/--smoke-test）；带 CLI 参数时继续用
+# Python 安装核心，避免把 --frontend 等参数传给 GUI。
+if [ -n "$ARCH" ] && [ -x "$HERE/KarenBot-Installer-linux-$ARCH" ] && [ "$#" -eq 0 ]; then
+    run_installer "$HERE/KarenBot-Installer-linux-$ARCH"
     exit $?
 fi
 

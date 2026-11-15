@@ -83,6 +83,8 @@ def test_install_sh_is_napcat_style_bootstrap():
     assert "cdn.jsdelivr.net" in script
     assert "ghproxy.net" in script
     assert "KAREN_INSTALLER_BASE" in script
+    # 冻结版是 GUI 入口；带 CLI 参数时必须继续用 Python 核心。
+    assert '[ "$#" -eq 0 ]' in script
 
 
 def test_readme_documents_no_local_build_and_no_deb():

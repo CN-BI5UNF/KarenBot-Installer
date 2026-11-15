@@ -147,6 +147,8 @@ class InstallerApp:
         self._mirror_window: tk.Toplevel | None = None
         self._mirror_tree: ttk.Treeview | None = None
         self._mirror_button: ttk.Button | None = None
+        self._progress_window: tk.Toplevel | None = None
+        self._dialog_progress: ttk.Progressbar | None = None
         self._cancel = threading.Event()
         self._installed_dir: Path | None = None
         self._installed_frontend = "gui"
@@ -174,6 +176,7 @@ class InstallerApp:
         self.render_mode = tk.StringVar(value="auto")
         self.mirror_url = tk.StringVar(value=DEFAULT_PROBE_URL)
         self.status = tk.StringVar(value="就绪")
+        self.progress_step = tk.StringVar(value="准备安装…")
         self.skin_note = tk.StringVar(value="")
 
     def _build_ui(self) -> None:
@@ -264,7 +267,8 @@ class InstallerApp:
         self._log_line(f"安装器版本：{core.INSTALLER_VERSION}")
         self._log_line(f"安装目录默认：{core.DEFAULT_INSTALL_DIR}")
         self._log_line("在线安装：优先稳定版；没有稳定版时使用最新版。")
-        self._log_line("镜像：并发测速后按吞吐 + 首字节延迟自动选择。")
+        self._log_line("镜像：安装时会自动测速，无需先手动点击“镜像测速”。")
+        self._log_line("Python 环境不完整时，会自动下载便携 Python 到安装目录。")
 
     def _build_config_scroll(self, parent: ttk.Frame) -> None:
         """小屏/高 DPI 下配置页可滚动，避免外观/渲染选项被裁掉。"""
@@ -400,6 +404,14 @@ class InstallerApp:
         ttk.Button(frame, text="浏览…", command=self._browse_install_dir).grid(
             row=0, column=2
         )
+        ttk.Label(
+            frame,
+            text=(
+                "默认目录在用户 AppData，通常不需要管理员权限；"
+                "Windows 路径请不要包含中文或其他非 ASCII 字符。"
+            ),
+            foreground="#64748b",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
     def _build_options_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="4. 选项", padding=6)
@@ -580,6 +592,9 @@ class InstallerApp:
     def _queue_progress(self, done: int, total: int | None) -> None:
         self._queue.put(("progress", (done, total)))
 
+    def _queue_status(self, message: str) -> None:
+        self._queue.put(("stage", message))
+
     def _start_install(self) -> None:
         if self._worker is not None and self._worker.is_alive():
             return
@@ -602,6 +617,22 @@ class InstallerApp:
             messagebox.showerror("路径无效", "安装目录不能为空。")
             return
         install_dir = Path(raw_dir).expanduser()
+        for path, label in (
+            (install_dir, "安装目录"),
+            (source_dir, "源码目录"),
+            (archive, "安装包路径"),
+        ):
+            if path is None:
+                continue
+            problem = core.path_problem(path, label)
+            if problem:
+                messagebox.showerror("路径包含中文", problem)
+                return
+        try:
+            core.ensure_writable_dir(install_dir, "安装目录")
+        except core.InstallFailure as exc:
+            messagebox.showerror("安装目录不可写", exc.message)
+            return
         if (install_dir / "app").exists() and not messagebox.askyesno(
             "覆盖安装",
             f"{install_dir / 'app'} 已存在。继续会替换应用目录，"
@@ -633,7 +664,9 @@ class InstallerApp:
         self.progress.stop()
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
+        self.progress_step.set("准备安装…")
         self.status.set("准备安装…")
+        self._open_progress_dialog()
         self._clear_log()
         source_desc = (
             "在线安装（自动选择稳定版/最新版）"
@@ -649,6 +682,7 @@ class InstallerApp:
         )
         core.set_log_sink(self._queue_log)
         core.set_progress_sink(self._queue_progress)
+        core.set_status_sink(self._queue_status)
         self._worker = threading.Thread(
             target=self._run_install,
             kwargs={
@@ -684,6 +718,7 @@ class InstallerApp:
         finally:
             core.set_log_sink(None)
             core.set_progress_sink(None)
+            core.set_status_sink(None)
 
     def _poll_queue(self) -> None:
         while True:
@@ -696,6 +731,8 @@ class InstallerApp:
             elif kind == "progress":
                 done, total = payload
                 self._update_progress(int(done), total)
+            elif kind == "stage":
+                self._on_stage(str(payload))
             elif kind == "done":
                 self._on_done(Path(str(payload)))
             elif kind == "error":
@@ -708,13 +745,24 @@ class InstallerApp:
                 self._on_mirror_error(str(payload))
         self.root.after(80, self._poll_queue)
 
+    def _on_stage(self, message: str) -> None:
+        self.progress_step.set(message)
+        self.status.set(message)
+
     def _update_progress(self, done: int, total: int | None) -> None:
+        dialog = self._dialog_progress
         if total and total > 0:
             if str(self.progress.cget("mode")) != "determinate":
                 self.progress.stop()
             self.progress.configure(
                 mode="determinate", maximum=total, value=done
             )
+            if dialog is not None:
+                if str(dialog.cget("mode")) != "determinate":
+                    dialog.stop()
+                dialog.configure(
+                    mode="determinate", maximum=total, value=done
+                )
             self.status.set(
                 f"下载中 {done / 1024 / 1024:.1f} / "
                 f"{total / 1024 / 1024:.1f} MB"
@@ -723,10 +771,14 @@ class InstallerApp:
         if str(self.progress.cget("mode")) != "indeterminate":
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
+        if dialog is not None and str(dialog.cget("mode")) != "indeterminate":
+            dialog.configure(mode="indeterminate")
+            dialog.start(12)
         self.status.set(f"已下载 {done / 1024 / 1024:.1f} MB")
 
     def _on_done(self, path: Path) -> None:
         self._worker = None
+        self._close_progress_dialog()
         self._set_running(False)
         self.progress.stop()
         self.progress.configure(mode="determinate", maximum=100, value=100)
@@ -748,6 +800,7 @@ class InstallerApp:
 
     def _on_error(self, message: str) -> None:
         self._worker = None
+        self._close_progress_dialog()
         self._set_running(False)
         self.progress.stop()
         self.status.set("安装失败")
@@ -756,6 +809,7 @@ class InstallerApp:
 
     def _on_cancelled(self) -> None:
         self._worker = None
+        self._close_progress_dialog()
         self._set_running(False)
         self.progress.stop()
         self.status.set("已取消")
@@ -766,8 +820,85 @@ class InstallerApp:
             return
         self._cancel.set()
         self.cancel_button.configure(state="disabled")
+        self.progress_step.set("正在取消…")
         self.status.set("正在取消…")
         self._log_line("已请求取消；正在等待当前步骤结束。")
+
+    def _open_progress_dialog(self) -> None:
+        if self._progress_window is not None:
+            try:
+                if self._progress_window.winfo_exists():
+                    self._progress_window.lift()
+                    return
+            except tk.TclError:
+                pass
+            self._progress_window = None
+        window = tk.Toplevel(self.root)
+        window.title("正在安装 KarenBot")
+        window.transient(self.root)
+        window.resizable(False, False)
+        self.root.update_idletasks()
+        width = 540
+        height = 230
+        x = self.root.winfo_rootx() + max(
+            0, (self.root.winfo_width() - width) // 2
+        )
+        y = self.root.winfo_rooty() + max(
+            0, (self.root.winfo_height() - height) // 2
+        )
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.protocol("WM_DELETE_WINDOW", self._cancel_install)
+        body = ttk.Frame(window, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="正在安装 KarenBot",
+            font=(self.font_family, 13, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            body,
+            textvariable=self.progress_step,
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 10))
+        self._dialog_progress = ttk.Progressbar(
+            body, mode="indeterminate", length=480
+        )
+        self._dialog_progress.pack(fill="x")
+        self._dialog_progress.start(12)
+        ttk.Label(
+            body,
+            text=(
+                "安装器会自动测速 GitHub 镜像，不需要先手动点“镜像测速”。\n"
+                "如果长时间无响应，请检查网络、代理、DNS 或防火墙。"
+            ),
+            foreground="#64748b",
+            justify="left",
+            wraplength=480,
+        ).pack(anchor="w", pady=(10, 12))
+        ttk.Button(
+            body, text="取消安装", command=self._cancel_install
+        ).pack(anchor="e")
+        self._progress_window = window
+        try:
+            window.grab_set()
+        except tk.TclError:
+            pass
+
+    def _close_progress_dialog(self) -> None:
+        window = self._progress_window
+        self._progress_window = None
+        self._dialog_progress = None
+        if window is None:
+            return
+        try:
+            window.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            window.destroy()
+        except tk.TclError:
+            pass
 
     def _open_mirror_dialog(self) -> None:
         if self._mirror_window is not None:
@@ -958,6 +1089,7 @@ class InstallerApp:
             ):
                 return
             self._cancel.set()
+        self._close_progress_dialog()
         if self._delete_on_close:
             core.self_delete_installer()
         self.root.destroy()
@@ -991,6 +1123,7 @@ def main(argv: list[str] | None = None) -> int:
                     "gui_skins": list(core.GUI_SKINS),
                     "render_modes": list(core.RENDER_MODES),
                     "windows_gui_asset": core.windows_gui_asset_name(),
+                    "python_runtime_version": core.PYTHON_RUNTIME_VERSION,
                     "fonts": [item["name"] for item in core.FONT_SOURCES],
                     "tk_error": str(_TK_ERROR) if _TK_ERROR else "",
                 },

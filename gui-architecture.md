@@ -58,6 +58,11 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
 底部固定操作栏：镜像测速、打开目录、启动、兼容模式启动、开始安装、取消。
 “镜像测速”仍是独立窗口，展示镜像、速度、首字节延迟、评分和错误。
 
+安装开始后会弹出模态进度窗口，显示当前阶段（自动测速、下载 backend、
+下载界面模块、创建 venv、下载字体、应用主题、写入启动入口等），并提供
+取消按钮；结束后自动关闭，失败时用错误对话框给出网络/路径/权限提示。
+配置页放在可滚动 Canvas 里，小屏/高 DPI 不会裁掉渲染和主题选项。
+
 ## 安装核心
 
 - 镜像测速：并发探测前 512KB，吞吐 + 首字节延迟评分，失败换镜像；
@@ -87,6 +92,13 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
 - **原生 GUI**：Windows 不能从源码安装；必须使用预构建 GTK4 便携包。
   安装器校验 `runtime/python.exe`、GTK4/Adwaita DLL、Gtk/Adw typelib。
 - **自删除**：Windows 不能删除正在运行的 exe；安装完成后由 `cmd` 延迟删除。
+- **中文路径**：安装目录/源码/安装包路径含非 ASCII 字符时提前报错，并提示
+  `%PUBLIC%\KarenBot`；默认目录若因用户名带中文，会自动改用 `%PUBLIC%`。
+- **权限预检**：安装前写一个探针文件验证目录可写；不可写时提示改用
+  per-user 目录，而不是等到 venv 阶段才报 `PermissionError`。
+- **Python 自举**：系统 Python 缺失或不含 venv/ensurepip 时，下载
+  python-build-standalone 便携 Python 3.12.16 到 `<install>/python-runtime`；
+  全局 Python 完全不动。Linux 原生 GUI 仍要求系统 PyGObject/GTK4。
 
 ## Linux 兼容性
 
