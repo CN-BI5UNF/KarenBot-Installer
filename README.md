@@ -21,13 +21,14 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 `install.sh` 后再执行：
 
 ```bash
+sha=5c0ebb53f54c8a9d6ef19e18da3c46c03a533976
 bash <(
   for u in \
-    "https://gh-proxy.com/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh" \
-    "https://ghproxy.net/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh" \
-    "https://fastly.jsdelivr.net/gh/CN-BI5UNF/KarenBot-Installer@main/install.sh" \
-    "https://ghproxy.cfd/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh" \
-    "https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh"; do
+    "https://gh-proxy.com/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
+    "https://ghproxy.net/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
+    "https://ghproxy.cfd/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
+    "https://fastly.jsdelivr.net/gh/CN-BI5UNF/KarenBot-Installer@$sha/install.sh" \
+    "https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh"; do
       s="$(curl -fsSL --connect-timeout 8 --max-time 30 "$u" 2>/dev/null)" || continue
       case "$s" in
         "#!/usr/bin/env bash"*) printf '%s\n' "$s"; break ;;
@@ -35,6 +36,9 @@ bash <(
   done
 )
 ```
+
+上面的 bootstrap 固定在 commit `5c0ebb5`（只负责下载和校验脚本，避免 CDN
+缓存到旧版本）；`install.sh` 自己仍默认从 `main` 获取最新安装核心。
 
 如果网络能直连 GitHub，也可以用原来的短命令：
 
