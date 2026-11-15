@@ -1,0 +1,85 @@
+name: Capture Installer UI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: CN-BI5UNF/KarenBot-backend
+          ref: v0.1.1-alpha.1
+          path: backend-src
+
+      - uses: actions/checkout@v4
+        with:
+          repository: CN-BI5UNF/KarenBot-WebUI
+          ref: v0.1.1-alpha.1
+          path: webui-src
+
+      - uses: actions/checkout@v4
+        with:
+          repository: CN-BI5UNF/KarenBot
+          ref: main
+          path: personas-src
+          sparse-checkout: personas
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Xvfb and capture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb openbox imagemagick ffmpeg x11-utils
+
+      - name: Prepare demo source
+        run: |
+          set -euo pipefail
+          rm -rf demo-src
+          mkdir demo-src
+          cp -a backend-src/. demo-src/
+          rm -rf demo-src/.git demo-src/.github demo-src/webui demo-src/personas
+          cp -a webui-src/webui demo-src/webui
+          cp -a personas-src/personas demo-src/personas
+          test -f "demo-src/personas/大肥鱼/persona_prompt.py"
+          test -f demo-src/pyproject.toml
+
+      - name: Run installer wizard and capture
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          Xvfb :99 -screen 0 1280x800x24 &
+          XVFB_PID=$!
+          trap 'kill "$XVFB_PID" 2>/dev/null || true' EXIT
+          sleep 2
+          export DISPLAY=:99
+          openbox >/tmp/openbox.log 2>&1 &
+          sleep 1
+          python scripts/capture_installer_ui.py \
+            --source demo-src \
+            --install-dir /tmp/kb-installer-demo \
+            --out artifacts \
+            --screen 1280x800
+
+      - name: Show captured files
+        if: always()
+        run: |
+          find artifacts -maxdepth 2 -type f -printf '%P %s bytes\n' | sort
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-ui-demo
+          path: artifacts/**
+          if-no-files-found: warn
+          retention-days: 7
