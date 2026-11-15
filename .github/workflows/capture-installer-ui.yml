@@ -9,6 +9,7 @@ on:
     paths:
       - ".github/workflows/capture-installer-ui.yml"
       - "scripts/capture_installer_ui.py"
+      - "gui_install.py"
 
 permissions:
   contents: read

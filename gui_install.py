@@ -317,6 +317,16 @@ class InstallerApp:
         self.config_canvas = canvas
         self.config_inner = inner
 
+    def _wrap_label(self, widget: tk.Widget, margin: int = 52) -> None:
+        """让长说明随配置区宽度换行，避免右侧被 Canvas 裁掉。"""
+        def _sync(event: tk.Event | None = None) -> None:
+            width = event.width if event is not None else self.config_canvas.winfo_width()
+            if width > 100:
+                widget.configure(wraplength=max(260, int(width) - margin))
+
+        self.config_canvas.bind("<Configure>", _sync, add="+")
+        _sync()
+
     def _build_source_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="1. 安装来源", padding=5)
         frame.pack(fill="x", pady=(0, 3))
@@ -358,14 +368,16 @@ class InstallerApp:
         )
         self.archive_button.grid(row=2, column=2, pady=2)
 
-        ttk.Label(
+        source_hint = ttk.Label(
             frame,
             text=(
                 "在线安装会下载 backend 核心包和 GUI/WebUI 模块；"
                 "Windows 原生 GUI 需要安装器 Release 的 GTK4 便携预构建包。"
             ),
             foreground="#64748b",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        )
+        source_hint.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self._wrap_label(source_hint)
 
     def _build_frontend_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="2. 界面版本", padding=5)
@@ -386,7 +398,7 @@ class InstallerApp:
             value="webui",
             command=self._update_appearance_state,
         ).pack(side="left", padx=(18, 0))
-        ttk.Label(
+        frontend_hint = ttk.Label(
             frame,
             text=(
                 "GUI 需要 GTK4（Windows 用便携预构建包）；"
@@ -394,7 +406,9 @@ class InstallerApp:
             ),
             foreground="#64748b",
             justify="left",
-        ).pack(anchor="w", pady=(2, 0))
+        )
+        frontend_hint.pack(anchor="w", pady=(2, 0))
+        self._wrap_label(frontend_hint)
 
     def _build_install_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="3. 安装位置", padding=5)
@@ -407,14 +421,16 @@ class InstallerApp:
         ttk.Button(frame, text="浏览…", command=self._browse_install_dir).grid(
             row=0, column=2
         )
-        ttk.Label(
+        install_hint = ttk.Label(
             frame,
             text=(
                 "默认目录在用户 AppData，通常不需要管理员权限；"
                 "Windows 路径请不要包含中文或其他非 ASCII 字符。"
             ),
             foreground="#64748b",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        )
+        install_hint.grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        self._wrap_label(install_hint)
 
     def _build_options_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="4. 选项", padding=5)
@@ -502,7 +518,7 @@ class InstallerApp:
         )
         self.skin_note_label.pack(anchor="w", pady=(3, 2))
 
-        ttk.Label(
+        appearance_hint = ttk.Label(
             frame,
             text=(
                 "自动模式由 GUI 启动器在初始化 GTK 前按 stage 回退："
@@ -511,7 +527,9 @@ class InstallerApp:
             ),
             foreground="#64748b",
             justify="left",
-        ).pack(anchor="w", pady=(2, 0))
+        )
+        appearance_hint.pack(anchor="w", pady=(2, 0))
+        self._wrap_label(appearance_hint)
 
     def _update_source_state(self) -> None:
         mode = self.source_mode.get()
