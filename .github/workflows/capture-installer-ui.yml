@@ -2,6 +2,13 @@ name: Capture Installer UI
 
 on:
   workflow_dispatch:
+  # workflow_dispatch 只认默认分支上的工作流文件；功能分支先用 push 触发。
+  push:
+    branches:
+      - feat/installer-v0.1.1-feedback
+    paths:
+      - ".github/workflows/capture-installer-ui.yml"
+      - "scripts/capture_installer_ui.py"
 
 permissions:
   contents: read
