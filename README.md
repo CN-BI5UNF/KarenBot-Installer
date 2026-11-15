@@ -21,7 +21,7 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 `install.sh` 后再执行：
 
 ```bash
-sha=6af5fa2406970d671047d5dabe45c01ffd9e0616
+sha=6af5fa2
 want=a801720ffcf99ba7823abae159b3a3decbbe3cfb859d9168dfe11cc3c96ad5d0
 core=047842a9558efb0cda74ccd2fc280f8ab4229c2745f5dd4fabb6cc0316693e83
 KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
