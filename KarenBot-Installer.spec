@@ -10,6 +10,7 @@ from pathlib import Path
 
 INSTALLER_DIR = Path(SPECPATH).resolve()
 VERSION_FILE = INSTALLER_DIR / "packaging" / "windows-version-info.txt"
+MANIFEST_FILE = INSTALLER_DIR / "packaging" / "windows-manifest.xml"
 
 DATAS = [
     (str(INSTALLER_DIR / "mirrors.json"), "."),
@@ -48,6 +49,11 @@ exe = EXE(
     version=(
         str(VERSION_FILE)
         if sys.platform.startswith("win") and VERSION_FILE.is_file()
+        else None
+    ),
+    manifest=(
+        str(MANIFEST_FILE)
+        if sys.platform.startswith("win") and MANIFEST_FILE.is_file()
         else None
     ),
 )

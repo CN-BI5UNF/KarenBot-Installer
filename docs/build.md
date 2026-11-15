@@ -22,6 +22,7 @@ PyInstaller 版本，打包后用 `scripts/check_artifact_size.py` 强制检查
 
 - PE machine `0x8664`（x64）；
 - `FileVersionInfo` 是否写入；
+- 嵌入清单是否启用 PerMonitorV2 DPI 感知和 longPathAware；
 - 文件大小是否异常；
 - `--check` 退出码；
 - SHA256。

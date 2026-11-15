@@ -139,3 +139,15 @@ def test_spec_does_not_bundle_python_runtime():
     assert "vendor" not in spec
     assert "python-runtime.tar.gz" not in spec
     assert "windows-gui-package.json" in spec
+
+
+def test_windows_manifest_enables_dpi_and_long_paths():
+    manifest = (INSTALLER / "packaging" / "windows-manifest.xml").read_text(
+        encoding="utf-8"
+    )
+    assert "dpiAware" in manifest
+    assert "PerMonitorV2" in manifest
+    assert "longPathAware" in manifest
+    assert "asInvoker" in manifest
+    spec = (INSTALLER / "KarenBot-Installer.spec").read_text(encoding="utf-8")
+    assert "windows-manifest.xml" in spec
