@@ -815,3 +815,37 @@ def test_ensure_personas_skips_when_present(tmp_path, monkeypatch):
 
     monkeypatch.setattr(installer, "download", _unexpected)
     installer.ensure_personas(app, tmp_path / "staging")
+
+
+def test_failed_upgrade_restores_previous_app(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    old_app = install_dir / "app"
+    old_app.mkdir(parents=True)
+    (old_app / "previous.txt").write_text("keep me", encoding="utf-8")
+
+    source = tmp_path / "source"
+    (source / "backend").mkdir(parents=True)
+    (source / "gui").mkdir()
+    (source / "new.txt").write_text("new version", encoding="utf-8")
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='demo'\n", encoding="utf-8"
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated launcher failure")
+
+    monkeypatch.setattr(installer, "_write_launchers", _boom)
+    with pytest.raises(RuntimeError):
+        installer.install(
+            frontend="gui",
+            install_dir=install_dir,
+            source_dir=source,
+            archive=None,
+            venv=None,
+            skip_deps=True,
+            create_shortcut=False,
+            download_fonts=False,
+        )
+    assert (install_dir / "app" / "previous.txt").read_text(encoding="utf-8") == "keep me"
+    assert not (install_dir / "app" / "new.txt").exists()
+    assert not (install_dir / "app.old").exists()

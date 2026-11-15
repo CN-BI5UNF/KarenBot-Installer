@@ -2438,6 +2438,9 @@ def install(
     _validate_install_path(install_dir, "安装目录")
     ensure_writable_dir(install_dir, "安装目录")
     staging = Path(tempfile.mkdtemp(prefix=".karen-install-", dir=str(install_dir)))
+    target_app: Path | None = None
+    old_app: Path | None = None
+    swapped = False
     try:
         installer_kind = "local-source"
         components: dict[str, Any] | None = None
@@ -2547,6 +2550,9 @@ def install(
             shutil.rmtree(old_app, ignore_errors=True)
         if target_app.exists():
             target_app.rename(old_app)
+        # 从这一刻起，后续任何失败都要把旧版本换回来，避免升级失败后
+        # 用户既没有新版本、也找不到原来的 app/。
+        swapped = True
         app_root.rename(target_app)
 
         prebuilt_target: Path | None = None
@@ -2635,6 +2641,21 @@ def install(
         if frontend == "gui":
             log(f"兼容模式：{launch_target(install_dir, 'gui', safe=True)}")
         return install_dir
+    except BaseException:
+        if (
+            swapped
+            and target_app is not None
+            and old_app is not None
+            and old_app.exists()
+        ):
+            stage("安装失败，正在回滚到旧版本…")
+            shutil.rmtree(target_app, ignore_errors=True)
+            try:
+                old_app.rename(target_app)
+                log("已回滚到升级前的 app/")
+            except OSError as exc:
+                log(f"回滚失败：{exc}；旧版本仍保留在 {old_app}")
+        raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
