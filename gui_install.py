@@ -180,6 +180,8 @@ class InstallerApp:
         self.mirror_url = tk.StringVar(value=DEFAULT_PROBE_URL)
         self.status = tk.StringVar(value="就绪")
         self.progress_step = tk.StringVar(value="准备安装…")
+        # 进度弹窗单独一行显示下载速度/ETA，避免和阶段标题重复。
+        self.dialog_status = tk.StringVar(value="")
         self.skin_note = tk.StringVar(value="")
 
     def _build_ui(self) -> None:
@@ -786,6 +788,7 @@ class InstallerApp:
     def _on_stage(self, message: str) -> None:
         self.progress_step.set(message)
         self.status.set(message)
+        self.dialog_status.set("")
 
     def _update_progress(self, done: int, total: int | None) -> None:
         dialog = self._dialog_progress
@@ -820,6 +823,10 @@ class InstallerApp:
                 f"下载中 {done / 1024 / 1024:.1f} / "
                 f"{total / 1024 / 1024:.1f} MB{speed_text}{eta_text}"
             )
+            self.dialog_status.set(
+                f"{done / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} MB"
+                f"{speed_text}{eta_text}"
+            )
             return
         if str(self.progress.cget("mode")) != "indeterminate":
             self.progress.configure(mode="indeterminate")
@@ -828,6 +835,9 @@ class InstallerApp:
             dialog.configure(mode="indeterminate")
             dialog.start(12)
         self.status.set(
+            f"已下载 {done / 1024 / 1024:.1f} MB{speed_text}"
+        )
+        self.dialog_status.set(
             f"已下载 {done / 1024 / 1024:.1f} MB{speed_text}"
         )
 
@@ -892,6 +902,7 @@ class InstallerApp:
         window.title("正在安装 KarenBot")
         window.transient(self.root)
         window.resizable(False, False)
+        self.dialog_status.set("")
         self.root.update_idletasks()
         width = 580
         x = self.root.winfo_rootx() + max(
@@ -924,7 +935,7 @@ class InstallerApp:
         self._dialog_progress.start(12)
         ttk.Label(
             body,
-            textvariable=self.status,
+            textvariable=self.dialog_status,
             wraplength=540,
             justify="left",
         ).pack(anchor="w", pady=(6, 0))
