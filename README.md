@@ -65,8 +65,9 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 ## 安装器做了什么
 
 1. **镜像测速自动选择**：`mirrors.json` 内置 GitHub 直连和多个公共镜像；
-   并发探测资产前 512KB，按吞吐 + 首字节延迟评分，自动选最快且低延迟的
-   方案；下载失败自动换下一个镜像。
+   并发探测资产前 256KB，按吞吐 + 首字节延迟评分，自动选最快且低延迟的
+   方案；下载失败自动换下一个镜像。同一次安装内复用测速结果（5 分钟
+   窗口），不会为每个资产重复测速。
 2. **在线 Release 安装**：Linux 下载 backend 核心包 + GUI/WebUI 源码模块；
    Windows 原生 GUI 下载 `KarenBot-Windows-x64.zip` 便携包。
 3. **内置人格补齐**：backend 仓库的 `personas/` 只有空壳；Windows 便携包
@@ -84,7 +85,16 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
    `gui.launcher` 还会按 stage 自动回退到 Cairo 软件渲染。另提供
    `launch-gui-safe` / “KarenBot GUI (兼容模式)”入口。
 8. **快捷方式与自删除**：Linux `.desktop`，Windows PowerShell 创建开始
-   菜单/桌面快捷方式；打包版安装器默认安装后自删除。
+   菜单/桌面快捷方式；便携包没有 exe 时使用内置 `karenbot.ico`。打包版
+   安装器默认保留自身；启用自删除后会在退出后重试删除，避免被占用时静默
+   失败。
+9. **可取消与实时日志**：下载、解压、`venv`/`pip` 子进程都会响应“取消”；
+   `pip` 输出实时转发到“安装日志”页，失败时能看到真实报错。
+10. **安装前预检**：检查目录可写、磁盘余量（GUI 约 1.2 GB / WebUI 约
+    400 MB）以及旧版 KarenBot 是否仍在运行，避免升级到最后一步才因文件
+    占用失败。
+11. **卸载**：CLI `--uninstall` 或 GUI “卸载…” 按钮会清理程序目录、
+    启动器、快捷方式、字体和主题偏好，但只对带安装标记的目录生效。
 
 ## 已知问题处理
 
@@ -128,6 +138,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `--mirror <名称>` | 固定使用某个镜像；`--list-mirrors` 查看名称 |
 | `--windows-gui-asset URL` | 覆盖 Windows GUI 预构建包 URL（本地路径或测试镜像） |
 | `--bundle-tag <tag>` | Windows GUI 便携包所在的安装器 Release tag；默认 `auto` |
+| `--uninstall` | 卸载 `--dir` 指向的 KarenBot，并清理快捷方式/字体/主题偏好 |
 | `--self-delete` / `--keep-installer` | 安装后删除/保留安装器自身 |
 | `--probe-url` | 只对镜像做测速并退出 |
 | `--list-mirrors` | 列出内置镜像后退出 |
@@ -136,12 +147,20 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 ## 镜像与安全
 
 `mirrors.json` 维护 GitHub 直连和公共前缀镜像。测速并发请求实际资产的前
-512KB，按吞吐和首字节延迟评分；下载失败自动换下一个镜像。Release 元数据
+256KB，按吞吐和首字节延迟评分；下载失败自动换下一个镜像。Release 元数据
 （`releases/latest` / `releases.atom`）也走 direct → 镜像回退。
 
-第三方镜像能看到下载请求，也可能篡改内容。安装器对有 SHA256 的资产会校验；
-没有官方哈希的 Release tarball 只能靠结构和运行检查。敏感环境请优先使用
-`--mirror direct`，或在后续 Release manifest 中补齐哈希。
+第三方镜像能看到下载请求，也可能篡改内容。安装器对可执行资产执行以下策略：
+
+- `SHA256SUMS.txt` 优先从 GitHub 直连读取；来自第三方镜像的清单标记为不可信，
+  不能用于可执行资产校验；
+- Windows GUI 便携包必须拿到 GitHub 直连的 SHA256 清单，否则报错中止；
+  确认风险时可设置 `KAREN_ALLOW_UNVERIFIED=1`；
+- 人格资产缺少可信哈希时，回退下载主仓库源码包并强制直连；
+- backend/frontend 的 GitHub 自动源码归档没有发布方哈希，安装器会明确提示
+  只能依赖 HTTPS 传输完整性；敏感环境请使用 `--mirror direct`。
+
+Release 流水线会为 Windows 便携包、人格包和安装器本体生成 `SHA256SUMS.txt`。
 
 ## Windows 原生 GUI
 
@@ -149,7 +168,7 @@ Windows 源码安装不现实：GTK4/PyGObject 需要一整套便携运行时。
 下载安装器 Release 的预构建包 `KarenBot-Windows-x64.zip`，并按
 `windows-gui-package.json` 契约校验：
 
-- `runtime/python.exe`；
+- `runtime/python.exe`（启动器会优先使用同目录的 `pythonw.exe`，避免黑框）；
 - `gtk-4-1.dll`、`adwaita-1-0.dll`、`gobject-2.0-0.dll`；
 - `Gtk-4.0.typelib`、`Adw-1.typelib`；
 - `backend/` + `gui/`。
@@ -215,13 +234,19 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
 
 ## 安全边界
 
-- 解压拒绝 `..`、绝对路径、符号链接和设备文件；
-- 下载支持 SHA256 校验，失败自动换镜像；
+- 解压拒绝 `..`、绝对路径、符号链接和设备文件；Python 3.12+ 使用 PEP 706
+  的 `filter="data"`，旧版本回退到手工校验；
+- 下载支持 SHA256 校验，失败自动换镜像；校验清单优先直连读取，第三方镜像
+  提供的清单不用于可执行资产；
+- Windows GUI 便携包缺少可信 SHA256 时中止，除非显式设置
+  `KAREN_ALLOW_UNVERIFIED=1`；
 - Windows 默认 per-user 安装，不触发 UAC；
 - 安装器只替换 `<install>/app`，不删除用户数据目录；升级失败会自动把
-  `app.old` 换回 `app/`；
-- 自删除只在打包版默认开启；源码运行默认保留脚本；
-- Windows GUI 预构建包按 DLL/typelib 契约检查，缺运行时直接报错。
+  `app.old` 换回 `app/`；覆盖安装前会检测被占用的 exe/dll；
+- 自删除只在打包版且启用 `--self-delete`/GUI 勾选时执行；源码运行默认保留；
+- Windows GUI 预构建包按 DLL/typelib 契约检查，缺运行时直接报错；
+- 卸载只对带 `.karen-installer.json`（或 `app/modules.json` installer 字段）
+  的目录生效，避免误删用户指定目录。
 
 ## 当前限制
 

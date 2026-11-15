@@ -116,3 +116,38 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 
 **处理**：替换 `app/` 后记录回滚点；任何失败/取消都会删除半成品并把
 `app.old` 换回 `app/`。只有全部步骤成功后才删除旧备份。
+
+## 11. Windows 启动后残留 cmd 黑框
+
+**现象**：双击桌面快捷方式后，任务栏一直挂着一个命令提示符窗口。
+
+**处理**：
+
+- `launch-gui.cmd` 优先使用同目录的 `pythonw.exe`，并用 `start "" /B`
+  让 cmd 立即退出；
+- `launch-gui-safe.cmd` 继续使用 `python.exe`，崩溃时 `pause`，方便查看
+  报错；
+- 快捷方式优先使用预构建 exe 的图标，否则使用便携包里的
+  `gui/assets/karenbot.ico` 或安装器内置 `karenbot.ico`。
+
+## 12. 安装到一半点“取消”没有反应
+
+**现象**：点击取消后，`pip install` 或解压仍然继续，进度窗口卡住。
+
+**处理**：
+
+- 下载按 256KB 分块、解压按成员循环检查取消事件；
+- `pip`/`venv` 子进程改为 Popen 轮询，取消时在 Windows 用
+  `taskkill /F /T` 终止整个进程树，在 Linux 用进程组 SIGTERM；
+- 子进程输出实时转发到日志页，失败时能看到 pip 的真实报错。
+
+## 13. 升级时旧版本仍在后台运行
+
+**现象**：替换 `app/` 时报 `WinError 5`；或上次残留的 `app.old` 被占用，
+`rename` 报 `WinError 183`。
+
+**处理**：
+
+- 安装前和替换前各检查一次 `app/` 下的运行中进程和 exe/dll 占用；
+- 删除 `app.old` 失败时给出具体路径并中止，不再静默忽略；
+- 替换失败会提示先关闭 KarenBot，避免下载几百 MB 后才崩溃。

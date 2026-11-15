@@ -7,6 +7,7 @@ import io
 import json
 import os
 import socketserver
+import sys
 import tarfile
 import threading
 import zipfile
@@ -849,3 +850,277 @@ def test_failed_upgrade_restores_previous_app(tmp_path, monkeypatch):
     assert (install_dir / "app" / "previous.txt").read_text(encoding="utf-8") == "keep me"
     assert not (install_dir / "app" / "new.txt").exists()
     assert not (install_dir / "app.old").exists()
+
+
+# ---------------------------------------------------------------------------
+# 计划改进项：缓存、取消、安全校验、Windows 启动器与卸载
+# ---------------------------------------------------------------------------
+
+
+def test_rank_mirrors_reuses_probe_results(monkeypatch):
+    installer.reset_runtime_caches()
+    mirrors = [{"name": "cache-test", "kind": "direct"}]
+    calls: list[str] = []
+
+    def fake_probe(url, _mirrors=None, **_kwargs):
+        calls.append(url)
+        return [
+            {
+                "ok": True,
+                "mirror": "cache-test",
+                "url": url,
+                "speed": 1024.0,
+                "latency": 0.2,
+                "score": installer.mirror_score(1024.0, 0.2),
+            }
+        ]
+
+    monkeypatch.setattr(installer, "probe_mirrors", fake_probe)
+    first = installer.rank_mirrors("https://example.test/a.tar.gz", mirrors)
+    second = installer.rank_mirrors("https://example.test/b.tar.gz", mirrors)
+    assert len(calls) == 1
+    assert first[0]["url"].endswith("/a.tar.gz")
+    assert second[0]["url"].endswith("/b.tar.gz")
+
+    installer.rank_mirrors(
+        "https://example.test/c.tar.gz", mirrors, refresh=True
+    )
+    assert len(calls) == 2
+
+
+class _FakeResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def read(self, _size: int = -1) -> bytes:
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def _checksum_fixture(monkeypatch, mirror: dict) -> None:
+    installer.reset_runtime_caches()
+    monkeypatch.setattr(installer, "_checksum_mirrors", lambda: [mirror])
+    payload = b"a" * 64 + b"  KarenBot-Windows-x64.zip\n"
+    monkeypatch.setattr(
+        installer.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeResponse(payload),
+    )
+
+
+def test_fetch_checksums_accepts_direct_manifest(monkeypatch):
+    _checksum_fixture(monkeypatch, {"name": "direct", "kind": "direct"})
+    checksums = installer.fetch_release_checksums(
+        "owner/repo", "v1", require_trusted=True
+    )
+    assert checksums["KarenBot-Windows-x64.zip"] == "a" * 64
+
+
+def test_fetch_checksums_rejects_third_party_manifest(monkeypatch):
+    _checksum_fixture(
+        monkeypatch,
+        {
+            "name": "proxy",
+            "kind": "prefix",
+            "prefix": "https://proxy.test/https://github.com",
+        },
+    )
+    checksums = installer.fetch_release_checksums(
+        "owner/repo", "v1", require_trusted=True
+    )
+    assert checksums == {}
+    # 明确要求可信清单时，第三方镜像的缓存也不能复用。
+    assert (
+        installer.fetch_release_checksums(
+            "owner/repo", "v1", require_trusted=True
+        )
+        == {}
+    )
+
+
+def test_extract_archive_honours_preexisting_cancel(tmp_path):
+    archive = tmp_path / "asset.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        data = b"x"
+        info = tarfile.TarInfo("file.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    event = threading.Event()
+    event.set()
+    with pytest.raises(installer.InstallCancelled):
+        installer.extract_archive(
+            archive, tmp_path / "out", cancel_event=event
+        )
+
+
+def test_run_streams_child_output():
+    lines: list[str] = []
+    installer.set_log_sink(lines.append)
+    try:
+        installer.run([sys.executable, "-c", "print('stream-marker')"])
+    finally:
+        installer.set_log_sink(None)
+    assert any("stream-marker" in line for line in lines)
+
+
+def test_run_cancel_terminates_blocking_child():
+    event = threading.Event()
+    event.set()
+    with pytest.raises(installer.InstallCancelled):
+        installer.run(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cancel_event=event,
+        )
+
+
+def test_install_refuses_when_old_app_is_running(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    (install_dir / "app").mkdir(parents=True)
+    monkeypatch.setattr(
+        installer,
+        "_processes_under",
+        lambda _root: ["1234|python.exe|/opt/KarenBot/app"],
+    )
+    with pytest.raises(SystemExit) as error:
+        installer.ensure_app_not_running(install_dir)
+    assert "仍在运行" in error.value.message
+
+
+def test_windows_launcher_prefers_pythonw(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    app = tmp_path / "app"
+    app.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "python.exe").write_bytes(b"")
+    (runtime / "pythonw.exe").write_bytes(b"")
+    installer._write_launchers(
+        tmp_path,
+        app,
+        tmp_path / "venv",
+        "gui",
+        portable_python=runtime / "python.exe",
+    )
+    normal = (tmp_path / "launch-gui.cmd").read_text(encoding="utf-8")
+    safe = (tmp_path / "launch-gui-safe.cmd").read_text(encoding="utf-8")
+    webui = (tmp_path / "launch-webui.cmd").read_text(encoding="utf-8")
+    assert "pythonw.exe" in normal
+    assert 'start "" /B' in normal
+    assert "python.exe" in safe
+    assert "pause" in safe
+    assert "python.exe" in webui
+
+
+def test_windows_shortcut_uses_packaged_icon(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    install_dir = tmp_path / "install"
+    assets = install_dir / "app" / "gui" / "assets"
+    assets.mkdir(parents=True)
+    icon = assets / "karenbot.ico"
+    icon.write_bytes(b"ico")
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda command, **_kwargs: captured.append(command),
+    )
+    installer._install_windows_shortcut(install_dir, "gui")
+    assert captured
+    script = captured[0][-1]
+    assert "IconLocation" in script
+    assert "karenbot.ico" in script
+
+
+def test_windows_self_delete_retries_and_verifies():
+    command = installer._windows_self_delete_command(
+        Path(r"C:\Temp\KarenBot-Installer.exe")
+    )
+    assert "for /L %i in (1,1,10)" in command
+    assert "del /f /q" in command
+    assert "if not exist" in command
+
+
+def test_uninstall_removes_install_artifacts(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    (install_dir / "app" / "backend").mkdir(parents=True)
+    (install_dir / "app" / "modules.json").write_text(
+        '{"installer": "local-source"}', encoding="utf-8"
+    )
+    (install_dir / "venv").mkdir()
+    (install_dir / "launch-gui.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (install_dir / installer.INSTALL_MARKER_NAME).write_text(
+        "{}", encoding="utf-8"
+    )
+    font_root = tmp_path / "fonts"
+    font_root.mkdir()
+    (font_root / "NotoSansSC-VF.otf").write_text("font", encoding="utf-8")
+    (font_root / "fonts.conf").write_text("cfg", encoding="utf-8")
+    skin_dir = tmp_path / "config" / "karen-gui"
+    skin_dir.mkdir(parents=True)
+    (skin_dir / "skin").write_text("karen\n", encoding="utf-8")
+    monkeypatch.setattr(installer, "_font_dir", lambda: font_root)
+    monkeypatch.setattr(installer, "_gui_skin_dirs", lambda: [skin_dir])
+    monkeypatch.setattr(installer, "_remove_shortcuts", lambda: None)
+
+    installer.uninstall(install_dir)
+
+    assert not install_dir.exists()
+    assert not font_root.exists()
+    assert not (skin_dir / "skin").exists()
+
+
+def test_uninstall_refuses_unknown_directory(tmp_path):
+    target = tmp_path / "not-karenbot"
+    target.mkdir()
+    with pytest.raises(SystemExit) as error:
+        installer.uninstall(target)
+    assert "不是 KarenBot 安装目录" in error.value.message
+
+
+def test_prepare_windows_gui_requires_trusted_checksum(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        installer,
+        "_windows_bundle_tag",
+        lambda *_args, **_kwargs: ("v1.0.0", "稳定版"),
+    )
+    monkeypatch.setattr(
+        installer,
+        "fetch_release_checksums",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.delenv(installer.UNVERIFIED_ENV, raising=False)
+    with pytest.raises(SystemExit) as error:
+        installer._prepare_windows_gui_app(tmp_path, cancel_event=None)
+    assert "无法验证" in error.value.message
+    assert installer.UNVERIFIED_ENV in error.value.message
+
+
+def test_prepare_windows_gui_allows_explicit_unverified_opt_in(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        installer,
+        "_windows_bundle_tag",
+        lambda *_args, **_kwargs: ("v1.0.0", "稳定版"),
+    )
+    monkeypatch.setattr(
+        installer,
+        "fetch_release_checksums",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setenv(installer.UNVERIFIED_ENV, "1")
+    monkeypatch.setattr(
+        installer,
+        "download",
+        lambda *_args, **_kwargs: installer.fail("simulated-download-failure"),
+    )
+    with pytest.raises(SystemExit) as error:
+        installer._prepare_windows_gui_app(tmp_path, cancel_event=None)
+    assert "simulated-download-failure" in error.value.message

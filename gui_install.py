@@ -45,10 +45,7 @@ else:
     _TK_ERROR = None
 
 APP_TITLE = "KarenBot 安装引导"
-DEFAULT_PROBE_URL = (
-    "https://github.com/CN-BI5UNF/KarenBot-backend/archive/refs/tags/"
-    "v0.1.1-alpha.1.tar.gz"
-)
+DEFAULT_PROBE_URL = core.DEFAULT_PROBE_URL
 
 
 def _enable_dpi_awareness() -> None:
@@ -152,17 +149,32 @@ class InstallerApp:
         self._dialog_progress: ttk.Progressbar | None = None
         self._progress_started: float | None = None
         self._progress_done = 0
+        self._progress_total: int | None = None
+        self._progress_samples: list[tuple[float, int]] = []
         self._cancel = threading.Event()
         self._installed_dir: Path | None = None
         self._installed_frontend = "gui"
         self._delete_on_close = False
+        self._running = False
+        self._uninstall_check: str | None = None
         self._skin_radios: list[ttk.Radiobutton] = []
         self._render_radios: list[ttk.Radiobutton] = []
+        self._config_widgets: list[tuple[tk.Widget, str]] = []
+        self._mirror_rows: dict[str, str] = {}
+        self._mirror_apply_button: ttk.Button | None = None
         self._build_vars()
         self._build_ui()
         self._update_source_state()
         self._update_appearance_state()
+        self.install_dir.trace_add(
+            "write", lambda *_args: self._schedule_uninstall_check()
+        )
+        self._update_uninstall_state()
         self._poll_queue()
+
+    def _track(self, widget: tk.Widget, normal_state: str = "normal") -> None:
+        """记录安装期间需要一起锁定的配置控件及其正常状态。"""
+        self._config_widgets.append((widget, normal_state))
 
     def _build_vars(self) -> None:
         self.source_mode = tk.StringVar(value="online")
@@ -177,6 +189,7 @@ class InstallerApp:
         self.gui_skin = tk.StringVar(value="karen")
         self.render_mode = tk.StringVar(value="auto")
         self.pypi_mirror = tk.StringVar(value="auto")
+        self.github_mirror = tk.StringVar(value="auto")
         self.mirror_url = tk.StringVar(value=DEFAULT_PROBE_URL)
         self.status = tk.StringVar(value="就绪")
         self.progress_step = tk.StringVar(value="准备安装…")
@@ -220,6 +233,13 @@ class InstallerApp:
             state="disabled",
         )
         self.open_button.pack(side="left", padx=(6, 0))
+        self.uninstall_button = ttk.Button(
+            buttons,
+            text="卸载…",
+            command=self._start_uninstall,
+            state="disabled",
+        )
+        self.uninstall_button.pack(side="left", padx=(6, 0))
         self.launch_button = ttk.Button(
             buttons, text="启动", command=self._launch_installed, state="disabled"
         )
@@ -334,21 +354,28 @@ class InstallerApp:
         frame.pack(fill="x", pady=(0, 3))
         frame.columnconfigure(1, weight=1)
 
-        ttk.Radiobutton(
-            frame,
-            text="在线安装（自动选择稳定版/最新版）",
-            variable=self.source_mode,
-            value="online",
-            command=self._update_source_state,
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
-
-        ttk.Radiobutton(
-            frame,
-            text="本地源码目录",
-            variable=self.source_mode,
-            value="source",
-            command=self._update_source_state,
-        ).grid(row=1, column=0, sticky="w", pady=2)
+        self.source_radios = []
+        for row, text, value in (
+            (0, "在线安装（自动选择稳定版/最新版）", "online"),
+            (1, "本地源码目录", "source"),
+            (2, "本地安装包", "archive"),
+        ):
+            radio = ttk.Radiobutton(
+                frame,
+                text=text,
+                variable=self.source_mode,
+                value=value,
+                command=self._update_source_state,
+            )
+            radio.grid(
+                row=row,
+                column=0,
+                columnspan=3 if row == 0 else 1,
+                sticky="w",
+                pady=2,
+            )
+            self.source_radios.append(radio)
+            self._track(radio)
         self.source_entry = ttk.Entry(frame, textvariable=self.source_path)
         self.source_entry.grid(row=1, column=1, sticky="ew", padx=(8, 6), pady=2)
         self.source_button = ttk.Button(
@@ -356,19 +383,19 @@ class InstallerApp:
         )
         self.source_button.grid(row=1, column=2, pady=2)
 
-        ttk.Radiobutton(
-            frame,
-            text="本地安装包",
-            variable=self.source_mode,
-            value="archive",
-            command=self._update_source_state,
-        ).grid(row=2, column=0, sticky="w", pady=2)
         self.archive_entry = ttk.Entry(frame, textvariable=self.archive_path)
         self.archive_entry.grid(row=2, column=1, sticky="ew", padx=(8, 6), pady=2)
         self.archive_button = ttk.Button(
             frame, text="浏览…", command=self._browse_archive
         )
         self.archive_button.grid(row=2, column=2, pady=2)
+        for widget in (
+            self.source_entry,
+            self.source_button,
+            self.archive_entry,
+            self.archive_button,
+        ):
+            self._track(widget)
 
         source_hint = ttk.Label(
             frame,
@@ -386,20 +413,21 @@ class InstallerApp:
         frame.pack(fill="x", pady=(0, 3))
         row = ttk.Frame(frame)
         row.pack(fill="x")
-        ttk.Radiobutton(
-            row,
-            text="原生 GUI（GTK4，推荐桌面）",
-            variable=self.frontend,
-            value="gui",
-            command=self._update_appearance_state,
-        ).pack(side="left")
-        ttk.Radiobutton(
-            row,
-            text="WebUI（浏览器控制台）",
-            variable=self.frontend,
-            value="webui",
-            command=self._update_appearance_state,
-        ).pack(side="left", padx=(18, 0))
+        self.frontend_radios = []
+        for text, value, padx in (
+            ("原生 GUI（GTK4，推荐桌面）", "gui", (0, 0)),
+            ("WebUI（浏览器控制台）", "webui", (18, 0)),
+        ):
+            radio = ttk.Radiobutton(
+                row,
+                text=text,
+                variable=self.frontend,
+                value=value,
+                command=self._update_appearance_state,
+            )
+            radio.pack(side="left", padx=padx)
+            self.frontend_radios.append(radio)
+            self._track(radio)
         frontend_hint = ttk.Label(
             frame,
             text=(
@@ -417,12 +445,14 @@ class InstallerApp:
         frame.pack(fill="x", pady=(0, 3))
         frame.columnconfigure(1, weight=1)
         ttk.Label(frame, text="目录").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.install_dir).grid(
-            row=0, column=1, sticky="ew", padx=(8, 6)
+        self.install_entry = ttk.Entry(frame, textvariable=self.install_dir)
+        self.install_entry.grid(row=0, column=1, sticky="ew", padx=(8, 6))
+        self.install_browse_button = ttk.Button(
+            frame, text="浏览…", command=self._browse_install_dir
         )
-        ttk.Button(frame, text="浏览…", command=self._browse_install_dir).grid(
-            row=0, column=2
-        )
+        self.install_browse_button.grid(row=0, column=2)
+        self._track(self.install_entry)
+        self._track(self.install_browse_button)
         install_hint = ttk.Label(
             frame,
             text=(
@@ -439,25 +469,32 @@ class InstallerApp:
         frame.pack(fill="x", pady=(0, 3))
         row = ttk.Frame(frame)
         row.pack(fill="x")
-        ttk.Checkbutton(
+        self.create_shortcut_box = ttk.Checkbutton(
             row,
             text="创建快捷方式",
             variable=self.create_shortcut,
-        ).pack(side="left")
-        ttk.Checkbutton(
+        )
+        self.create_shortcut_box.pack(side="left")
+        self.download_fonts_box = ttk.Checkbutton(
             row,
             text="下载中文字体（Noto Sans/Serif SC，自动拉取）",
             variable=self.download_fonts,
-        ).pack(side="left", padx=(14, 0))
-        delete = ttk.Checkbutton(
+        )
+        self.download_fonts_box.pack(side="left", padx=(14, 0))
+        self.self_delete_box = ttk.Checkbutton(
             row,
             text="完成后删除安装器",
             variable=self.self_delete,
         )
+        self.self_delete_state = "normal"
         if not getattr(sys, "frozen", False):
-            delete.configure(state="disabled")
+            self.self_delete_box.configure(state="disabled")
+            self.self_delete_state = "disabled"
             self.self_delete.set(False)
-        delete.pack(side="left", padx=(14, 0))
+        self.self_delete_box.pack(side="left", padx=(14, 0))
+        self._track(self.create_shortcut_box)
+        self._track(self.download_fonts_box)
+        self._track(self.self_delete_box, self.self_delete_state)
         pypi_row = ttk.Frame(frame)
         pypi_row.pack(fill="x", pady=(4, 0))
         ttk.Label(pypi_row, text="PyPI 镜像").pack(side="left")
@@ -469,9 +506,27 @@ class InstallerApp:
             values=("auto", *core.PYPI_MIRRORS),
         )
         pypi_box.pack(side="left", padx=(8, 0))
+        self._track(pypi_box, "readonly")
         ttk.Label(
             pypi_row,
             text="auto 会按速度选择；国内网络通常清华/阿里更快。",
+            foreground="#64748b",
+        ).pack(side="left", padx=(8, 0))
+        mirror_row = ttk.Frame(frame)
+        mirror_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(mirror_row, text="GitHub 镜像").pack(side="left")
+        self.github_mirror_box = ttk.Combobox(
+            mirror_row,
+            textvariable=self.github_mirror,
+            state="readonly",
+            width=18,
+            values=("auto", *[str(item.get("name")) for item in core.load_mirrors()]),
+        )
+        self.github_mirror_box.pack(side="left", padx=(8, 0))
+        self._track(self.github_mirror_box, "readonly")
+        ttk.Label(
+            mirror_row,
+            text="auto 自动测速；也可在“镜像测速…”弹窗里双击一行固定。",
             foreground="#64748b",
         ).pack(side="left", padx=(8, 0))
 
@@ -497,6 +552,7 @@ class InstallerApp:
             )
             radio.pack(side="left", padx=(10, 0))
             self._skin_radios.append(radio)
+            self._track(radio)
 
         render_row = ttk.Frame(frame)
         render_row.pack(fill="x", pady=(4, 0))
@@ -514,6 +570,7 @@ class InstallerApp:
             )
             radio.pack(side="left", padx=(10, 0))
             self._render_radios.append(radio)
+            self._track(radio)
 
         self.skin_note_label = ttk.Label(
             frame, textvariable=self.skin_note, foreground="#b45309"
@@ -535,8 +592,8 @@ class InstallerApp:
 
     def _update_source_state(self) -> None:
         mode = self.source_mode.get()
-        source_enabled = mode == "source"
-        archive_enabled = mode == "archive"
+        source_enabled = mode == "source" and not self._running
+        archive_enabled = mode == "archive" and not self._running
         self.source_entry.configure(
             state="normal" if source_enabled else "disabled"
         )
@@ -551,7 +608,7 @@ class InstallerApp:
         )
 
     def _update_appearance_state(self) -> None:
-        enabled = self.frontend.get() == "gui"
+        enabled = self.frontend.get() == "gui" and not self._running
         state = "normal" if enabled else "disabled"
         for radio in self._skin_radios:
             radio.configure(state=state)
@@ -614,16 +671,54 @@ class InstallerApp:
         self.log_text.configure(state="disabled")
 
     def _set_running(self, running: bool) -> None:
+        self._running = running
         self.start_button.configure(state="disabled" if running else "normal")
         self.cancel_button.configure(state="normal" if running else "disabled")
+        self.mirror_open_button.configure(
+            state="disabled" if running else "normal"
+        )
         if self._mirror_button is not None:
             self._mirror_button.configure(
                 state="disabled" if running else "normal"
             )
-        self._update_appearance_state()
+        if self._mirror_apply_button is not None:
+            self._mirror_apply_button.configure(
+                state="disabled" if running else "normal"
+            )
+        for widget, normal_state in self._config_widgets:
+            widget.configure(state="disabled" if running else normal_state)
         if running:
             for radio in self._skin_radios + self._render_radios:
                 radio.configure(state="disabled")
+            self.uninstall_button.configure(state="disabled")
+        else:
+            self._update_source_state()
+            self._update_appearance_state()
+            self._update_uninstall_state()
+
+    def _schedule_uninstall_check(self) -> None:
+        if self._uninstall_check is not None:
+            try:
+                self.root.after_cancel(self._uninstall_check)
+            except tk.TclError:
+                pass
+        self._uninstall_check = self.root.after(400, self._update_uninstall_state)
+
+    def _update_uninstall_state(self) -> None:
+        self._uninstall_check = None
+        if self._running:
+            self.uninstall_button.configure(state="disabled")
+            return
+        raw = self.install_dir.get().strip()
+        enabled = False
+        if raw:
+            try:
+                enabled = core._looks_like_karenbot_install(
+                    Path(raw).expanduser()
+                )
+            except (OSError, ValueError):
+                enabled = False
+        self.uninstall_button.configure(state="normal" if enabled else "disabled")
 
     def _queue_log(self, line: str) -> None:
         self._queue.put(("log", line))
@@ -672,6 +767,11 @@ class InstallerApp:
         except core.InstallFailure as exc:
             messagebox.showerror("安装目录不可写", exc.message)
             return
+        try:
+            core.set_mirror_override(self.github_mirror.get())
+        except core.InstallFailure as exc:
+            messagebox.showerror("镜像无效", exc.message)
+            return
         if (install_dir / "app").exists() and not messagebox.askyesno(
             "覆盖安装",
             f"{install_dir / 'app'} 已存在。继续会替换应用目录，"
@@ -699,6 +799,10 @@ class InstallerApp:
         self._installed_frontend = frontend
         self._delete_on_close = False
         self._cancel.clear()
+        self._progress_started = None
+        self._progress_done = 0
+        self._progress_total = None
+        self._progress_samples.clear()
         self._set_running(True)
         self.progress.stop()
         self.progress.configure(mode="indeterminate")
@@ -717,7 +821,8 @@ class InstallerApp:
         self._log_line(
             f"界面：{frontend}；安装目录：{install_dir}；"
             f"主题：{core.GUI_SKINS.get(gui_skin, gui_skin)}；"
-            f"渲染：{self.render_mode.get()}"
+            f"渲染：{self.render_mode.get()}；"
+            f"GitHub 镜像：{self.github_mirror.get()}"
         )
         core.set_log_sink(self._queue_log)
         core.set_progress_sink(self._queue_progress)
@@ -761,11 +866,14 @@ class InstallerApp:
             core.set_status_sink(None)
 
     def _poll_queue(self) -> None:
-        while True:
+        # pip 会刷出大量日志；每次最多处理 500 条，避免一次卡住 UI。
+        processed = 0
+        while processed < 500:
             try:
                 kind, payload = self._queue.get_nowait()
             except queue.Empty:
                 break
+            processed += 1
             if kind == "log":
                 self._log_line(str(payload))
             elif kind == "progress":
@@ -783,7 +891,9 @@ class InstallerApp:
                 self._show_mirrors(payload)
             elif kind == "mirror_error":
                 self._on_mirror_error(str(payload))
-        self.root.after(80, self._poll_queue)
+            elif kind == "uninstalled":
+                self._on_uninstalled(Path(str(payload)))
+        self.root.after(1 if not self._queue.empty() else 80, self._poll_queue)
 
     def _on_stage(self, message: str) -> None:
         self.progress_step.set(message)
@@ -793,14 +903,28 @@ class InstallerApp:
     def _update_progress(self, done: int, total: int | None) -> None:
         dialog = self._dialog_progress
         now = time.monotonic()
-        # 新文件从 0 开始时重置测速计时，避免把上一个下载的平均速度带进来。
-        if self._progress_started is None or done < self._progress_done:
-            self._progress_started = now
-        self._progress_done = int(done)
-        elapsed = max(0.001, now - (self._progress_started or now))
-        speed = done / elapsed if done > 0 else 0.0
+        done = max(0, int(done))
+        # 新文件（或重新开始）时清空滑动窗口，避免把上一段的平均速度带进来。
+        if total != self._progress_total or done < self._progress_done:
+            self._progress_total = total
+            self._progress_started = now if done == 0 else None
+            self._progress_samples.clear()
+        self._progress_done = done
+        samples = self._progress_samples
+        samples.append((now, done))
+        cutoff = now - 3.0
+        while len(samples) > 2 and samples[0][0] < cutoff:
+            samples.pop(0)
+        # 最近 3 秒的瞬时速度；不足 0.6 秒不显示，避免首块算出几百 MB/s。
+        speed = 0.0
+        span = 0.0
+        if len(samples) >= 2:
+            span = now - samples[0][0]
+            delta = done - samples[0][1]
+            if span >= 0.6 and delta >= 0:
+                speed = delta / span
         speed_text = (
-            f" · {speed / 1024 / 1024:.1f} MB/s" if speed > 0 else ""
+            f" · {speed / 1024 / 1024:.1f} MB/s" if speed > 0 and span >= 0.6 else ""
         )
         if total and total > 0:
             if str(self.progress.cget("mode")) != "determinate":
@@ -852,6 +976,7 @@ class InstallerApp:
         self.open_button.configure(state="normal")
         self.launch_button.configure(state="normal")
         self.launch_safe_button.configure(state="normal")
+        self._update_uninstall_state()
         self._log_line(f"安装完成：{path}")
         if self.self_delete.get() and getattr(sys, "frozen", False):
             self._delete_on_close = True
@@ -880,6 +1005,86 @@ class InstallerApp:
         self.status.set("已取消")
         self._log_line("安装已取消。")
 
+    def _start_uninstall(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        raw = self.install_dir.get().strip()
+        if not raw:
+            messagebox.showerror("路径无效", "安装目录不能为空。")
+            return
+        install_dir = Path(raw).expanduser()
+        try:
+            installed = core._looks_like_karenbot_install(install_dir)
+        except (OSError, ValueError):
+            installed = False
+        if not installed:
+            messagebox.showerror(
+                "未检测到安装",
+                f"{install_dir}\n不是 KarenBot 安装目录（缺少安装标记）。",
+            )
+            return
+        if not messagebox.askyesno(
+            "卸载 KarenBot",
+            "将删除以下内容：\n"
+            f"{install_dir}\n\n"
+            "包括程序、启动器、快捷方式、字体和主题偏好；"
+            "app/data 等运行数据也会一起删除。\n\n确定卸载？",
+        ):
+            return
+        self._cancel.clear()
+        self._progress_started = None
+        self._progress_done = 0
+        self._progress_total = None
+        self._progress_samples.clear()
+        self._set_running(True)
+        self.progress.stop()
+        self.progress.configure(mode="indeterminate")
+        self.progress.start(12)
+        self.progress_step.set("准备卸载…")
+        self.status.set("准备卸载…")
+        self._open_progress_dialog()
+        self._clear_log()
+        self._log_line(f"卸载：{install_dir}")
+        core.set_log_sink(self._queue_log)
+        core.set_progress_sink(self._queue_progress)
+        core.set_status_sink(self._queue_status)
+        self._worker = threading.Thread(
+            target=self._run_uninstall,
+            kwargs={"install_dir": install_dir},
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _run_uninstall(self, *, install_dir: Path) -> None:
+        try:
+            result = core.uninstall(install_dir)
+        except core.InstallCancelled:
+            self._queue.put(("cancelled", None))
+        except core.InstallFailure as exc:
+            self._queue.put(("error", exc.message))
+        except Exception:  # noqa: BLE001
+            self._queue.put(("error", traceback.format_exc()))
+        else:
+            self._queue.put(("uninstalled", str(result)))
+        finally:
+            core.set_log_sink(None)
+            core.set_progress_sink(None)
+            core.set_status_sink(None)
+
+    def _on_uninstalled(self, path: Path) -> None:
+        self._worker = None
+        self._close_progress_dialog()
+        self._set_running(False)
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100, value=0)
+        self.status.set("已卸载")
+        self._installed_dir = None
+        self.open_button.configure(state="disabled")
+        self.launch_button.configure(state="disabled")
+        self.launch_safe_button.configure(state="disabled")
+        self._log_line(f"已卸载：{path}")
+        messagebox.showinfo("卸载完成", f"KarenBot 已卸载：\n{path}")
+
     def _cancel_install(self) -> None:
         if self._worker is None or not self._worker.is_alive():
             return
@@ -887,7 +1092,7 @@ class InstallerApp:
         self.cancel_button.configure(state="disabled")
         self.progress_step.set("正在取消…")
         self.status.set("正在取消…")
-        self._log_line("已请求取消；正在等待当前步骤结束。")
+        self._log_line("已请求取消；正在中断下载/解压/子进程…")
 
     def _open_progress_dialog(self) -> None:
         if self._progress_window is not None:
@@ -999,6 +1204,7 @@ class InstallerApp:
         )
         window.geometry(f"720x450+{x}+{y}")
         self._mirror_window = window
+        self._mirror_rows.clear()
         body = ttk.Frame(window, padding=12)
         body.pack(fill="both", expand=True)
         body.columnconfigure(1, weight=1)
@@ -1012,7 +1218,7 @@ class InstallerApp:
         self._mirror_button.grid(row=0, column=2)
         ttk.Label(
             body,
-            text="并发探测前 512KB，按吞吐和首字节延迟评分；下载失败会自动换镜像。",
+            text="并发探测前 256KB，按吞吐和首字节延迟评分；双击可用行可直接设为当前镜像。",
             foreground="#64748b",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 8))
         self._mirror_tree = ttk.Treeview(
@@ -1033,9 +1239,16 @@ class InstallerApp:
         self._mirror_tree.grid(
             row=2, column=0, columnspan=3, sticky="nsew"
         )
+        self._mirror_tree.bind("<Double-1>", self._apply_selected_mirror)
         body.rowconfigure(2, weight=1)
-        ttk.Button(body, text="关闭", command=self._close_mirror_dialog).grid(
-            row=3, column=2, sticky="e", pady=(8, 0)
+        actions = ttk.Frame(body)
+        actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self._mirror_apply_button = ttk.Button(
+            actions, text="设为当前镜像", command=self._apply_selected_mirror
+        )
+        self._mirror_apply_button.pack(side="left")
+        ttk.Button(actions, text="关闭", command=self._close_mirror_dialog).pack(
+            side="right"
         )
         window.protocol("WM_DELETE_WINDOW", self._close_mirror_dialog)
 
@@ -1044,6 +1257,8 @@ class InstallerApp:
         self._mirror_window = None
         self._mirror_tree = None
         self._mirror_button = None
+        self._mirror_apply_button = None
+        self._mirror_rows.clear()
         if window is not None:
             try:
                 window.destroy()
@@ -1068,7 +1283,8 @@ class InstallerApp:
 
     def _run_mirror_test(self, url: str) -> None:
         try:
-            results = core.probe_mirrors(url, core.available_mirrors())
+            # 测速弹窗始终测全部镜像，不受“固定使用某个镜像”影响。
+            results = core.probe_mirrors(url, core.load_mirrors())
         except Exception as exc:  # noqa: BLE001
             self._queue.put(
                 ("mirror_error", f"{type(exc).__name__}: {exc}")
@@ -1090,8 +1306,11 @@ class InstallerApp:
                 float(item.get("latency") or 999),
             ),
         )
+        self._mirror_rows.clear()
         for item in ordered:
-            if item.get("ok"):
+            name = str(item.get("mirror", "?"))
+            ok = bool(item.get("ok"))
+            if ok:
                 speed = f"{float(item.get('speed') or 0) / 1024:.1f} KB/s"
                 latency = f"{float(item.get('latency') or 0):.2f}s"
                 score = f"{float(item.get('score') or 0) / 1024:.1f}"
@@ -1102,22 +1321,33 @@ class InstallerApp:
                 score = "-"
                 state = str(item.get("error") or "失败")[:120]
             if tree is not None:
-                tree.insert(
+                row = tree.insert(
                     "",
                     "end",
-                    values=(
-                        item.get("mirror", "?"),
-                        speed,
-                        latency,
-                        score,
-                        state,
-                    ),
+                    values=(name, speed, latency, score, state),
                 )
+                self._mirror_rows[row] = (name, ok)
         if self._mirror_button is not None:
             self._mirror_button.configure(state="normal")
         available = sum(1 for item in results if item.get("ok"))
         self.status.set(f"镜像测速完成：{available}/{len(results)} 可用")
         self._log_line(f"镜像测速完成：{available}/{len(results)} 可用")
+
+    def _apply_selected_mirror(self, _event: tk.Event | None = None) -> None:
+        tree = self._mirror_tree
+        if tree is None:
+            return
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("选择镜像", "请先在列表中选择一个可用镜像。")
+            return
+        name, ok = self._mirror_rows.get(selection[0], ("", False))
+        if not ok:
+            messagebox.showerror("镜像不可用", "该镜像测速失败，不能设为当前镜像。")
+            return
+        self.github_mirror.set(name)
+        self.status.set(f"已固定 GitHub 镜像：{name}（安装时生效）")
+        self._log_line(f"已固定 GitHub 镜像：{name}")
 
     def _on_mirror_error(self, message: str) -> None:
         if self._mirror_button is not None:
@@ -1161,8 +1391,8 @@ class InstallerApp:
     def _on_close(self) -> None:
         if self._worker is not None and self._worker.is_alive():
             if not messagebox.askyesno(
-                "安装进行中",
-                "安装仍在进行，确定退出？未完成的临时文件会保留。",
+                "任务进行中",
+                "安装/卸载仍在进行，确定退出？未完成的临时文件会保留。",
             ):
                 return
             self._cancel.set()

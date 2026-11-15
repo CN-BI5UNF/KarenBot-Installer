@@ -286,9 +286,24 @@ jobs:
       - name: Run installed GUI launcher
         shell: pwsh
         run: |
-          $launcher = Join-Path $env:RUNNER_TEMP "kb-install\launch-gui.cmd"
-          if (-not (Test-Path $launcher)) { throw "launcher missing: $launcher" }
-          cmd /c "`"$launcher`" --version"
+          $install = Join-Path $env:RUNNER_TEMP "kb-install"
+          $normal = Join-Path $install "launch-gui.cmd"
+          $safe = Join-Path $install "launch-gui-safe.cmd"
+          if (-not (Test-Path $normal)) { throw "launcher missing: $normal" }
+          if (-not (Test-Path $safe)) { throw "safe launcher missing: $safe" }
+          $normalText = Get-Content $normal -Raw
+          if ($normalText -notmatch "pythonw\.exe") {
+            throw "launch-gui.cmd should use pythonw.exe"
+          }
+          if ($normalText -notmatch 'start "" /B') {
+            throw "launch-gui.cmd should use start /B"
+          }
+          $safeText = Get-Content $safe -Raw
+          if ($safeText -notmatch "python\.exe") {
+            throw "launch-gui-safe.cmd should use python.exe"
+          }
+          # pythonw 没有 stdout；--version 用兼容模式验证真实运行时。
+          cmd /c "`"$safe`" --version"
           if ($LASTEXITCODE -ne 0) {
             throw "installed GUI launcher failed: $LASTEXITCODE"
           }

@@ -151,3 +151,22 @@ def test_windows_manifest_enables_dpi_and_long_paths():
     assert "asInvoker" in manifest
     spec = (INSTALLER / "KarenBot-Installer.spec").read_text(encoding="utf-8")
     assert "windows-manifest.xml" in spec
+
+
+def test_spec_trims_tcl_data_and_embeds_icon():
+    spec = (INSTALLER / "KarenBot-Installer.spec").read_text(encoding="utf-8")
+    assert "tzdata" in spec
+    assert "tcltest" in spec
+    assert "decimal" in spec
+    # concurrent.futures 需要 multiprocessing，不能排除。
+    assert "不能排除 multiprocessing" in spec
+    assert "karenbot.ico" in spec
+    assert "icon=" in spec
+
+
+def test_windows_bundle_ships_shortcut_icon():
+    script = (INSTALLER / "scripts" / "build_windows_bundle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "karenbot.ico" in script
+    assert "gui/assets/karenbot.ico" in script

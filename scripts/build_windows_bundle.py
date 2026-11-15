@@ -154,6 +154,12 @@ def main() -> int:
         if gui_target.exists():
             shutil.rmtree(gui_target)
         shutil.copytree(gui / "gui", gui_target, ignore=IGNORE)
+        icon = ROOT / "packaging" / "karenbot.ico"
+        if icon.is_file():
+            assets = gui_target / "assets"
+            assets.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(icon, assets / "karenbot.ico")
+            print("icon: gui/assets/karenbot.ico")
 
         print("copy personas from KarenBot main repository")
         personas = args.personas_dir.resolve()

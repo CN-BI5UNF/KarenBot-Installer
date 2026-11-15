@@ -130,6 +130,16 @@ GIO_MODULE_DIR=<app>\runtime\lib\gio\modules
 FONTCONFIG_FILE=%LOCALAPPDATA%\KarenBot\fonts\fonts.conf
 ```
 
+`launch-gui.cmd` 优先调用同目录的 `pythonw.exe`（`start "" /B`，无黑框）；
+`launch-gui-safe.cmd` 使用 `python.exe` 并在失败时 `pause`，方便查看日志。
+
+## 快捷方式图标
+
+安装器优先使用预构建 exe 的图标；没有 exe 时依次查找
+`app/gui/assets/karenbot.ico`、`app/assets/karenbot.ico`、
+`app/karenbot.ico`，最后回退到安装器内置的 `karenbot.ico`。便携包构建脚本
+会把该图标复制到 `gui/assets/karenbot.ico`。
+
 ## 主题、字体与渲染
 
 - 主题包由 GUI 内置：`karen`（目标机同款）和 `system`（Adwaita）。安装器

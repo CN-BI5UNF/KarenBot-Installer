@@ -166,3 +166,96 @@ def test_gui_rejects_non_ascii_or_invalid_path(monkeypatch, tmp_path):
         assert app._progress_window is None
     finally:
         root.destroy()
+
+
+def test_gui_locks_all_config_widgets_while_running(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    try:
+        app._set_running(True)
+        assert app.install_entry.cget("state") == "disabled"
+        assert app.github_mirror_box.cget("state") == "disabled"
+        assert app.source_radios[0].cget("state") == "disabled"
+        assert app.frontend_radios[0].cget("state") == "disabled"
+        assert app.self_delete_box.cget("state") == "disabled"
+        app._set_running(False)
+        assert app.install_entry.cget("state") == "normal"
+        assert app.github_mirror_box.cget("state") == "readonly"
+        assert app.source_entry.cget("state") == "normal"
+        assert app.frontend_radios[0].cget("state") == "normal"
+    finally:
+        root.destroy()
+
+
+def test_gui_mirror_dialog_can_pin_available_mirror(monkeypatch, tmp_path):
+    root, app, messages = _make_app(tmp_path, monkeypatch)
+    try:
+        app._open_mirror_dialog()
+        app._show_mirrors(
+            [
+                {"mirror": "fast", "ok": True, "speed": 2048.0, "latency": 0.1},
+                {"mirror": "bad", "ok": False, "error": "timeout"},
+            ]
+        )
+        rows = app._mirror_tree.get_children()
+        app._mirror_tree.selection_set(rows[0])
+        app._apply_selected_mirror()
+        assert app.github_mirror.get() == "fast"
+        app._mirror_tree.selection_set(rows[1])
+        app._apply_selected_mirror()
+        assert app.github_mirror.get() == "fast"
+        assert messages and messages[-1][0] == "error"
+    finally:
+        root.destroy()
+
+
+def test_gui_progress_speed_uses_window_not_first_chunk(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    times = iter([100.0, 100.05, 101.0])
+    monkeypatch.setattr(gui_install.time, "monotonic", lambda: next(times))
+    try:
+        app._update_progress(0, 1_000_000)
+        app._update_progress(262_144, 1_000_000)
+        assert "MB/s" not in app.dialog_status.get()
+        app._update_progress(800_000, 1_000_000)
+        assert "MB/s" in app.dialog_status.get()
+    finally:
+        root.destroy()
+
+
+def test_gui_uninstall_button_tracks_install_marker(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    install_dir = tmp_path / "install"
+    (install_dir / "app").mkdir(parents=True)
+    (install_dir / "app" / "modules.json").write_text(
+        '{"installer": "local-source"}', encoding="utf-8"
+    )
+    try:
+        app.install_dir.set(str(install_dir))
+        app._update_uninstall_state()
+        assert app.uninstall_button.cget("state") == "normal"
+        app._set_running(True)
+        assert app.uninstall_button.cget("state") == "disabled"
+    finally:
+        root.destroy()
+
+
+def test_gui_reports_uninstall_success(monkeypatch, tmp_path):
+    root, app, messages = _make_app(tmp_path, monkeypatch)
+    install_dir = tmp_path / "install"
+    (install_dir / "app").mkdir(parents=True)
+    (install_dir / "app" / "modules.json").write_text(
+        '{"installer": "local-source"}', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        karen_install,
+        "uninstall",
+        lambda path, **_kwargs: path,
+    )
+    try:
+        app.install_dir.set(str(install_dir))
+        app._start_uninstall()
+        assert _pump(root, lambda: app.status.get() == "已卸载")
+        assert messages and messages[-1][0] == "info"
+        assert app._installed_dir is None
+    finally:
+        root.destroy()

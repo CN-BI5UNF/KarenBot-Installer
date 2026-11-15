@@ -89,3 +89,12 @@ def test_architecture_document_records_tkinter_and_windows_decisions():
     assert "不采用" in document or "不推荐" in document or "放弃" in document
     assert "windows-gui-package.json" in document
     assert "launch-gui-safe" in document
+
+
+def test_gui_exposes_mirror_and_uninstall_controls():
+    source = (INSTALLER / "gui_install.py").read_text(encoding="utf-8")
+    assert "github_mirror" in source
+    assert "_apply_selected_mirror" in source
+    assert "uninstall_button" in source
+    assert "core.uninstall" in source
+    assert "_config_widgets" in source
