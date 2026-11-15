@@ -10,7 +10,7 @@ Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自
 Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装。
 
 仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
-`v0.1.2-dev`，安装器版本 `0.1.2-dev`）
+`v1.0.1-dev`，安装器版本 `1.0.1-dev`）
 
 ## 快速开始
 
