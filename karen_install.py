@@ -872,11 +872,11 @@ def ensure_python_runtime(
         runtime_root = _locate_runtime_root(extract_root)
         target = install_dir / PYTHON_RUNTIME_DIRNAME
         if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
+            _remove_tree(target, strict=True)
         runtime_root.rename(target)
     finally:
         archive.unlink(missing_ok=True)
-        shutil.rmtree(extract_root, ignore_errors=True)
+        _remove_tree(extract_root, strict=False)
     python = _portable_runtime_python(install_dir)
     if python is None or not _python_is_complete(python):
         fail("便携 Python 下载完成但校验失败；请重试或手动安装 Python 3.10+。")
@@ -2144,7 +2144,7 @@ def ensure_personas(
             )
         log("已安装项目自带人格")
     finally:
-        shutil.rmtree(extract_root, ignore_errors=True)
+        _remove_tree(extract_root, strict=False)
 
 
 def _prepare_windows_gui_app(
