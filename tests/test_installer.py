@@ -1232,9 +1232,15 @@ def test_online_sources_use_explicit_hashes(monkeypatch, tmp_path):
 
     def fake_download(url, destination, **kwargs):
         captured.append({"url": url, **kwargs})
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"fake")
+        return destination
+
+    def fake_extract(*_args, **_kwargs):
         installer.fail("stop-after-capture")
 
     monkeypatch.setattr(installer, "download", fake_download)
+    monkeypatch.setattr(installer, "extract_archive", fake_extract)
     with pytest.raises(SystemExit):
         installer._prepare_online_app(
             tmp_path,
