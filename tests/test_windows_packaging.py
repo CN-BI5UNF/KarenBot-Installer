@@ -14,7 +14,7 @@ def test_windows_gui_package_contract_is_valid():
         (INSTALLER / "windows-gui-package.json").read_text(encoding="utf-8")
     )
     assert contract["schema"] == 1
-    assert contract["asset_name"] == "KarenBot-GUI-Windows-x64.zip"
+    assert contract["asset_name"] == "KarenBot-Windows-x64.zip"
     assert "runtime/python.exe" in contract["python_candidates"]
     assert "libgtk-4-1.dll" in contract["required_dlls"]
     assert "Gtk-4.0.typelib" in contract["required_typelibs"]
@@ -91,6 +91,53 @@ def test_readme_documents_no_local_build_and_no_deb():
     readme = (INSTALLER / "README.md").read_text(encoding="utf-8")
     assert "install.sh" in readme
     assert "windows-gui-package.json" in readme
-    assert "KarenBot-GUI-Windows-x64.zip" in readme
+    assert "KarenBot-Windows-x64.zip" in readme
     assert "不构建 deb" in readme or "不构建 deb/rpm" in readme
     assert "GitHub Actions" in readme
+
+
+def test_bundled_python_fetch_and_size_scripts():
+    fetch = (INSTALLER / "scripts" / "fetch_bundled_python.py").read_text(
+        encoding="utf-8"
+    )
+    size = (INSTALLER / "scripts" / "check_artifact_size.py").read_text(
+        encoding="utf-8"
+    )
+    assert "BUNDLED_PYTHON_SOURCES" in fetch
+    assert "sha256" in fetch
+    assert "vendor" in fetch
+    assert "50" in size
+    assert "max-mib" in size
+
+
+def test_workflow_builds_windows_bundle_asset():
+    workflow = (ROOT / ".github/workflows/build-installer.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "build-windows-bundle" in workflow
+    assert "KarenBot-Windows-x64.zip" in workflow
+    assert "msys2/setup-msys2@v2" in workflow
+    assert "mingw-w64-ucrt-x86_64-gtk4" in workflow
+    assert "fetch_bundled_python.py" in workflow
+    assert "check_artifact_size.py" in workflow
+    assert "--max-mib 50" in workflow
+
+
+def test_windows_bundle_script_uses_msys2_and_gtk():
+    script = (INSTALLER / "scripts" / "build_windows_bundle.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "MSYSTEM_PREFIX" in script
+    assert "libgtk-4-1.dll" in script
+    assert "libadwaita-1-0.dll" in script
+    assert "girepository-1.0" in script
+    assert "gdk-pixbuf-query-loaders.exe" in script
+    assert "windows-bundle.json" in script
+    assert "-m gui --version" in script
+
+
+def test_spec_can_bundle_vendor_python():
+    spec = (INSTALLER / "KarenBot-Installer.spec").read_text(encoding="utf-8")
+    assert "vendor" in spec
+    assert "python-runtime.tar.gz" in spec
+    assert "python-runtime.sha256" in spec

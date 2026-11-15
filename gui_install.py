@@ -358,7 +358,7 @@ class InstallerApp:
             frame,
             text=(
                 "在线安装会下载 backend 核心包和 GUI/WebUI 模块；"
-                "Windows 原生 GUI 需要 GUI 仓库的 GTK4 便携预构建包。"
+                "Windows 原生 GUI 需要安装器 Release 的 GTK4 便携预构建包。"
             ),
             foreground="#64748b",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
@@ -1123,6 +1123,7 @@ def main(argv: list[str] | None = None) -> int:
                     "render_modes": list(core.RENDER_MODES),
                     "windows_gui_asset": core.windows_gui_asset_name(),
                     "python_runtime_version": core.PYTHON_RUNTIME_VERSION,
+                    "bundled_python": core.has_bundled_python(),
                     "fonts": [item["name"] for item in core.FONT_SOURCES],
                     "tk_error": str(_TK_ERROR) if _TK_ERROR else "",
                 },

@@ -2,6 +2,15 @@ name: Build Installer
 
 on:
   workflow_dispatch:
+    inputs:
+      backend_tag:
+        description: "Windows GUI 便携包使用的 KarenBot-backend tag"
+        required: false
+        default: "v0.1.1-alpha.1"
+      gui_tag:
+        description: "Windows GUI 便携包使用的 KarenBot-GUI tag"
+        required: false
+        default: "v0.1.1-alpha.1"
   push:
     tags:
       - "v*"
@@ -28,6 +37,10 @@ concurrency:
   group: build-installer-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  BACKEND_TAG: ${{ github.event.inputs.backend_tag || 'v0.1.1-alpha.1' }}
+  GUI_TAG: ${{ github.event.inputs.gui_tag || 'v0.1.1-alpha.1' }}
+
 jobs:
   verify:
     runs-on: ubuntu-24.04
@@ -47,13 +60,13 @@ jobs:
           python -m pip install -r requirements-test.txt
 
       - name: Compile sources
-        run: python -m compileall -q karen_install.py gui_install.py
+        run: python -m compileall -q karen_install.py gui_install.py scripts/
 
       - name: Shell syntax
         run: bash -n install.sh
 
       - name: Ruff
-        run: python -m ruff check karen_install.py gui_install.py tests/
+        run: python -m ruff check karen_install.py gui_install.py scripts/ tests/
 
       - name: Installer tests
         run: |
@@ -84,9 +97,15 @@ jobs:
       - name: Installer tests on Windows
         run: python -m pytest tests/test_installer.py tests/test_windows_packaging.py -q
 
+      - name: Bundle stripped portable Python
+        run: python scripts/fetch_bundled_python.py
+
       - name: Build installer (pinned toolchain)
         shell: pwsh
         run: ./scripts/build_windows.ps1
+
+      - name: Enforce 50 MiB artifact limit
+        run: python scripts/check_artifact_size.py dist/KarenBot-Installer.exe --max-mib 50
 
       - name: Verify x64 artifact, version and SHA256
         shell: pwsh
@@ -182,6 +201,65 @@ jobs:
             dist/SHA256SUMS-windows.txt
           if-no-files-found: error
 
+  build-windows-bundle:
+    # 这是大体积 GTK4 运行时打包，只在手动触发/tag 时跑，PR 不跑。
+    if: github.event_name != 'pull_request'
+    needs: verify
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: CN-BI5UNF/KarenBot-backend
+          ref: ${{ env.BACKEND_TAG }}
+          path: backend
+
+      - uses: actions/checkout@v4
+        with:
+          repository: CN-BI5UNF/KarenBot-GUI
+          ref: ${{ env.GUI_TAG }}
+          path: gui-src
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-ucrt-x86_64-python-gobject
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-gdk-pixbuf2
+            mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-adwaita-icon-theme
+            mingw-w64-ucrt-x86_64-hicolor-icon-theme
+            p7zip
+            zip
+
+      - name: Build Windows GTK4 portable bundle
+        shell: msys2 {0}
+        env:
+          BACKEND_DIR: backend
+          GUI_DIR: gui-src
+          BACKEND_TAG: ${{ env.BACKEND_TAG }}
+          GUI_TAG: ${{ env.GUI_TAG }}
+        run: bash scripts/build_windows_bundle.sh
+
+      - name: Show bundle
+        shell: pwsh
+        run: |
+          Get-Item KarenBot-Windows-x64.zip |
+            Select-Object Name, Length, @{N="MiB";E={[math]::Round($_.Length/1MB,1)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-gui-bundle
+          path: KarenBot-Windows-x64.zip
+          if-no-files-found: error
+
   build-linux:
     needs: verify
     strategy:
@@ -238,6 +316,11 @@ jobs:
           PYTHON: .build-venv/bin/python
         run: bash scripts/build_linux.sh
 
+      - name: Enforce 50 MiB artifact limit
+        run: |
+          .build-venv/bin/python scripts/check_artifact_size.py \
+            dist/KarenBot-Installer --max-mib 50
+
       - name: Smoke check frozen binary
         run: xvfb-run -a dist/KarenBot-Installer --smoke-test
 
@@ -257,7 +340,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-windows-bundle, build-linux]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -277,6 +360,7 @@ jobs:
             KarenBot-Installer.exe \
             KarenBot-Installer-linux-x64 \
             KarenBot-Installer-linux-arm64 \
+            KarenBot-Windows-x64.zip \
             > SHA256SUMS.txt
 
       - name: Attach installers to release
@@ -292,5 +376,6 @@ jobs:
             artifacts/KarenBot-Installer.exe \
             artifacts/KarenBot-Installer-linux-x64 \
             artifacts/KarenBot-Installer-linux-arm64 \
+            artifacts/KarenBot-Windows-x64.zip \
             artifacts/SHA256SUMS.txt \
             --clobber

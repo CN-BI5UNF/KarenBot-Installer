@@ -462,12 +462,22 @@ def test_launcher_sets_fontconfig_and_renderer(tmp_path, monkeypatch):
 
 
 def _make_portable_app(root: Path) -> Path:
-    app = root / "KarenBot-GUI-Windows-x64"
+    app = root / "KarenBot-Windows-x64"
     (app / "backend").mkdir(parents=True)
     (app / "backend" / "__init__.py").write_text("", encoding="utf-8")
     (app / "gui").mkdir()
     (app / "gui" / "plugin.json").write_text("{}", encoding="utf-8")
     (app / "main.py").write_text("", encoding="utf-8")
+    (app / "windows-bundle.json").write_text(
+        json.dumps(
+            {
+                "backend": {"tag": "v0.1.1-alpha.1"},
+                "gui": {"tag": "v0.1.1-alpha.1"},
+                "runtime": {"kind": "windows-gtk4-portable"},
+            }
+        ),
+        encoding="utf-8",
+    )
     runtime = app / "runtime"
     (runtime / "bin").mkdir(parents=True)
     (runtime / "lib" / "girepository-1.0").mkdir(parents=True)
@@ -492,7 +502,7 @@ def test_validate_portable_gui_accepts_contract(tmp_path, monkeypatch):
 def test_windows_gui_online_install_from_local_asset(tmp_path, monkeypatch):
     monkeypatch.setattr(installer, "IS_WINDOWS", True)
     app = _make_portable_app(tmp_path / "bundle")
-    archive = tmp_path / "KarenBot-GUI-Windows-x64.zip"
+    archive = tmp_path / "KarenBot-Windows-x64.zip"
     with zipfile.ZipFile(archive, "w") as zf:
         for path in app.rglob("*"):
             if path.is_file():
@@ -527,15 +537,16 @@ def test_windows_gui_online_install_from_local_asset(tmp_path, monkeypatch):
         (install_dir / "app" / "modules.json").read_text(encoding="utf-8")
     )
     assert manifest["installer"] == "windows-portable-release"
-    assert manifest["components"]["gui"]["runtime"] == "windows-gtk4-portable"
+    assert manifest["components"]["gui"]["tag"] == "v0.1.1-alpha.1"
+    assert manifest["components"]["bundle"]["tag"] == "custom"
 
 
 def test_windows_gui_asset_missing_has_actionable_message(tmp_path, monkeypatch):
     monkeypatch.setattr(installer, "IS_WINDOWS", True)
     monkeypatch.setattr(
         installer,
-        "_resolve_online_tags",
-        lambda *_args, **_kwargs: ("v0.1.1-alpha.1", "v0.1.1-alpha.1"),
+        "_latest_release_tag",
+        lambda *_args, **_kwargs: ("v0.1.0", "稳定版"),
     )
     monkeypatch.setattr(
         installer,
@@ -543,9 +554,7 @@ def test_windows_gui_asset_missing_has_actionable_message(tmp_path, monkeypatch)
         lambda *_args, **_kwargs: installer.fail("HTTPError: 404"),
     )
     with pytest.raises(SystemExit) as error:
-        installer._prepare_windows_gui_app(
-            tmp_path, release_tag="auto", cancel_event=None
-        )
+        installer._prepare_windows_gui_app(tmp_path, cancel_event=None)
     message = error.value.message
     assert "预构建包" in message
     assert "docs/windows-gui-package.md" in message
@@ -708,3 +717,34 @@ def test_allow_symlinks_still_rejects_escaping_links(tmp_path):
         installer._safe_tar_extract(
             archive, tmp_path / "out", allow_symlinks=True
         )
+
+
+def test_bundled_python_archive_is_used(tmp_path, monkeypatch):
+    archive = tmp_path / "python-runtime.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        data = b"fake"
+        info = tarfile.TarInfo("python/bin/python3")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    expected = installer.sha256_file(archive)
+    monkeypatch.setattr(installer, "_bundled_python_archive", lambda: archive)
+    monkeypatch.setattr(
+        installer, "_bundled_python_expected_hash", lambda: expected
+    )
+    monkeypatch.setattr(installer, "_python_is_complete", lambda path: path.is_file())
+    monkeypatch.setattr(
+        installer,
+        "_find_complete_python",
+        lambda: (_ for _ in ()).throw(AssertionError("system Python must not be used")),
+    )
+    python = installer.ensure_python_runtime(tmp_path, frontend="webui")
+    assert python == tmp_path / "python-runtime" / "bin" / "python3"
+    assert python.is_file()
+    assert not (tmp_path / ".python-runtime-bundled").exists()
+
+
+def test_windows_bundle_asset_url_points_to_installer_repo():
+    url = installer._windows_gui_asset_url("v0.1.0")
+    assert "CN-BI5UNF/KarenBot-Installer" in url
+    assert url.endswith("/KarenBot-Windows-x64.zip")
+    assert "/releases/download/v0.1.0/" in url

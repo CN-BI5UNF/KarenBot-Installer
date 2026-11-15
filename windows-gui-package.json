@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "asset_name": "KarenBot-GUI-Windows-x64.zip",
-  "description": "KarenBot Windows 原生 GTK4 GUI 便携包契约；由 KarenBot-GUI 仓库的 Windows 构建流水线产出，安装器只负责下载、校验和安装。",
+  "asset_name": "KarenBot-Windows-x64.zip",
+  "description": "KarenBot Windows 原生 GTK4 GUI 便携包契约；由安装器仓库的 Windows 打包流水线产出并附加到安装器 Release，安装器下载、校验和安装。",
   "required_dirs": [
     "backend",
     "gui"

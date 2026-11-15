@@ -68,7 +68,7 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
 - 镜像测速：并发探测前 512KB，吞吐 + 首字节延迟评分，失败换镜像；
 - Release 解析：`releases/latest` → `releases.atom`，页面和 feed 都走镜像回退；
 - Linux 在线安装：backend 核心包 + GUI/WebUI 源码模块；
-- Windows 原生 GUI：下载 `KarenBot-GUI-Windows-x64.zip`，按契约校验 GTK4 DLL/typelib；
+- Windows 原生 GUI：下载 `KarenBot-Windows-x64.zip`，按契约校验 GTK4 DLL/typelib；
 - 本地安装：源码、tar/zip、预构建包；
 - 字体：下载 Noto Sans SC / Noto Serif SC 可变字体，生成 `fonts.conf`；
 - 主题：写 GUI 的 `karen-gui/skin` 偏好（karen/system），不使用第三方主题资产；
@@ -133,5 +133,5 @@ KarenBot/Python/GTK 包；只负责安装引导。不构建 deb/rpm。
 
 - 已支持：在线 Release 安装、本地源码/安装包、镜像测速、主题包、字体、
   渲染回退启动器、快捷方式、自删除、Windows/Linux 单文件构建。
-- Windows 原生 GUI 依赖 GUI 仓库产出 GTK4 便携包；安装器仓库只定义和校验
-  契约，不构建运行时。
+- Windows 原生 GUI 的 GTK4 便携包由安装器仓库的 Windows 打包 job 产出并
+  附加到安装器 Release；安装器下载、校验和安装。

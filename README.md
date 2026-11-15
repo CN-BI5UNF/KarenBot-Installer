@@ -7,7 +7,7 @@ Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自
 
 安装器**不内置任何应用包**，也不构建 deb/exe 应用包；它只负责选择来源、
 测速、下载、校验、解压、建 venv 和写启动入口。Linux 以终端 CLI 为主，
-Windows 原生 GUI 通过 GUI 仓库发布的 GTK4 便携预构建包安装。
+Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装。
 
 仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
 `v0.1.0-dev`，安装器版本 `0.1.0-dev`）
@@ -68,7 +68,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
    并发探测资产前 512KB，按吞吐 + 首字节延迟评分，自动选最快且低延迟的
    方案；下载失败自动换下一个镜像。
 2. **在线 Release 安装**：Linux 下载 backend 核心包 + GUI/WebUI 源码模块；
-   Windows 原生 GUI 下载 `KarenBot-GUI-Windows-x64.zip` 便携包。
+   Windows 原生 GUI 下载 `KarenBot-Windows-x64.zip` 便携包。
 3. **本地安装**：源码目录、tar/zip、预构建包；不需要 GitHub。
 4. **GTK4 主题包**：Windows GUI 可选“Karen 暖色（目标机同款）”“系统
    Adwaita”或“不使用美化包”。前两者都是 GTK4 内置皮肤，不需要下载主题
@@ -99,12 +99,12 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
    如果用户选了 `C:\Program Files` 等不可写目录，会立即提示改用
    `%LOCALAPPDATA%\Programs\KarenBot` 或 `%PUBLIC%\KarenBot`，不会等到
    venv 阶段才报错。
-4. **Python 环境自举**：安装前检测 Python 3.10+ 是否含 `venv`/`ensurepip`/
-   `ssl`/`sqlite3`。缺失时自动下载 python-build-standalone 的便携 Python
-   （3.12.16，压缩包约 50MB，解压约 340MB）到
+4. **Python 环境自举**：Windows 安装器内置 python-build-standalone 的
+   stripped Python 3.12.16（约 22 MB，含 pip/venv），安装时解压到
    `<安装目录>/python-runtime`，只用于本安装，不改动用户全局 Python。
-   Linux 原生 GUI 例外：它仍需要系统 PyGObject/GTK4，安装器会给出 apt
-   安装命令。
+   如果内置运行时缺失/损坏，再回退到系统 Python 或下载完整便携 Python。
+   安装器成品仍限制在 **50 MiB** 以内（CI 会强制检查）。Linux 原生 GUI
+   例外：它仍需要系统 PyGObject/GTK4，安装器会给出 apt 安装命令。
 
 ## 常用参数
 
@@ -124,6 +124,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `--renderer auto\|cairo\|gl` | 渲染模式；`cairo` 强制软件渲染，黑屏/崩溃时使用 |
 | `--mirror <名称>` | 固定使用某个镜像；`--list-mirrors` 查看名称 |
 | `--windows-gui-asset URL` | 覆盖 Windows GUI 预构建包 URL（本地路径或测试镜像） |
+| `--bundle-tag <tag>` | Windows GUI 便携包所在的安装器 Release tag；默认 `auto` |
 | `--self-delete` / `--keep-installer` | 安装后删除/保留安装器自身 |
 | `--probe-url` | 只对镜像做测速并退出 |
 | `--list-mirrors` | 列出内置镜像后退出 |
@@ -142,7 +143,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 ## Windows 原生 GUI
 
 Windows 源码安装不现实：GTK4/PyGObject 需要一整套便携运行时。安装器改为
-下载 GUI 仓库的预构建包 `KarenBot-GUI-Windows-x64.zip`，并按
+下载安装器 Release 的预构建包 `KarenBot-Windows-x64.zip`，并按
 `windows-gui-package.json` 契约校验：
 
 - `runtime/python.exe`；
@@ -217,8 +218,8 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
 
 - 在线安装默认自动选择每个仓库的最新**稳定版**；没有稳定版时选择最新
   Release。backend 提供核心程序 + 后端，GUI/WebUI 各自提供界面模块。
-- Windows 原生 GUI 需要 GUI 仓库先产出 `KarenBot-GUI-Windows-x64.zip`；
-  安装器仓库不构建 GTK4 运行时。
-- Windows WebUI 源码安装仍需要系统 Python 3.10+；建议使用预构建包。
+- Windows 原生 GUI 需要安装器 Release 里已有 `KarenBot-Windows-x64.zip`；
+  它由安装器仓库的 Windows 打包 job 产出，不放进安装器 exe。
+- Windows WebUI 安装优先使用内置/下载的便携 Python；系统 Python 不是必需。
 - 不构建 deb/rpm 等系统包：Linux 用户以 CLI/install.sh 为主。
 - GUI 是简易向导，不是完整安装器设计系统；Linux 仍以 CLI 为主。

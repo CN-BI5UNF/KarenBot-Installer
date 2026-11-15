@@ -6,7 +6,7 @@
   配置主题/字体、创建快捷方式。
 - 支持 ``--source-dir`` / ``--archive`` 做离线/本地测试，不依赖 GitHub。
 - 支持在线安装：Linux 下载 ``KarenBot-backend`` 和 GUI/WebUI 源码包；
-  Windows 原生 GUI 下载 GUI 仓库提供的 GTK4 便携预构建包。
+  Windows 原生 GUI 下载安装器 Release 提供的 GTK4 便携预构建包。
 - 安装器不构建 deb 等系统包；Linux 以 install.sh + CLI 为主。
 """
 
@@ -80,7 +80,8 @@ ONLINE_FRONTEND_REPOS = {
     "webui": "CN-BI5UNF/KarenBot-WebUI",
 }
 ONLINE_ARCHIVE_TEMPLATE = "https://github.com/{repo}/archive/refs/tags/{tag}.tar.gz"
-WINDOWS_GUI_ASSET_NAME = "KarenBot-GUI-Windows-x64.zip"
+WINDOWS_BUNDLE_REPO = "CN-BI5UNF/KarenBot-Installer"
+WINDOWS_GUI_ASSET_NAME = "KarenBot-Windows-x64.zip"
 WINDOWS_GUI_ASSET_ENV = "KAREN_GUI_WINDOWS_ASSET"
 
 GUI_SKINS = {
@@ -174,6 +175,23 @@ PYTHON_RUNTIME_SOURCES: dict[str, dict[str, str]] = {
 }
 for _runtime_key, _runtime_value in PYTHON_RUNTIME_SOURCES.items():
     _runtime_value["url"] = f"{_PYTHON_RUNTIME_BASE}/{_runtime_value['archive']}"
+
+# Windows 安装器内置的精简 Python（22 MB 左右），总成品仍 < 50 MiB。
+# 安装时解压到 <安装目录>/python-runtime；解压失败才回退到网络下载。
+BUNDLED_PYTHON_ARCHIVE_NAME = "python-runtime.tar.gz"
+BUNDLED_PYTHON_HASH_NAME = "python-runtime.sha256"
+BUNDLED_PYTHON_SOURCES: dict[str, dict[str, Any]] = {
+    "windows-x64": {
+        "label": "Windows x64 stripped",
+        "url": (
+            f"{_PYTHON_RUNTIME_BASE}/cpython-{PYTHON_RUNTIME_VERSION}"
+            f"%2B{PYTHON_RUNTIME_RELEASE}"
+            "-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+        ),
+        "sha256": "355ee61b8207b91574491b1c6dc9b0ebb4408fc56bfafe498f3ef439314b52dc",
+        "size": 22365213,
+    },
+}
 
 DEFAULT_WINDOWS_PACKAGE: dict[str, Any] = {
     "schema": 1,
@@ -456,6 +474,64 @@ def _portable_runtime_python(install_dir: Path) -> Path | None:
     return None
 
 
+def has_bundled_python() -> bool:
+    return _bundled_python_archive() is not None
+
+
+def _bundled_python_archive() -> Path | None:
+    path = _resource_path(BUNDLED_PYTHON_ARCHIVE_NAME)
+    return path if path.is_file() else None
+
+
+def _bundled_python_expected_hash() -> str:
+    hash_file = _resource_path(BUNDLED_PYTHON_HASH_NAME)
+    try:
+        value = hash_file.read_text(encoding="utf-8").strip().split()[0]
+    except (OSError, IndexError):
+        value = ""
+    if value:
+        return value
+    source = BUNDLED_PYTHON_SOURCES.get(_python_runtime_key() or "")
+    return str(source.get("sha256", "")) if source else ""
+
+
+def _install_bundled_python(
+    install_dir: Path, cancel_event: Any | None = None
+) -> Path | None:
+    """解压安装器内置的 Python；失败时返回 None 让调用方走网络下载。"""
+    archive = _bundled_python_archive()
+    if archive is None:
+        return None
+    expected = _bundled_python_expected_hash()
+    if expected and sha256_file(archive).lower() != expected.lower():
+        log("内置 Python 校验失败，改用网络下载")
+        return None
+    _check_cancel(cancel_event)
+    stage("解压内置便携 Python…")
+    extract_root = install_dir / ".python-runtime-bundled"
+    try:
+        try:
+            extract_archive(archive, extract_root, allow_symlinks=True)
+            runtime_root = _locate_runtime_root(extract_root)
+            target = install_dir / PYTHON_RUNTIME_DIRNAME
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            runtime_root.rename(target)
+        except (OSError, SystemExit) as exc:
+            message = getattr(exc, "message", str(exc))
+            log(f"内置 Python 解压失败，改用网络下载：{message}")
+            return None
+    finally:
+        shutil.rmtree(extract_root, ignore_errors=True)
+    python = _portable_runtime_python(install_dir)
+    if python is not None and _python_is_complete(python):
+        log(f"已解压内置便携 Python：{python}")
+        stage("内置 Python 环境准备完成")
+        return python
+    log("内置 Python 解压后校验失败，改用网络下载")
+    return None
+
+
 def _locate_runtime_root(extract_root: Path) -> Path:
     candidates = [
         extract_root / "python",
@@ -484,6 +560,9 @@ def ensure_python_runtime(
     if existing is not None and _python_is_complete(existing):
         log(f"复用安装目录内的便携 Python：{existing}")
         return existing
+    bundled = _install_bundled_python(install_dir, cancel_event)
+    if bundled is not None:
+        return bundled
     system = _find_complete_python()
     if system is not None:
         log(f"使用系统 Python：{system}")
@@ -1184,38 +1263,46 @@ def _resolve_online_tags(
     return backend_tag, frontend_tag
 
 
-def _windows_gui_asset_url(tag: str, override: str = "") -> str:
-    value = str(override or "").strip()
-    if not value:
-        value = os.environ.get(WINDOWS_GUI_ASSET_ENV, "").strip()
-    if value:
-        return value
-    repo = ONLINE_FRONTEND_REPOS["gui"]
+def _windows_gui_asset_url(tag: str) -> str:
+    repo = WINDOWS_BUNDLE_REPO
     name = windows_gui_asset_name()
     return f"https://github.com/{repo}/releases/download/{tag}/{name}"
+
+
+def _windows_bundle_tag(
+    bundle_tag: str, cancel_event: Any | None
+) -> tuple[str, str]:
+    requested = str(bundle_tag or "").strip()
+    if requested and requested.lower() not in {"", "auto", "latest"}:
+        return _validate_online_tag(requested), "指定版本"
+    tag, kind = _latest_release_tag(
+        WINDOWS_BUNDLE_REPO, cancel_event=cancel_event
+    )
+    log(f"Windows GUI 便携包版本：{tag}（{kind}）")
+    return tag, kind
 
 
 def _prepare_windows_gui_app(
     staging: Path,
     *,
-    release_tag: str,
     cancel_event: Any | None,
+    bundle_tag: str = "auto",
     windows_gui_asset: str = "",
 ) -> tuple[str, dict[str, Any]]:
-    """下载 GUI 仓库的 GTK4 便携预构建包（Windows 原生 GUI）。"""
-    frontend_repo = ONLINE_FRONTEND_REPOS["gui"]
-    backend_tag, frontend_tag = _resolve_online_tags(
-        "gui",
-        release_tag,
-        cancel_event=cancel_event,
-    )
-    tag_kind = (
-        "指定版本"
-        if release_tag.lower() not in {"", "auto", "latest"}
-        else "自动"
-    )
-    asset_url = _windows_gui_asset_url(frontend_tag, windows_gui_asset)
+    """下载安装器 Release 里的 Windows GTK4 便携包。"""
     asset_name = windows_gui_asset_name()
+    override = str(windows_gui_asset or "").strip()
+    if not override:
+        override = os.environ.get(WINDOWS_GUI_ASSET_ENV, "").strip()
+    if override:
+        bundle_version = "custom"
+        bundle_kind = "自定义"
+        asset_url = override
+    else:
+        bundle_version, bundle_kind = _windows_bundle_tag(
+            bundle_tag, cancel_event
+        )
+        asset_url = _windows_gui_asset_url(bundle_version)
     downloads = staging / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     stage(f"自动测速并下载 Windows GUI 便携包：{asset_name}")
@@ -1238,7 +1325,7 @@ def _prepare_windows_gui_app(
         except SystemExit as exc:
             message = getattr(exc, "message", str(exc))
             fail(
-                "Windows 原生 GUI 需要 GUI 仓库提供预构建包：\n"
+                "Windows 原生 GUI 需要安装器仓库 Release 中的预构建包：\n"
                 f"  {asset_url}\n"
                 "当前 Release 可能还没有该资产，或网络不可用。\n"
                 "可用 KAREN_GUI_WINDOWS_ASSET=<本地/远程 zip> 覆盖，"
@@ -1259,20 +1346,34 @@ def _prepare_windows_gui_app(
     stage("校验 GTK4 便携运行时…")
     _validate_portable_gui(staging / "app", portable)
     stage("Windows GUI 便携运行时校验通过")
-    components = {
-        "backend": {
-            "repo": ONLINE_BACKEND_REPO,
-            "tag": backend_tag,
-            "kind": tag_kind,
-            "bundled": True,
-        },
-        "gui": {
-            "repo": frontend_repo,
-            "tag": frontend_tag,
-            "kind": tag_kind,
+    bundle_manifest: dict[str, Any] = {}
+    manifest_path = staging / "app" / "windows-bundle.json"
+    try:
+        bundle_manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        log("便携包没有 windows-bundle.json，组件版本将标记为 unknown")
+    components: dict[str, Any] = {
+        "backend": bundle_manifest.get(
+            "backend", {"repo": ONLINE_BACKEND_REPO, "tag": "unknown"}
+        ),
+        "gui": bundle_manifest.get(
+            "gui",
+            {
+                "repo": ONLINE_FRONTEND_REPOS["gui"],
+                "tag": "unknown",
+            },
+        ),
+        "runtime": bundle_manifest.get(
+            "runtime", {"kind": "windows-gtk4-portable"}
+        ),
+        "bundle": {
+            "repo": WINDOWS_BUNDLE_REPO,
+            "tag": bundle_version,
+            "kind": bundle_kind,
             "asset": asset_name,
             "asset_url": asset_url,
-            "runtime": "windows-gtk4-portable",
         },
     }
     return "windows-portable-release", components
@@ -1284,6 +1385,7 @@ def _prepare_online_app(
     frontend: str,
     release_tag: str,
     cancel_event: Any | None,
+    bundle_tag: str = "auto",
     windows_gui_asset: str = "",
 ) -> tuple[str, dict[str, Any]]:
     """下载并合并 backend 核心包与所选界面模块，返回 installer_kind/components。"""
@@ -1292,8 +1394,8 @@ def _prepare_online_app(
     if IS_WINDOWS and frontend == "gui":
         return _prepare_windows_gui_app(
             staging,
-            release_tag=release_tag,
             cancel_event=cancel_event,
+            bundle_tag=bundle_tag,
             windows_gui_asset=windows_gui_asset,
         )
     backend_tag, frontend_tag = _resolve_online_tags(
@@ -1425,7 +1527,7 @@ def _check_gui_runtime(venv: Path) -> None:
     if IS_WINDOWS:
         fail(
             "Windows 源码安装不支持原生 GUI：GTK4/PyGObject 需要预构建便携包。\n"
-            "请选择在线安装（下载 GUI 仓库的 Windows 预构建包），"
+            "请选择在线安装（下载安装器 Release 的 Windows 便携包），"
             "或使用本地预构建 zip。"
         )
     python = _venv_python(venv)
@@ -1606,6 +1708,13 @@ def _portable_env(python: Path) -> dict[str, str]:
         "GSETTINGS_SCHEMA_DIR": str(prefix / "share" / "glib-2.0" / "schemas"),
         "GTK_DATA_PREFIX": str(prefix),
         "GTK_EXE_PREFIX": str(prefix),
+        "GDK_PIXBUF_MODULEDIR": str(
+            prefix / "lib" / "gdk-pixbuf-2.0" / "2.10.0" / "loaders"
+        ),
+        "GDK_PIXBUF_MODULE_FILE": str(
+            prefix / "lib" / "gdk-pixbuf-2.0" / "2.10.0" / "loaders.cache"
+        ),
+        "GIO_MODULE_DIR": str(prefix / "lib" / "gio" / "modules"),
     }
 
 
@@ -1657,6 +1766,43 @@ def _windows_launcher(
         lines.append('if not defined GDK_BACKEND set "GDK_BACKEND=win32"')
     lines.append(command + " %*")
     return "\r\n".join(lines) + "\r\n"
+
+
+def _prepare_windows_portable_runtime(
+    app_root: Path, cancel_event: Any | None = None
+) -> None:
+    """按最终安装路径生成 gdk-pixbuf loaders.cache，避免绝对路径失效。"""
+    runtime = app_root / "runtime"
+    tool = runtime / "bin" / "gdk-pixbuf-query-loaders.exe"
+    module_dir = runtime / "lib" / "gdk-pixbuf-2.0" / "2.10.0" / "loaders"
+    cache = module_dir.parent / "loaders.cache"
+    if not tool.is_file() or not module_dir.is_dir():
+        log("便携包没有 gdk-pixbuf-query-loaders，跳过图片加载器缓存")
+        return
+    _check_cancel(cancel_event)
+    env = os.environ.copy()
+    env["PATH"] = str(runtime / "bin") + os.pathsep + env.get("PATH", "")
+    env["GDK_PIXBUF_MODULEDIR"] = str(module_dir)
+    try:
+        result = subprocess.run(
+            [str(tool)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            creationflags=_creation_flags(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"生成图片加载器缓存失败（可忽略）：{exc}")
+        return
+    if result.returncode != 0 or not result.stdout.strip():
+        log(
+            "生成图片加载器缓存失败（可忽略）："
+            f"{(result.stderr or result.stdout).strip()[:500]}"
+        )
+        return
+    cache.write_text(result.stdout, encoding="utf-8")
+    log(f"图片加载器缓存：{cache}")
 
 
 def _write_launchers(
@@ -2000,6 +2146,7 @@ def install(
     gui_skin: str = "none",
     render_mode: str = "auto",
     windows_gui_asset: str = "",
+    windows_bundle_tag: str = "auto",
 ) -> Path:
     if gui_skin not in GUI_SKINS:
         fail(f"未知主题包：{gui_skin}")
@@ -2050,6 +2197,7 @@ def install(
                 frontend=frontend,
                 release_tag=release_tag,
                 cancel_event=cancel_event,
+                bundle_tag=windows_bundle_tag,
                 windows_gui_asset=windows_gui_asset,
             )
         else:
@@ -2084,7 +2232,7 @@ def install(
                 fail(
                     "Windows 原生 GUI 安装包没有 GTK4 便携运行时 "
                     "（runtime/python.exe + GTK4/Adwaita DLL/typelib）。\n"
-                    "请使用 GUI 仓库的 KarenBot-GUI-Windows-x64.zip，"
+                    "请使用安装器 Release 的 KarenBot-Windows-x64.zip，"
                     "契约见 docs/windows-gui-package.md。"
                 )
         _write_modules_manifest(
@@ -2121,6 +2269,9 @@ def install(
                 portable_target.chmod(
                     portable_target.stat().st_mode | 0o755
                 )
+        if portable_target is not None and IS_WINDOWS:
+            stage("生成本地图片加载器缓存…")
+            _prepare_windows_portable_runtime(target_app, cancel_event)
 
         target_venv = (
             venv.expanduser().resolve() if venv else install_dir / "venv"
@@ -2366,6 +2517,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="覆盖 Windows GUI 预构建包的 URL（测试/私有镜像）",
     )
     parser.add_argument(
+        "--bundle-tag",
+        default="auto",
+        help="Windows GUI 便携包所在的安装器 Release tag（默认 auto）",
+    )
+    parser.add_argument(
         "--self-delete", action="store_true", help="安装完成后删除安装器自身"
     )
     parser.add_argument(
@@ -2431,6 +2587,7 @@ def main(argv: list[str] | None = None) -> int:
                     "self_delete": args.self_delete,
                     "online": not (args.source_dir or args.archive),
                     "tag": args.tag,
+                    "bundle_tag": args.bundle_tag,
                     "windows_gui_asset": args.windows_gui_asset,
                 },
                 ensure_ascii=False,
@@ -2453,6 +2610,7 @@ def main(argv: list[str] | None = None) -> int:
         gui_skin=args.gui_skin,
         render_mode=args.renderer,
         windows_gui_asset=args.windows_gui_asset,
+        windows_bundle_tag=args.bundle_tag,
     )
     should_delete = args.self_delete or (
         getattr(sys, "frozen", False) and not args.keep_installer

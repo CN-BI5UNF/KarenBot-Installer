@@ -47,9 +47,12 @@
 
 **处理**：
 
-- 安装前检测 Python 3.10+ 及 `venv`、`ensurepip`、`ssl`、`sqlite3`。
-- 不完整时自动下载 python-build-standalone 便携 Python 3.12.16 到
-  `<安装目录>/python-runtime`，只供本次安装使用，不改动全局 Python。
+- Windows 安装器内置 python-build-standalone stripped Python 3.12.16
+  （约 22 MB，含 pip/venv），安装时解压到
+  `<安装目录>/python-runtime`，不改动全局 Python。
+- 内置运行时缺失/损坏时，安装前检测 Python 3.10+ 及 `venv`、
+  `ensurepip`、`ssl`、`sqlite3`；不完整则自动下载完整便携 Python。
 - 便携 Python 有固定 SHA256，并支持 GitHub 镜像测速/回退。
+- 安装器成品（含内置 Python）由 CI 强制检查 ≤ 50 MiB。
 - Linux 原生 GUI 仍要求系统 PyGObject/GTK4，安装器会给出 apt 安装命令；
   这是系统 GTK 绑定 ABI 的限制，便携 Python 无法替代。
