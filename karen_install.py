@@ -1479,29 +1479,34 @@ def ensure_personas(
             checksums = fetch_release_checksums(WINDOWS_BUNDLE_REPO, tag)
             expected = checksums.get(PERSONAS_ASSET_NAME, "")
             asset_ok = False
-            try:
-                download(
-                    asset_url,
-                    downloads / PERSONAS_ASSET_NAME,
-                    expected_sha256=expected,
-                    cancel_event=cancel_event,
-                )
-                _check_cancel(cancel_event)
-                extract_archive(
-                    downloads / PERSONAS_ASSET_NAME, extract_root
-                )
-                asset_ok = True
-            except InstallCancelled:
-                raise
-            except BaseException as exc:  # noqa: BLE001
-                _check_cancel(cancel_event)
-                if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+            if checksums and not expected:
+                # 旧 Release 的 SHA256SUMS 里没有这个资产，直接走源码包，
+                # 不再对 15 个镜像逐个探测一个必然 404 的 URL。
+                log("安装器 Release 清单中没有人格资产，直接使用主仓库源码包")
+            else:
+                try:
+                    download(
+                        asset_url,
+                        downloads / PERSONAS_ASSET_NAME,
+                        expected_sha256=expected,
+                        cancel_event=cancel_event,
+                    )
+                    _check_cancel(cancel_event)
+                    extract_archive(
+                        downloads / PERSONAS_ASSET_NAME, extract_root
+                    )
+                    asset_ok = True
+                except InstallCancelled:
                     raise
-                log(
-                    "安装器 Release 未提供可用人格资产，"
-                    f"改从主仓库源码包提取（{type(exc).__name__}）"
-                )
-                shutil.rmtree(extract_root, ignore_errors=True)
+                except BaseException as exc:  # noqa: BLE001
+                    _check_cancel(cancel_event)
+                    if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                        raise
+                    log(
+                        "安装器 Release 未提供可用人格资产，"
+                        f"改从主仓库源码包提取（{type(exc).__name__}）"
+                    )
+                    shutil.rmtree(extract_root, ignore_errors=True)
             if not asset_ok:
                 archive = downloads / "karenbot-main.tar.gz"
                 download(
