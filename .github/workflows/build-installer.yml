@@ -82,9 +82,7 @@ jobs:
           python -m pip install -r requirements-test.txt
 
       - name: Installer tests on Windows
-        run: |
-          python -m pytest tests/test_installer.py \
-            tests/test_windows_packaging.py -q
+        run: python -m pytest tests/test_installer.py tests/test_windows_packaging.py -q
 
       - name: Build installer (pinned toolchain)
         shell: pwsh
