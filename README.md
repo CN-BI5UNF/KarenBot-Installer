@@ -84,6 +84,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 
 ## 已知问题处理
 
+更详细的“现象 → 处理”记录见 [`docs/known-issues.md`](docs/known-issues.md)。
 针对实际用户反馈，安装器内置了以下保护：
 
 1. **Windows 中文路径**：安装目录、源码目录、安装包路径会检查非 ASCII
