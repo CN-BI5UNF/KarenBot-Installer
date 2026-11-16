@@ -13,7 +13,7 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
 | PySide6 / Qt | 不采用。安装器再带一套 Qt，体积和打包复杂度都高 |
 | GTK4 / libadwaita | 不采用。安装器不能依赖自己正在安装的运行时；Windows 上 GTK4 便携打包也复杂 |
 | WinUI 3 / WPF | 不采用。Windows 体验好，但自包含 .NET 体积大，且不能复用到 Linux |
-| 纯浏览器本地页 | 不采用。窗口、端口、自删除和进度都不好控制 |
+| 纯浏览器本地页 | 不采用。窗口、端口、卸载和进度都不好控制 |
 | **Tkinter + ttk** | **采用**。随 CPython 提供，无额外运行时；单文件 exe 小、启动快；跨 Windows/Linux；界面朴素但符合“简易安装引导”的定位 |
 
 代价是 Tkinter 的视觉不如 Web 技术精致。这个安装器只需要选择来源、路径、
@@ -50,7 +50,7 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
    - 安装来源：在线 / 本地源码 / 本地安装包；
    - 界面版本：原生 GUI / WebUI；
    - 安装位置；
-   - 选项：快捷方式、字体、自删除；
+   - 选项：快捷方式、字体；
    - 外观与渲染：Karen/Adwaita/不使用主题包 + 自动/软件/硬件渲染。
 2. **安装日志**
    - 完整安装日志、下载进度和错误信息。
@@ -91,7 +91,8 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
   `~/.local/share`。
 - **原生 GUI**：Windows 不能从源码安装；必须使用预构建 GTK4 便携包。
   安装器校验 `runtime/python.exe`、GTK4/Adwaita DLL、Gtk/Adw typelib。
-- **自删除**：Windows 不能删除正在运行的 exe；安装完成后由 `cmd` 延迟删除。
+- **运行数据**：启动器注入 `KAREN_DATA_ROOT=<安装目录>/data`，升级只替换
+  `app/`；旧版 `app/data` 会迁移，避免覆盖安装清空用户数据。
 - **中文路径**：安装目录/源码/安装包路径含非 ASCII 字符时提前报错，并提示
   `%PUBLIC%\KarenBot`；默认目录若因用户名带中文，会自动改用 `%PUBLIC%`。
 - **权限预检**：安装前写一个探针文件验证目录可写；不可写时提示改用
@@ -132,6 +133,6 @@ KarenBot/Python/GTK 包；只负责安装引导。不构建 deb/rpm。
 ## 当前阶段
 
 - 已支持：在线 Release 安装、本地源码/安装包、镜像测速、主题包、字体、
-  渲染回退启动器、快捷方式、自删除、Windows/Linux 单文件构建。
+  渲染回退启动器、快捷方式、程序与数据分离、Windows/Linux 单文件构建。
 - Windows 原生 GUI 的 GTK4 便携包由安装器仓库的 Windows 打包 job 产出并
   附加到安装器 Release；安装器下载、校验和安装。

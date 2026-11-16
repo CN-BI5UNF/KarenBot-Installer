@@ -155,7 +155,6 @@ class InstallerApp:
         self._cancel = threading.Event()
         self._installed_dir: Path | None = None
         self._installed_frontend = "gui"
-        self._delete_on_close = False
         self._running = False
         self._uninstall_check: str | None = None
         self._skin_radios: list[ttk.Radiobutton] = []
@@ -193,8 +192,6 @@ class InstallerApp:
         self.install_dir = tk.StringVar(value=str(core.DEFAULT_INSTALL_DIR))
         self.create_shortcut = tk.BooleanVar(value=True)
         self.download_fonts = tk.BooleanVar(value=True)
-        # 默认保留安装器，避免自删除批处理触发杀软启发式拦截。
-        self.self_delete = tk.BooleanVar(value=False)
         self.gui_skin = tk.StringVar(value="karen")
         self.render_mode = tk.StringVar(value="auto")
         self.pypi_mirror = tk.StringVar(value="auto")
@@ -504,20 +501,8 @@ class InstallerApp:
             variable=self.download_fonts,
         )
         self.download_fonts_box.pack(side="left", padx=(14, 0))
-        self.self_delete_box = ttk.Checkbutton(
-            row,
-            text="完成后删除安装器",
-            variable=self.self_delete,
-        )
-        self.self_delete_state = "normal"
-        if not getattr(sys, "frozen", False):
-            self.self_delete_box.configure(state="disabled")
-            self.self_delete_state = "disabled"
-            self.self_delete.set(False)
-        self.self_delete_box.pack(side="left", padx=(14, 0))
         self._track(self.create_shortcut_box)
         self._track(self.download_fonts_box)
-        self._track(self.self_delete_box, self.self_delete_state)
         pypi_row = ttk.Frame(frame)
         pypi_row.pack(fill="x", pady=(4, 0))
         ttk.Label(pypi_row, text="PyPI 镜像").pack(side="left")
@@ -841,13 +826,20 @@ class InstallerApp:
 
     def _confirm_unverified_source(
         self, *, online: bool, frontend: str
-    ) -> bool:
-        """无发布哈希的源码包只允许直连；使用第三方镜像必须显式确认。"""
+    ) -> bool | None:
+        """返回 True=允许第三方镜像，False=仅直连，None=取消安装。
+
+        不再修改 ``os.environ``：用户这次的选择通过 ``allow_unverified``
+        显式传给核心，避免同一进程内后续安装被上一次选择污染。
+        """
         if not online:
-            return True
+            return False
         if os.name == "nt" and frontend == "gui":
             # Windows 便携包本身强制要求可信 SHA256，不需要这个提示。
-            return True
+            return False
+        if self.github_mirror.get().strip().casefold() == "direct":
+            # 已经明确固定 GitHub 直连，弹窗只会制造困惑。
+            return False
         enabled = os.environ.get(core.UNVERIFIED_ENV, "").strip().casefold()
         if enabled in {"1", "true", "yes", "on"}:
             return True
@@ -856,13 +848,13 @@ class InstallerApp:
         ).strip().casefold()
         if required in {"1", "true", "yes", "on"}:
             # 核心会给出明确的缺少哈希错误。
-            return True
+            return False
         backend_hash = os.environ.get("KAREN_BACKEND_SHA256", "").strip()
         frontend_hash = os.environ.get(
             f"KAREN_{frontend.upper()}_SHA256", ""
         ).strip()
         if backend_hash and frontend_hash:
-            return True
+            return False
         answer = messagebox.askyesnocancel(
             "源码包没有发布哈希",
             "backend/frontend 使用 GitHub 自动源码归档，上游没有发布 SHA256。\n\n"
@@ -873,12 +865,8 @@ class InstallerApp:
             f"KAREN_{frontend.upper()}_SHA256 提供哈希。",
         )
         if answer is None:
-            return False
-        if answer:
-            os.environ[core.UNVERIFIED_ENV] = "1"
-        else:
-            os.environ.pop(core.UNVERIFIED_ENV, None)
-        return True
+            return None
+        return bool(answer)
 
     def _start_install(self) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -946,11 +934,13 @@ class InstallerApp:
             ):
                 return
 
-        if not self._confirm_unverified_source(online=online, frontend=frontend):
+        allow_unverified = self._confirm_unverified_source(
+            online=online, frontend=frontend
+        )
+        if allow_unverified is None:
             return
         self._installed_dir = None
         self._installed_frontend = frontend
-        self._delete_on_close = False
         self._closing = False
         self._close_deadline = 0.0
         self._cancel.clear()
@@ -1000,6 +990,7 @@ class InstallerApp:
                 "gui_skin": gui_skin,
                 "render_mode": self.render_mode.get(),
                 "pypi_mirror": self.pypi_mirror.get(),
+                "allow_unverified": bool(allow_unverified),
             },
             daemon=True,
         )
@@ -1134,9 +1125,7 @@ class InstallerApp:
         self.launch_safe_button.configure(state="normal")
         self.uninstall_button.configure(state="normal")
         self._log_line(f"安装完成：{path}")
-        if self.self_delete.get() and getattr(sys, "frozen", False):
-            self._delete_on_close = True
-            self._log_line("关闭安装器窗口后会自删除。")
+        self._log_line("安装器已保留；需要修复或卸载时可再次运行它。")
         target = core.launch_target(path, self._installed_frontend)
         if not self._closing:
             messagebox.showinfo(
@@ -1186,7 +1175,8 @@ class InstallerApp:
             "将删除以下内容：\n"
             f"{install_dir}\n\n"
             "包括程序、启动器、快捷方式、字体和主题偏好；"
-            "app/data 等运行数据也会一起删除。\n\n确定卸载？",
+            "运行数据目录（data/ 或旧版 app/data）也会一起删除。\n\n"
+            "确定卸载？",
         ):
             return
         self._cancel.clear()
@@ -1202,7 +1192,11 @@ class InstallerApp:
         self.progress.start(12)
         self.progress_step.set("准备卸载…")
         self.status.set("准备卸载…")
-        self._open_progress_dialog()
+        self._open_progress_dialog(
+            title="正在卸载 KarenBot",
+            cancel_text="取消卸载",
+            note="正在删除程序、启动器、快捷方式和运行数据；请不要手动打开或删除安装目录。",
+        )
         self._clear_log()
         self.notebook.select(1)
         self._log_line(f"卸载：{install_dir}")
@@ -1218,7 +1212,7 @@ class InstallerApp:
 
     def _run_uninstall(self, *, install_dir: Path) -> None:
         try:
-            result = core.uninstall(install_dir)
+            result = core.uninstall(install_dir, cancel_event=self._cancel)
         except core.InstallCancelled:
             self._queue.put(("cancelled", None))
         except core.InstallFailure as exc:
@@ -1255,9 +1249,18 @@ class InstallerApp:
         self.cancel_button.configure(state="disabled")
         self.progress_step.set("正在取消…")
         self.status.set("正在取消…")
-        self._log_line("已请求取消；正在中断下载/解压/子进程…")
+        self._log_line("已请求取消；正在中断当前操作…")
 
-    def _open_progress_dialog(self) -> None:
+    def _open_progress_dialog(
+        self,
+        *,
+        title: str = "正在安装 KarenBot",
+        cancel_text: str = "取消安装",
+        note: str = (
+            "安装器会自动测速 GitHub 镜像，不需要先手动点“镜像测速”。\n"
+            "如果长时间无响应，请检查网络、代理、DNS 或防火墙。"
+        ),
+    ) -> None:
         if self._progress_window is not None:
             try:
                 if self._progress_window.winfo_exists():
@@ -1267,7 +1270,7 @@ class InstallerApp:
                 pass
             self._progress_window = None
         window = tk.Toplevel(self.root)
-        window.title("正在安装 KarenBot")
+        window.title(title)
         window.transient(self.root)
         window.resizable(False, False)
         self.dialog_status.set("")
@@ -1287,7 +1290,7 @@ class InstallerApp:
         body.pack(fill="both", expand=True)
         ttk.Label(
             body,
-            text="正在安装 KarenBot",
+            text=title,
             font=(self.font_family, 13, "bold"),
         ).pack(anchor="w")
         ttk.Label(
@@ -1309,10 +1312,7 @@ class InstallerApp:
         ).pack(anchor="w", pady=(6, 0))
         ttk.Label(
             body,
-            text=(
-                "安装器会自动测速 GitHub 镜像，不需要先手动点“镜像测速”。\n"
-                "如果长时间无响应，请检查网络、代理、DNS 或防火墙。"
-            ),
+            text=note,
             foreground="#64748b",
             justify="left",
             wraplength=540,
@@ -1323,7 +1323,7 @@ class InstallerApp:
             actions, text="查看日志", command=self._show_log_tab
         ).pack(side="left")
         ttk.Button(
-            actions, text="取消安装", command=self._cancel_install
+            actions, text=cancel_text, command=self._cancel_install
         ).pack(side="right")
         window.update_idletasks()
         height = max(230, window.winfo_reqheight())
@@ -1332,6 +1332,9 @@ class InstallerApp:
         self._progress_window = window
 
     def _show_log_tab(self) -> None:
+        # transient 进度窗会一直浮在主窗口上方；查看日志时直接关闭，
+        # 主窗口底部仍有进度条和状态行。
+        self._close_progress_dialog()
         try:
             self.root.deiconify()
             self.root.lift()
@@ -1602,8 +1605,6 @@ class InstallerApp:
             return
         self._closing = True
         self._close_progress_dialog()
-        if self._delete_on_close:
-            core.self_delete_installer()
         if self._log_handle is not None:
             try:
                 self._log_handle.close()

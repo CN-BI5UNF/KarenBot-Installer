@@ -50,7 +50,7 @@ def test_gui_has_windows_compatibility_hooks():
     assert "SetProcessDpiAwareness" in source
     assert "Microsoft YaHei UI" in source
     assert "os.startfile" in source or "startfile" in source
-    assert "self_delete_installer" in source
+    assert "self_delete" not in source
     assert "不使用美化包" in source
     assert "兼容模式启动" in source
 

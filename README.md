@@ -130,26 +130,32 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 7. **渲染回退**：启动入口在 GTK 初始化前设置渲染环境；GUI 自带的
    `gui.launcher` 还会按 stage 自动回退到 Cairo 软件渲染。另提供
    `launch-gui-safe` / “KarenBot GUI (兼容模式)”入口。
-8. **快捷方式与自删除**：Linux `.desktop`，Windows 一次 PowerShell 调用
-   创建全部开始菜单/桌面快捷方式；进程检测和快捷方式清理改用 ctypes /
-   直接删除，不再额外拉起 PowerShell。便携包没有 exe 时使用内置
-   `karenbot.ico`。打包版安装器默认保留自身；启用自删除后会在退出后重试
-   删除，避免被占用时静默失败。
+8. **快捷方式**：Linux `.desktop`，Windows 一次 PowerShell 调用创建全部
+   开始菜单/桌面快捷方式；进程检测和快捷方式清理改用 ctypes / 直接删除，
+   不再额外拉起 PowerShell。便携包没有 exe 时使用内置 `karenbot.ico`。
+   安装器完成安装后始终保留，方便后续修复或卸载。
 9. **可取消与实时日志**：下载、解压、`venv`/`pip` 子进程都会响应“取消”；
    `pip` 输出实时转发到“安装日志”页，失败时能看到真实报错。
 10. **安装前预检**：检查目录可写、磁盘余量（GUI 约 1.2 GB / WebUI 约
     400 MB）以及旧版 KarenBot 是否仍在运行，避免升级到最后一步才因文件
     占用失败。
 11. **卸载**：CLI `--uninstall` 或 GUI “卸载…” 按钮会清理程序目录、
-    启动器、快捷方式、字体和主题偏好，但只对带安装标记的目录生效。
+    启动器、快捷方式、字体、主题偏好和运行数据目录，但只对带安装标记的
+    目录生效。
 12. **残损环境自愈**：被取消/杀软中断后留下的半残 `venv` 会在下次安装时
     自动检测并重建，不需要手工删除。
-13. **断点续传**：下载中断时保留 `.part`，同一目标换镜像或再次下载会发
-    `Range` 请求续传；最终仍用 SHA256 校验完整性。
+13. **断点续传**：带 SHA256 的资产中断后保留 `.part` 和来源标记；只有同一
+    镜像 URL 才发送 `Range` 续传，切换镜像或缺少哈希时重新下载，避免跨源
+    字节拼接。旧版没有来源标记的临时文件只在带 SHA256 时允许续传，最终
+    校验兜底。
 14. **日志与诊断**：安装日志实时落盘到 `%TEMP%\karenbot-install.log`，
     GUI 提供“复制日志 / 保存日志 / 查看日志”；进度窗不再阻塞主窗口。
 15. **已有安装可直接管理**：启动安装器时如果目标目录已安装，会直接启用
     “打开安装目录 / 启动 / 兼容模式启动”，不需要先重装一次。
+16. **程序与数据分离**：新版 backend 支持 `KAREN_DATA_ROOT`；启动器把运行
+    数据固定在 `<安装目录>/data/instances/default`，升级只替换 `app/`，
+    不会碰用户配置、聊天库、工作区或自定义人格。旧版 `app/data` 会在
+    升级时自动迁移；backend 不支持该变量时回退到 `app/data` 迁移。
 
 ## 已知问题处理
 
@@ -195,8 +201,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `--require-verified` | 严格模式：任何未校验的可执行/源码资产都中止 |
 | `--windows-gui-asset URL` | 覆盖 Windows GUI 预构建包 URL（本地路径或测试镜像） |
 | `--bundle-tag <tag>` | Windows GUI 便携包所在的安装器 Release tag；默认 `auto` |
-| `--uninstall` | 卸载 `--dir` 指向的 KarenBot，并清理快捷方式/字体/主题偏好 |
-| `--self-delete` / `--keep-installer` | 安装后删除/保留安装器自身 |
+| `--uninstall` | 卸载 `--dir` 指向的 KarenBot，并清理快捷方式/字体/主题偏好/运行数据 |
 | `--probe-url` | 只对镜像做测速并退出 |
 | `--list-mirrors` | 列出内置镜像后退出 |
 | `--dry-run` | 打印最终配置，不执行安装 |
@@ -314,9 +319,12 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
 - Windows GUI 便携包缺少可信 SHA256 时中止，除非显式设置
   `KAREN_ALLOW_UNVERIFIED=1`；
 - Windows 默认 per-user 安装，不触发 UAC；
-- 安装器只替换 `<install>/app`，不删除用户数据目录；升级失败会自动把
-  `app.old` 换回 `app/`；覆盖安装前会检测被占用的 exe/dll；
-- 自删除只在打包版且启用 `--self-delete`/GUI 勾选时执行；源码运行默认保留；
+- 安装器只替换 `<install>/app`；新版 backend 的运行数据固定在
+  `<install>/data/instances/default`，升级不会删除；旧版 `app/data` 会在
+  升级时迁移。升级失败会自动把 `app.old` 换回 `app/`；覆盖安装前会检测
+  被占用的 exe/dll；
+- 安装器完成安装后始终保留，不再提供自删除（降低杀软启发式误报，也方便
+  用户再次运行修复/卸载）；
 - Windows GUI 预构建包按 DLL/typelib 契约检查，缺运行时直接报错；
 - 卸载只对带 `.karen-installer.json`（或 `app/modules.json` installer 字段）
   的目录生效，避免误删用户指定目录。

@@ -367,6 +367,10 @@ def test_online_explicit_tag_bypasses_release_queries(monkeypatch):
 def test_mirror_score_prefers_throughput_and_low_latency():
     assert installer.mirror_score(2048, 0.1) > installer.mirror_score(2048, 1.0)
     assert installer.mirror_score(4096, 0.2) > installer.mirror_score(2048, 0.2)
+    # 1 秒以内也要保留区分度：80ms 节点应明显优于 800ms 节点。
+    assert installer.mirror_score(2048, 0.08) > 2 * installer.mirror_score(
+        2048, 0.8
+    )
 
 
 def test_rank_mirrors_orders_by_score(monkeypatch):
@@ -858,6 +862,211 @@ def test_failed_upgrade_restores_previous_app(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _make_upgrade_source(tmp_path, *, data_root_supported: bool):
+    source = tmp_path / "source"
+    (source / "backend").mkdir(parents=True)
+    (source / "gui").mkdir()
+    (source / "webui").mkdir()
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='demo'\n", encoding="utf-8"
+    )
+    if data_root_supported:
+        (source / "app_config").mkdir()
+        (source / "app_config" / "paths.py").write_text(
+            'DATA_ROOT_ENV_VAR = "KAREN_DATA_ROOT"\n', encoding="utf-8"
+        )
+    return source
+
+
+def _install_upgrade(source: Path, install_dir: Path, **kwargs):
+    # Windows 下源码安装 GUI 会被明确拒绝；用 WebUI 验证同一套数据迁移逻辑。
+    frontend = "webui" if installer.IS_WINDOWS else "gui"
+    return installer.install(
+        frontend=frontend,
+        install_dir=install_dir,
+        source_dir=source,
+        archive=None,
+        venv=None,
+        skip_deps=True,
+        create_shortcut=False,
+        download_fonts=False,
+        **kwargs,
+    )
+
+
+def _upgrade_launcher(install_dir: Path) -> Path:
+    name = "launch-webui.cmd" if installer.IS_WINDOWS else "launch-gui.sh"
+    return install_dir / name
+
+
+def test_upgrade_migrates_legacy_app_data_to_external_root(tmp_path):
+    install_dir = tmp_path / "install"
+    old_app = install_dir / "app"
+    (old_app / "data").mkdir(parents=True)
+    (old_app / "data" / "config.yaml").write_text("old", encoding="utf-8")
+    (old_app / "personas" / "custom").mkdir(parents=True)
+    (old_app / "personas" / "custom" / "persona_prompt.py").write_text(
+        "PROMPT = 'custom'\n", encoding="utf-8"
+    )
+    source = _make_upgrade_source(tmp_path, data_root_supported=True)
+
+    _install_upgrade(source, install_dir)
+
+    target = install_dir / "data" / "instances" / "default"
+    assert (target / "config.yaml").read_text(encoding="utf-8") == "old"
+    assert not (install_dir / "app" / "data").exists()
+    assert (
+        install_dir / "app" / "personas" / "custom" / "persona_prompt.py"
+    ).is_file()
+    launcher = _upgrade_launcher(install_dir).read_text(encoding="utf-8")
+    assert installer.DATA_ROOT_ENV in launcher
+    assert str(install_dir / "data") in launcher
+    webui = (install_dir / "launch-webui.sh").read_text(encoding="utf-8")
+    assert installer.DATA_ROOT_ENV in webui
+    safe = (install_dir / "launch-gui-safe.sh").read_text(encoding="utf-8")
+    assert installer.DATA_ROOT_ENV in safe
+
+
+def test_upgrade_keeps_app_data_when_backend_lacks_data_root(tmp_path):
+    install_dir = tmp_path / "install"
+    old_app = install_dir / "app"
+    (old_app / "data").mkdir(parents=True)
+    (old_app / "data" / "config.yaml").write_text("old", encoding="utf-8")
+    source = _make_upgrade_source(tmp_path, data_root_supported=False)
+
+    _install_upgrade(source, install_dir)
+
+    assert (install_dir / "app" / "data" / "config.yaml").read_text(
+        encoding="utf-8"
+    ) == "old"
+    assert not (install_dir / "data").exists()
+    launcher = _upgrade_launcher(install_dir).read_text(encoding="utf-8")
+    assert installer.DATA_ROOT_ENV not in launcher
+
+
+def test_upgrade_merges_legacy_data_without_overwriting_external_root(tmp_path):
+    install_dir = tmp_path / "install"
+    target = install_dir / "data" / "instances" / "default"
+    target.mkdir(parents=True)
+    (target / "config.yaml").write_text("current", encoding="utf-8")
+    old_app = install_dir / "app"
+    (old_app / "data").mkdir(parents=True)
+    (old_app / "data" / "config.yaml").write_text("old", encoding="utf-8")
+    (old_app / "data" / "legacy.txt").write_text("legacy", encoding="utf-8")
+    source = _make_upgrade_source(tmp_path, data_root_supported=True)
+
+    _install_upgrade(source, install_dir)
+
+    assert (target / "config.yaml").read_text(encoding="utf-8") == "current"
+    assert (target / "legacy.txt").read_text(encoding="utf-8") == "legacy"
+
+
+def test_fresh_install_downgrade_migrates_external_data(tmp_path):
+    install_dir = tmp_path / "install"
+    external = install_dir / "data" / "instances" / "default"
+    external.mkdir(parents=True)
+    (external / "config.yaml").write_text("external", encoding="utf-8")
+    source = _make_upgrade_source(tmp_path, data_root_supported=False)
+
+    _install_upgrade(source, install_dir)
+
+    assert (install_dir / "app" / "data" / "config.yaml").read_text(
+        encoding="utf-8"
+    ) == "external"
+    assert not external.exists()
+
+
+def test_fresh_downgrade_failure_restores_external_data(
+    tmp_path, monkeypatch
+):
+    install_dir = tmp_path / "install"
+    external = install_dir / "data" / "instances" / "default"
+    external.mkdir(parents=True)
+    (external / "config.yaml").write_text("external", encoding="utf-8")
+    source = _make_upgrade_source(tmp_path, data_root_supported=False)
+    real_stage = installer.stage
+
+    def _fail_at_completion(message: str) -> None:
+        if message.startswith("安装完成"):
+            raise RuntimeError("simulated post-install failure")
+        real_stage(message)
+
+    monkeypatch.setattr(installer, "stage", _fail_at_completion)
+    with pytest.raises(RuntimeError):
+        _install_upgrade(source, install_dir)
+
+    assert (external / "config.yaml").read_text(encoding="utf-8") == "external"
+    assert not (install_dir / "app" / "data").exists()
+    assert not (install_dir / "launch-gui.sh").exists()
+
+
+def test_upgrade_merges_residual_app_old_data(tmp_path):
+    install_dir = tmp_path / "install"
+    current_app = install_dir / "app"
+    (current_app / "backend").mkdir(parents=True)
+    (current_app / "gui").mkdir()
+    residual = install_dir / "app.old"
+    (residual / "data").mkdir(parents=True)
+    (residual / "data" / "config.yaml").write_text(
+        "residual", encoding="utf-8"
+    )
+    source = _make_upgrade_source(tmp_path, data_root_supported=True)
+
+    _install_upgrade(source, install_dir)
+
+    target = install_dir / "data" / "instances" / "default"
+    assert (target / "config.yaml").read_text(encoding="utf-8") == "residual"
+    assert not (install_dir / "app.old").exists()
+    assert (install_dir / "app" / "backend").is_dir()
+
+
+def test_upgrade_restores_orphan_app_old_data(tmp_path):
+    install_dir = tmp_path / "install"
+    residual = install_dir / "app.old"
+    (residual / "data").mkdir(parents=True)
+    (residual / "data" / "config.yaml").write_text(
+        "orphan", encoding="utf-8"
+    )
+    source = _make_upgrade_source(tmp_path, data_root_supported=True)
+
+    _install_upgrade(source, install_dir)
+
+    target = install_dir / "data" / "instances" / "default"
+    assert (target / "config.yaml").read_text(encoding="utf-8") == "orphan"
+    assert not (install_dir / "app.old").exists()
+    assert (install_dir / "app" / "backend").is_dir()
+
+
+def test_upgrade_rollback_restores_migrated_data(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    old_app = install_dir / "app"
+    (old_app / "data").mkdir(parents=True)
+    (old_app / "data" / "config.yaml").write_text("old", encoding="utf-8")
+    old_launcher = install_dir / "launch-gui.sh"
+    old_launcher.write_text("#!/bin/sh\n# OLD LAUNCHER\n", encoding="utf-8")
+    old_marker = install_dir / installer.INSTALL_MARKER_NAME
+    old_marker.write_text('{"old": true}\n', encoding="utf-8")
+    source = _make_upgrade_source(tmp_path, data_root_supported=True)
+    real_remove = installer._remove_tree
+
+    def _fail_removing_old_app(path, *, strict=False):
+        if Path(path).resolve() == (install_dir / "app.old").resolve():
+            raise RuntimeError("simulated cleanup failure")
+        return real_remove(path, strict=strict)
+
+    monkeypatch.setattr(installer, "_remove_tree", _fail_removing_old_app)
+    with pytest.raises(RuntimeError):
+        _install_upgrade(source, install_dir)
+
+    assert (install_dir / "app" / "data" / "config.yaml").read_text(
+        encoding="utf-8"
+    ) == "old"
+    assert not (install_dir / "app.old").exists()
+    assert not (install_dir / "data" / "instances" / "default").exists()
+    assert "OLD LAUNCHER" in old_launcher.read_text(encoding="utf-8")
+    assert old_marker.read_text(encoding="utf-8") == '{"old": true}\n'
+
+
 def test_rank_mirrors_reuses_probe_results(monkeypatch):
     installer.reset_runtime_caches()
     mirrors = [{"name": "cache-test", "kind": "direct"}]
@@ -1011,10 +1220,32 @@ def test_windows_launcher_prefers_pythonw(tmp_path, monkeypatch):
     safe = (tmp_path / "launch-gui-safe.cmd").read_text(encoding="utf-8")
     webui = (tmp_path / "launch-webui.cmd").read_text(encoding="utf-8")
     assert "pythonw.exe" in normal
-    assert 'start "" /B' in normal
+    assert 'start "" ' in normal
+    assert "/B" not in normal
+    assert "exit /b 0" in normal
     assert "python.exe" in safe
     assert "pause" in safe
     assert "python.exe" in webui
+
+
+def test_windows_prebuilt_gui_launcher_is_windowed(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    app = tmp_path / "app"
+    app.mkdir()
+    exe = tmp_path / "KarenBot-GUI.exe"
+    exe.write_bytes(b"")
+    installer._write_launchers(
+        tmp_path,
+        app,
+        tmp_path / "venv",
+        "gui",
+        prebuilt_exe=exe,
+    )
+    normal = (tmp_path / "launch-gui.cmd").read_text(encoding="utf-8")
+    webui = (tmp_path / "launch-webui.cmd").read_text(encoding="utf-8")
+    assert 'start "" ' in normal
+    assert "exit /b 0" in normal
+    assert 'start "" ' not in webui
 
 
 def test_windows_shortcut_uses_packaged_icon(tmp_path, monkeypatch):
@@ -1040,15 +1271,6 @@ def test_windows_shortcut_uses_packaged_icon(tmp_path, monkeypatch):
     assert "KarenBot GUI (兼容模式).lnk" in script
 
 
-def test_windows_self_delete_retries_and_verifies():
-    command = installer._windows_self_delete_command(
-        Path(r"C:\Temp\KarenBot-Installer.exe")
-    )
-    assert "for /L %i in (1,1,10)" in command
-    assert "del /f /q" in command
-    assert "if not exist" in command
-
-
 def test_uninstall_removes_install_artifacts(tmp_path, monkeypatch):
     install_dir = tmp_path / "install"
     (install_dir / "app" / "backend").mkdir(parents=True)
@@ -1056,6 +1278,10 @@ def test_uninstall_removes_install_artifacts(tmp_path, monkeypatch):
         '{"installer": "local-source"}', encoding="utf-8"
     )
     (install_dir / "venv").mkdir()
+    (install_dir / "data" / "instances" / "default").mkdir(parents=True)
+    (install_dir / "data" / "instances" / "default" / "config.yaml").write_text(
+        "x: 1\n", encoding="utf-8"
+    )
     (install_dir / "launch-gui.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     (install_dir / installer.INSTALL_MARKER_NAME).write_text(
         "{}", encoding="utf-8"
@@ -1485,6 +1711,155 @@ def test_download_keeps_partial_file_for_next_mirror(monkeypatch, tmp_path):
         )
     part = destination.with_name(destination.name + ".part")
     assert part.read_bytes() == b"01234567"
+
+
+def test_download_restarts_same_mirror_after_416(monkeypatch, tmp_path):
+    payload = b"0123456789abcdef"
+    destination = tmp_path / "asset.bin"
+    part = destination.with_name(destination.name + ".part")
+    part.write_bytes(b"x" * 32)
+    requests: list[dict | None] = []
+
+    def fake_request(url, **kwargs):
+        requests.append(kwargs.get("headers"))
+        return url
+
+    monkeypatch.setattr(installer, "_request", fake_request)
+    calls = {"count": 0}
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise installer.urllib.error.HTTPError(
+                "https://mirror.test/asset.bin",
+                416,
+                "Range Not Satisfiable",
+                {},
+                None,
+            )
+        return _StreamingResponse(
+            [payload], headers={"Content-Length": str(len(payload))}
+        )
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    installer.download(
+        "https://mirror.test/asset.bin",
+        destination,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+        ranked=installer._direct_ranking(
+            "https://mirror.test/asset.bin"
+        ),
+    )
+    assert destination.read_bytes() == payload
+    assert requests[0] == {"Range": "bytes=32-"}
+    assert requests[1] is None
+
+
+class _StreamingResponse:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+        error_at: int | None = None,
+    ) -> None:
+        self._chunks = list(chunks)
+        self.status = status
+        self.headers = headers or {}
+        self._error_at = error_at
+        self._index = 0
+
+    def read(self, _size: int = -1) -> bytes:
+        if self._error_at is not None and self._index == self._error_at:
+            raise TimeoutError("simulated connection reset")
+        self._index += 1
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_download_discards_part_when_switching_mirrors(monkeypatch, tmp_path):
+    payload = b"0123456789abcdef"
+    destination = tmp_path / "asset.bin"
+    requests: list[tuple[str, dict | None]] = []
+
+    def fake_request(url, **kwargs):
+        requests.append((url, kwargs.get("headers")))
+        return url
+
+    monkeypatch.setattr(installer, "_request", fake_request)
+    calls = {"count": 0}
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _StreamingResponse(
+                [payload[:8]],
+                headers={"Content-Length": str(len(payload))},
+                error_at=1,
+            )
+        return _StreamingResponse(
+            [payload], headers={"Content-Length": str(len(payload))}
+        )
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    installer.download(
+        "https://mirror-a.test/asset.bin",
+        destination,
+        ranked=[
+            {
+                "mirror": "a",
+                "url": "https://mirror-a.test/asset.bin",
+            },
+            {
+                "mirror": "b",
+                "url": "https://mirror-b.test/asset.bin",
+            },
+        ],
+    )
+    assert destination.read_bytes() == payload
+    assert requests[0][1] is None
+    assert requests[1][1] is None
+    assert not destination.with_name(destination.name + ".part").exists()
+    assert not destination.with_name(
+        destination.name + ".part.origin"
+    ).exists()
+
+
+def test_download_rejects_json_error_page(monkeypatch, tmp_path):
+    destination = tmp_path / "backend.tar.gz"
+
+    def fake_request(url, **_kwargs):
+        return url
+
+    monkeypatch.setattr(installer, "_request", fake_request)
+    monkeypatch.setattr(
+        installer.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _StreamingResponse(
+            [b'{"code": 429, "msg": "rate limit"}'],
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": "35",
+            },
+        ),
+    )
+    with pytest.raises(SystemExit) as error:
+        installer.download(
+            "https://mirror.test/backend.tar.gz",
+            destination,
+            ranked=installer._direct_ranking(
+                "https://mirror.test/backend.tar.gz"
+            ),
+        )
+    assert "tar.gz" in error.value.message
+    assert not destination.exists()
+    assert not destination.with_name(destination.name + ".part").exists()
 
 
 def test_windows_process_scan_uses_ctypes_without_powershell():

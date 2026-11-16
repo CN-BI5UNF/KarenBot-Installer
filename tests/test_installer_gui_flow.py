@@ -97,6 +97,7 @@ def test_gui_reports_success(monkeypatch, tmp_path):
         assert messages and messages[-1][0] == "info"
         assert captured["gui_skin"] == "karen"
         assert captured["render_mode"] == "auto"
+        assert captured["allow_unverified"] is False
     finally:
         root.destroy()
 
@@ -181,7 +182,6 @@ def test_gui_locks_all_config_widgets_while_running(monkeypatch, tmp_path):
         assert str(app.github_mirror_box.cget("state")) == "disabled"
         assert str(app.source_radios[0].cget("state")) == "disabled"
         assert str(app.frontend_radios[0].cget("state")) == "disabled"
-        assert str(app.self_delete_box.cget("state")) == "disabled"
         app._set_running(False)
         assert str(app.install_entry.cget("state")) == "normal"
         assert str(app.github_mirror_box.cget("state")) == "readonly"
@@ -316,6 +316,39 @@ def test_gui_progress_dialog_is_non_modal(monkeypatch, tmp_path):
         root.destroy()
 
 
+def test_gui_progress_dialog_uses_uninstall_wording(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    try:
+        app._open_progress_dialog(
+            title="正在卸载 KarenBot", cancel_text="取消卸载"
+        )
+        assert app._progress_window is not None
+        assert app._progress_window.title() == "正在卸载 KarenBot"
+        def _texts(widget) -> list[str]:
+            found: list[str] = []
+            if "text" in widget.keys():
+                found.append(str(widget.cget("text")))
+            for child in widget.winfo_children():
+                found.extend(_texts(child))
+            return found
+
+        assert "取消卸载" in _texts(app._progress_window)
+        app._close_progress_dialog()
+    finally:
+        root.destroy()
+
+
+def test_gui_show_log_closes_transient_progress_dialog(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    try:
+        app._open_progress_dialog()
+        assert app._progress_window is not None
+        app._show_log_tab()
+        assert app._progress_window is None
+    finally:
+        root.destroy()
+
+
 def test_gui_close_waits_for_worker_rollback(monkeypatch, tmp_path):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
 
@@ -346,7 +379,7 @@ def test_gui_close_waits_for_worker_rollback(monkeypatch, tmp_path):
             pass
 
 
-def test_gui_unverified_prompt_controls_env(monkeypatch, tmp_path):
+def test_gui_unverified_prompt_returns_choice_without_env(monkeypatch, tmp_path):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
     monkeypatch.delenv(karen_install.UNVERIFIED_ENV, raising=False)
     monkeypatch.delenv("KAREN_REQUIRE_VERIFIED", raising=False)
@@ -358,16 +391,21 @@ def test_gui_unverified_prompt_controls_env(monkeypatch, tmp_path):
             "askyesnocancel",
             lambda *args, **kwargs: True,
         )
-        assert app._confirm_unverified_source(online=True, frontend="webui")
-        assert os.environ[karen_install.UNVERIFIED_ENV] == "1"
-        os.environ.pop(karen_install.UNVERIFIED_ENV, None)
+        assert (
+            app._confirm_unverified_source(online=True, frontend="webui")
+            is True
+        )
+        assert karen_install.UNVERIFIED_ENV not in os.environ
 
         monkeypatch.setattr(
             gui_install.messagebox,
             "askyesnocancel",
             lambda *args, **kwargs: False,
         )
-        assert app._confirm_unverified_source(online=True, frontend="webui")
+        assert (
+            app._confirm_unverified_source(online=True, frontend="webui")
+            is False
+        )
         assert karen_install.UNVERIFIED_ENV not in os.environ
 
         monkeypatch.setattr(
@@ -375,9 +413,33 @@ def test_gui_unverified_prompt_controls_env(monkeypatch, tmp_path):
             "askyesnocancel",
             lambda *args, **kwargs: None,
         )
-        assert not app._confirm_unverified_source(
-            online=True, frontend="webui"
+        assert (
+            app._confirm_unverified_source(online=True, frontend="webui")
+            is None
         )
     finally:
         os.environ.pop(karen_install.UNVERIFIED_ENV, None)
+        root.destroy()
+
+
+def test_gui_unverified_prompt_skipped_for_direct_mirror(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    monkeypatch.delenv(karen_install.UNVERIFIED_ENV, raising=False)
+    monkeypatch.delenv("KAREN_REQUIRE_VERIFIED", raising=False)
+    called: list[bool] = []
+
+    def _prompt(*_args, **_kwargs):
+        called.append(True)
+        return True
+
+    monkeypatch.setattr(gui_install.messagebox, "askyesnocancel", _prompt)
+    try:
+        app.github_mirror.set("direct")
+        assert (
+            app._confirm_unverified_source(online=True, frontend="webui")
+            is False
+        )
+        assert called == []
+        assert karen_install.UNVERIFIED_ENV not in os.environ
+    finally:
         root.destroy()

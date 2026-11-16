@@ -130,8 +130,10 @@ GIO_MODULE_DIR=<app>\runtime\lib\gio\modules
 FONTCONFIG_FILE=%LOCALAPPDATA%\KarenBot\fonts\fonts.conf
 ```
 
-`launch-gui.cmd` 优先调用同目录的 `pythonw.exe`（`start "" /B`，无黑框）；
-`launch-gui-safe.cmd` 使用 `python.exe` 并在失败时 `pause`，方便查看日志。
+`launch-gui.cmd` 优先调用同目录的 `pythonw.exe`（`start ""` 后立即
+`exit /b 0`，无残留黑框）；`launch-gui-safe.cmd` 使用 `python.exe` 并在
+失败时 `pause`，方便查看日志。启动器同时注入 `KAREN_DATA_ROOT`，把运行
+数据固定在 `<安装目录>\data\instances\default`。
 
 ## 快捷方式图标
 

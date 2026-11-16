@@ -123,8 +123,8 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 
 **处理**：
 
-- `launch-gui.cmd` 优先使用同目录的 `pythonw.exe`，并用 `start "" /B`
-  让 cmd 立即退出；
+- `launch-gui.cmd` 优先使用同目录的 `pythonw.exe`，用 `start ""` 启动后
+  立即 `exit /b 0`，不保留 cmd 控制台；
 - `launch-gui-safe.cmd` 继续使用 `python.exe`，崩溃时 `pause`，方便查看
   报错；
 - 快捷方式优先使用预构建 exe 的图标，否则使用便携包里的
@@ -178,10 +178,13 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 **处理**：探测时校验 HTTP 状态码、`Content-Type`、文件魔数（gzip/zip/exe/
 字体等）和错误文本；`.tar.gz` 必须是 gzip 魔数，`.zip/.whl` 必须是 `PK`。
 
-## 17. 下载到 90% 断线后从头开始
+## 17. 下载到 90% 断线后从头开始 / 跨镜像拼接
 
-**处理**：失败/取消时保留 `.part`；下一次尝试发送 `Range: bytes=<已有>-`，
-服务端返回 206 时追加写入，返回 200 时覆盖重下；最终仍以 SHA256 校验。
+**处理**：失败/取消时保留 `.part` 和 `.origin`（来源 URL）；下一次只有同一
+镜像 URL 且资产带 SHA256 时才发送 `Range: bytes=<已有>-`。旧版没有来源标记
+的临时文件仅在带 SHA256 时允许续传，由最终校验兜底；切换镜像、来源不一致
+或没有哈希时重新下载，避免把镜像 A 的前半截与镜像 B 的后半截拼在一起。
+服务端返回 200 时覆盖重下；最终仍以 SHA256 校验。
 
 ## 18. 无哈希源码包静默走第三方镜像
 
@@ -189,6 +192,8 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 GUI 首次在线安装会弹窗让用户选择“允许镜像加速 / 仅直连 / 取消”，CLI 可用
 `--allow-unverified` 或 `KAREN_ALLOW_UNVERIFIED=1` 放行，也可用
 `KAREN_BACKEND_SHA256` / `KAREN_GUI_SHA256` / `KAREN_WEBUI_SHA256` 提供哈希。
+GUI 在“GitHub 镜像”已固定为 `direct` 时不再弹窗；选择结果通过显式参数
+传给核心，不再改写 `os.environ`，避免同进程后续安装被上一次选择污染。
 
 ## 19. 安装完成前关闭窗口导致旧版本不回滚
 
@@ -202,4 +207,35 @@ GUI 首次在线安装会弹窗让用户选择“允许镜像加速 / 仅直连 
 
 **处理**：进程占用检测改用 Toolhelp32 快照（ctypes），快捷方式清理直接
 删除 `.lnk`，不再为这两件事启动 PowerShell；创建快捷方式合并为一次
-PowerShell 调用，并移除了 `-ExecutionPolicy Bypass`。
+PowerShell 调用，并移除了 `-ExecutionPolicy Bypass`。同时移除“完成后删除
+安装器”功能，安装器始终保留，避免 `cmd /c for /L ... del` 自毁批处理触发
+杀软启发式拦截。
+
+## 21. 覆盖安装清空 `app/data`
+
+**现象**：升级时把旧 `app/` 改名为 `app.old`，新版本替换进去后直接删除
+`app.old`，用户配置、聊天库、工作区一起丢失。
+
+**处理**：新版 backend 支持 `KAREN_DATA_ROOT` 时，启动器把数据固定在
+`<安装目录>/data/instances/default`，升级只替换 `app/`；旧版 `app/data`
+会迁移过去。backend 不支持时回退到把旧数据迁移进新 `app/data`。迁移失败
+会随安装回滚，不会留下“新程序 + 旧数据”的半残状态。自定义人格/资源目录
+也会按“只补缺失文件”的方式保留。上次失败升级残留的 `app.old` 会先合并
+其中的 `data/`、`.env` 和自定义人格；如果只剩 `app.old`，会先恢复成当前
+`app` 再升级，不再直接删除。
+
+## 22. 镜像 HTTP 200 + JSON 限流页被当成源码包
+
+**现象**：测速成功后正式下载触发限流，镜像返回 HTTP 200 + `{"code":429}`；
+没有 SHA256 的源码包被当成下载成功，直到解压才报错。
+
+**处理**：正式下载的首个数据块（非续传）复用测速的 `_probe_payload_problem`
+校验文件魔数、`Content-Type` 和错误文本；发现 JSON/HTML/纯文本错误页立即
+换下一个镜像。下载场景不再用“首块不足 256 字节”判错，避免 TCP 分片误伤。
+
+## 23. 卸载弹窗写着“正在安装”/“查看日志”被弹窗遮挡
+
+**处理**：进度弹窗的标题、粗体标题、说明和取消按钮文本参数化；卸载时显示
+“正在卸载 KarenBot / 取消卸载”。点击“查看日志”会关闭 transient 进度弹窗，
+主窗口底部仍有进度条和状态行，不再被永远置顶的弹窗挡住。卸载线程也会
+接收取消事件。

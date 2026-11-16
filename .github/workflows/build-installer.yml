@@ -295,8 +295,14 @@ jobs:
           if ($normalText -notmatch "pythonw\.exe") {
             throw "launch-gui.cmd should use pythonw.exe"
           }
-          if ($normalText -notmatch 'start "" /B') {
-            throw "launch-gui.cmd should use start /B"
+          if ($normalText -notmatch 'start "" ') {
+            throw "launch-gui.cmd should use start without /B"
+          }
+          if ($normalText -match 'start "" /B') {
+            throw "launch-gui.cmd should not keep the console with /B"
+          }
+          if ($normalText -notmatch 'exit /b 0') {
+            throw "launch-gui.cmd should exit immediately after start"
           }
           $safeText = Get-Content $safe -Raw
           if ($safeText -notmatch "python\.exe") {
