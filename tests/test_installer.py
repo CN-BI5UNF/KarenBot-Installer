@@ -1937,6 +1937,36 @@ def test_uninstall_keep_data_migrates_legacy_app_data(tmp_path, monkeypatch):
     assert not (install_dir / "app").exists()
 
 
+def test_uninstall_keep_data_refuses_data_symlink_into_app(
+    tmp_path, monkeypatch
+):
+    install_dir = tmp_path / "install"
+    _make_uninstall_target(install_dir)
+    installer._remove_tree(install_dir / "data", strict=True)
+    (install_dir / "app" / "data").mkdir()
+    (install_dir / "app" / "data" / "config.yaml").write_text(
+        "legacy", encoding="utf-8"
+    )
+    try:
+        (install_dir / "data").symlink_to(
+            install_dir / "app" / "data", target_is_directory=True
+        )
+    except OSError:
+        pytest.skip("当前平台不允许创建目录符号链接")
+    font_root = tmp_path / "fonts"
+    skin_dir = tmp_path / "config" / "karen-gui"
+    _stub_uninstall_side_effects(monkeypatch, font_root, skin_dir)
+
+    with pytest.raises(SystemExit) as error:
+        installer.uninstall(install_dir, keep_data=True)
+
+    assert "符号链接" in error.value.message
+    # 必须原样保留，不能先删 app/ 再发现数据在 app/ 里。
+    assert (
+        install_dir / "app" / "data" / "config.yaml"
+    ).read_text(encoding="utf-8") == "legacy"
+
+
 def test_uninstall_cli_passes_keep_data(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 

@@ -4273,6 +4273,29 @@ def _clean_skins() -> None:
             log(f"删除主题偏好失败（可手动删除）：{skin}：{exc}")
 
 
+def _ensure_external_data_survives_app_removal(install_dir: Path) -> None:
+    """阻止 ``data/`` 指向 ``app/`` 内部时保留数据卸载造成数据丢失。"""
+    external = install_dir / "data"
+    try:
+        target = external.resolve()
+        app_dirs = [
+            (install_dir / name).resolve() for name in ("app", "app.old")
+        ]
+    except (OSError, RuntimeError) as exc:
+        fail(
+            "无法检查 data/ 符号链接，已中止卸载并保留安装目录：\n"
+            f"{external}\n原始错误：{exc}"
+        )
+    for app_dir in app_dirs:
+        if target == app_dir or app_dir in target.parents:
+            fail(
+                "无法安全保留运行数据：data/ 是指向 app/ 内部的符号链接。\n"
+                f"{external} -> {target}\n"
+                "继续卸载会删除该目录。请先把数据复制到安装目录外，"
+                "或把 data/ 换成真实目录后重试。"
+            )
+
+
 def _preserve_legacy_data_for_uninstall(
     install_dir: Path, *, cancel_event: Any | None = None
 ) -> None:
@@ -4291,7 +4314,7 @@ def _preserve_legacy_data_for_uninstall(
         legacy_resolved = legacy.resolve()
         external_resolved = external.resolve()
         target_resolved = target.resolve()
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         fail(
             "检查旧版运行数据目录失败，已中止卸载并保留安装目录：\n"
             f"{legacy}\n原始错误：{exc}"
@@ -4338,6 +4361,7 @@ def uninstall(
     ensure_app_not_running(install_dir)
     stage(f"卸载 KarenBot：{install_dir}")
     if keep_data:
+        _ensure_external_data_survives_app_removal(install_dir)
         _preserve_legacy_data_for_uninstall(
             install_dir, cancel_event=cancel_event
         )
@@ -4420,7 +4444,7 @@ def _paths_overlap(first: Path, second: Path) -> bool:
     try:
         first_resolved = first.resolve()
         second_resolved = second.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return False
     return (
         first_resolved == second_resolved
@@ -4435,17 +4459,30 @@ def _backup_personas_for_uninstall(install_dir: Path) -> None:
     if not source.is_dir():
         return
     target = _preserved_personas_dir(install_dir)
+    try:
+        source_resolved = source.resolve()
+        target_resolved = target.resolve()
+    except (OSError, RuntimeError) as exc:
+        fail(
+            "无法检查自定义人格目录，已中止卸载并保留安装目录：\n"
+            f"{source} -> {target}\n原始错误：{exc}"
+        )
+    if source_resolved == target_resolved:
+        # app/personas 已经指向 data/personas，删除 app 只移除符号链接。
+        log("自定义人格已位于 data/personas，无需重复备份")
+        return
     if _paths_overlap(source, target):
         fail(
             "无法备份自定义人格：data/personas 与 app/personas 路径重叠。\n"
-            f"{source} <-> {target}"
+            f"{source} <-> {target}\n"
+            "请先手动备份人格后再卸载。"
         )
     stage("正在备份自定义人格…")
     try:
-        if target.is_dir():
-            _remove_tree(target, strict=True)
-        elif target.exists():
+        if target.is_symlink() or target.is_file():
             target.unlink()
+        elif target.is_dir():
+            _remove_tree(target, strict=True)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(
             source,
@@ -4496,6 +4533,12 @@ def _restore_preserved_personas(
 def _discard_preserved_personas(install_dir: Path) -> None:
     """安装成功后删除人格备份；失败只记日志，下次安装会再次合并。"""
     source = _preserved_personas_dir(install_dir)
+    if source.is_symlink():
+        try:
+            source.unlink()
+        except OSError as exc:
+            log(f"人格备份符号链接暂未删除（可稍后手动删除）：{source}：{exc}")
+        return
     if not source.exists():
         return
     _remove_tree(source, strict=False)

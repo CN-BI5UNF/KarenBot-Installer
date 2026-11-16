@@ -211,6 +211,7 @@ class InstallerApp:
         self._installed_dir: Path | None = None
         self._installed_frontend = "gui"
         self._uninstall_keep_data = False
+        self._uninstall_running = False
         self._running = False
         self._uninstall_check: str | None = None
         self._skin_radios: list[ttk.Radiobutton] = []
@@ -962,6 +963,7 @@ class InstallerApp:
     def _start_install(self) -> None:
         if self._worker is not None and self._worker.is_alive():
             return
+        self._uninstall_running = False
         source_mode = self.source_mode.get()
         online = source_mode == "online"
         source_dir: Path | None = None
@@ -1204,6 +1206,7 @@ class InstallerApp:
         )
 
     def _on_done(self, path: Path) -> None:
+        self._uninstall_running = False
         self._worker = None
         self._close_progress_dialog()
         self._set_running(False)
@@ -1226,24 +1229,31 @@ class InstallerApp:
             )
 
     def _on_error(self, message: str) -> None:
+        was_uninstall = self._uninstall_running
+        self._uninstall_running = False
         self._uninstall_keep_data = False
         self._worker = None
         self._close_progress_dialog()
         self._set_running(False)
         self.progress.stop()
-        self.status.set("安装失败")
+        self.status.set("卸载失败" if was_uninstall else "安装失败")
         self._log_line("错误：" + message)
         if not self._closing:
-            messagebox.showerror("安装失败", message[:2000])
+            messagebox.showerror(
+                "卸载失败" if was_uninstall else "安装失败",
+                message[:2000],
+            )
 
     def _on_cancelled(self) -> None:
+        was_uninstall = self._uninstall_running
+        self._uninstall_running = False
         self._uninstall_keep_data = False
         self._worker = None
         self._close_progress_dialog()
         self._set_running(False)
         self.progress.stop()
-        self.status.set("已取消")
-        self._log_line("安装已取消。")
+        self.status.set("卸载已取消" if was_uninstall else "已取消")
+        self._log_line("卸载已取消。" if was_uninstall else "安装已取消。")
 
     def _start_uninstall(self) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -1308,6 +1318,7 @@ class InstallerApp:
         core.set_log_sink(self._queue_log)
         core.set_progress_sink(self._queue_progress)
         core.set_status_sink(self._queue_status)
+        self._uninstall_running = True
         self._worker = threading.Thread(
             target=self._run_uninstall,
             kwargs={"install_dir": install_dir, "keep_data": keep_data},
@@ -1340,6 +1351,7 @@ class InstallerApp:
     def _on_uninstalled(self, path: Path) -> None:
         keep_data = self._uninstall_keep_data
         self._uninstall_keep_data = False
+        self._uninstall_running = False
         self._worker = None
         self._close_progress_dialog()
         self._set_running(False)

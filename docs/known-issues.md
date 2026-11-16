@@ -300,7 +300,9 @@ exe 的 GUI 入口也支持
 - `data/` 原样留在安装目录（新版 backend 的 `KAREN_DATA_ROOT`）；
 - 旧版 `app/data` 会先合并到 `data/instances/default`，再删除 `app/`；
 - `app/personas` 会备份到 `data/personas`；下次安装把其中缺失的人格
-  合并回 `app/personas`，不覆盖新版自带人格。
+  合并回 `app/personas`，不覆盖新版自带人格；
+- 如果 `data/` 是指向 `app/` 内部的符号链接，保留数据卸载会先中止并提示，
+  避免删除 `app/` 时把数据目录一起删掉。
 
 主题偏好仅在彻底卸载时清理；字体和快捷方式仍会删除。默认（不带
 `--keep-data` 且确认框选择【否】）行为与旧版一致，仍会删除全部数据。

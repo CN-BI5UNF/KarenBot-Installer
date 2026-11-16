@@ -317,6 +317,29 @@ def test_gui_uninstall_keep_data_choice(monkeypatch, tmp_path):
         root.destroy()
 
 
+def test_gui_uninstall_error_uses_uninstall_wording(monkeypatch, tmp_path):
+    root, app, messages = _make_app(tmp_path, monkeypatch)
+    install_dir = tmp_path / "install"
+    (install_dir / "app").mkdir(parents=True)
+    (install_dir / "app" / "modules.json").write_text(
+        '{"installer": "local-source"}', encoding="utf-8"
+    )
+
+    def _boom(_path, **_kwargs):
+        raise karen_install.InstallFailure("KarenBot 仍在运行")
+
+    monkeypatch.setattr(karen_install, "uninstall", _boom)
+    try:
+        app.install_dir.set(str(install_dir))
+        app._start_uninstall()
+        assert _pump(root, lambda: app.status.get() == "卸载失败")
+        assert messages and messages[-1][0] == "error"
+        assert messages[-1][1][0] == "卸载失败"
+        assert "仍在运行" in messages[-1][1][1]
+    finally:
+        root.destroy()
+
+
 def test_gui_uninstall_cancel_choice_does_not_start_worker(
     monkeypatch, tmp_path
 ):
