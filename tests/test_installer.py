@@ -11,6 +11,7 @@ import socketserver
 import sys
 import tarfile
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -858,6 +859,61 @@ def test_github_page_race_tries_every_mirror(monkeypatch):
     with pytest.raises(SystemExit):
         installer._fetch_github_page("owner/repo", "releases.atom")
     assert len(calls) == len(mirrors)
+
+
+def test_github_page_race_starts_all_mirrors_under_deadline(monkeypatch):
+    mirrors = [{"name": "direct", "kind": "direct", "enabled": True}]
+    for index in range(1, 6):
+        mirrors.append(
+            {
+                "name": f"m{index}",
+                "kind": "prefix",
+                "prefix": f"https://m{index}.test",
+                "enabled": True,
+            }
+        )
+    _race_mirrors(monkeypatch, mirrors)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_MAX_PARALLEL", 2)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_STAGGER", 0.01)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_TIMEOUT", 0.1)
+    calls: list[str] = []
+
+    def fake_urlopen(request, **_kwargs):
+        calls.append(request.full_url)
+        time.sleep(0.2)
+        raise TimeoutError("simulated slow mirror")
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(SystemExit):
+        installer._fetch_github_page("owner/repo", "releases.atom")
+    assert len(calls) == len(mirrors)
+
+
+def test_github_page_definitive_grace_keeps_valid_mirror(monkeypatch):
+    _race_mirrors(monkeypatch)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_STAGGER", 0.0)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_DEFINITIVE_GRACE", 1.0)
+    direct_error = threading.Event()
+
+    def fake_urlopen(request, **_kwargs):
+        url = request.full_url
+        if url.startswith("https://github.com/"):
+            direct_error.set()
+            raise installer.urllib.error.HTTPError(
+                url, 404, "Not Found", {}, None
+            )
+        direct_error.wait(1.0)
+        return _PageResponse(
+            b"<html>/owner/repo/releases/tag/vFAST</html>", url
+        )
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    data, _final_url = installer._fetch_github_page(
+        "owner/repo",
+        "releases/latest",
+        validator=installer._latest_page_validator("owner/repo"),
+    )
+    assert b"vFAST" in data
 
 
 def test_github_page_race_reports_all_failures(monkeypatch):
