@@ -1666,6 +1666,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="离线自检解压/校验/启动器（冻结版 CI）",
     )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="卸载 --dir 指向的 KarenBot（供 Windows 卸载项调用）",
+    )
+    parser.add_argument(
+        "--dir", dest="target_dir", default="", help="卸载目标目录"
+    )
+    parser.add_argument("--non-interactive", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -1700,6 +1709,23 @@ def main(argv: list[str] | None = None) -> int:
             _print_console(traceback.format_exc())
             return 1
         _print_console("self-test ok")
+        return 0
+    if args.uninstall:
+        if not args.target_dir:
+            _print_console("--uninstall 需要 --dir 指定安装目录")
+            return 2
+        try:
+            result = core.uninstall(Path(args.target_dir))
+        except core.InstallFailure as exc:
+            _print_console(f"卸载失败：{exc.message}")
+            return 1
+        except core.InstallCancelled:
+            _print_console("卸载已取消")
+            return 1
+        except Exception:  # noqa: BLE001 - windowed 版只能靠退出码
+            _print_console(traceback.format_exc())
+            return 1
+        _print_console(f"已卸载：{result}")
         return 0
     if _TK_ERROR is not None:
         _print_console(

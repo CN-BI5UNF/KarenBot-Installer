@@ -337,6 +337,23 @@ def test_gui_self_test_entrypoint_failure(monkeypatch):
     assert gui_install.main(["--self-test"]) == 1
 
 
+def test_gui_uninstall_cli_entrypoint(monkeypatch, tmp_path):
+    calls: list[Path] = []
+
+    def fake_uninstall(path, **_kwargs):
+        calls.append(path)
+        return path
+
+    monkeypatch.setattr(gui_install.core, "uninstall", fake_uninstall)
+    assert (
+        gui_install.main(
+            ["--uninstall", "--dir", str(tmp_path), "--non-interactive"]
+        )
+        == 0
+    )
+    assert calls == [tmp_path]
+
+
 def test_gui_progress_dialog_is_non_modal(monkeypatch, tmp_path):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
     try:

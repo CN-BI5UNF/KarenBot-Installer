@@ -270,14 +270,17 @@ gitmirror 等），原实现按静态顺序串行尝试；前两个源慢时，�
 Windows“设置 → 应用”里也搜不到 KarenBot，只能手动删除安装目录，残留
 快捷方式、字体和 `%APPDATA%\karen-gui` 偏好。
 
-**处理**：安装时把安装器核心复制为 `<安装目录>\karenbot-uninstall.py`，
-并在 HKCU 写入 `Uninstall\KarenBot` 项（DisplayName/DisplayVersion/
-Publisher/DisplayIcon/InstallLocation/UninstallString/NoModify/NoRepair）。
-卸载命令使用安装目录内的便携 Python 或托管 venv 执行
-`karenbot-uninstall.py --uninstall --dir ... --non-interactive`，不需要
-管理员权限，也不依赖原始安装器 exe。卸载结束后删除注册表项和卸载脚本。
-如果安装目录内没有可用的 Python（例如 `--skip-deps` 且使用外部 venv），
-则跳过注册表写入并记录日志，不影响安装本身。
+**处理**：安装时把冻结安装器 exe（源码运行时为 `karen_install.py` +
+系统 Python）复制到 `%LOCALAPPDATA%\KarenBot\Uninstall`，并在 HKCU 写入
+`Uninstall\KarenBot` 项（DisplayName/DisplayVersion/Publisher/DisplayIcon/
+InstallLocation/UninstallString/NoModify/NoRepair）。卸载进程在安装目录
+之外运行，因此能删除 `app/runtime/python.exe`、`venv` 等正在被安装目录内
+Python 占用的文件；不需要管理员权限，也不依赖原始安装器 exe。卸载结束后
+删除注册表项；卸载器副本因正在运行可能保留，可稍后手动删除。
+源码运行时如果找不到安装器核心脚本，则跳过注册表写入并记录日志，不影响
+安装本身。冻结安装器 exe 的 GUI 入口也支持
+`--uninstall --dir ... --non-interactive`，因此复制的 exe 可以直接作为
+卸载器使用。
 
 ## 27. 小屏笔记本/高 DPI 下窗口占满首屏
 

@@ -62,8 +62,8 @@ xvfb-run -a python gui_install.py --smoke-test
 ```
 
 `--self-test` 不联网，覆盖 tar.gz/zip 解压、SHA256、首包魔数、atom 解析、
-缺失文件合并、数据根探测、启动器/安装标记和卸载脚本复制；冻结版 CI 会
-实际运行它，用来兜住 PyInstaller excludes 误删依赖（例如 quopri）。
+缺失文件合并、数据根探测、启动器和安装标记；冻结版 CI 会实际运行它，
+用来兜住 PyInstaller excludes 误删依赖（例如 quopri）。
 
 ## 版本
 

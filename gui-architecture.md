@@ -94,8 +94,9 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
   安装器校验 `runtime/python.exe`、GTK4/Adwaita DLL、Gtk/Adw typelib。
 - **运行数据**：启动器注入 `KAREN_DATA_ROOT=<安装目录>/data`，升级只替换
   `app/`；旧版 `app/data` 会迁移，避免覆盖安装清空用户数据。
-- **Windows 卸载项**：安装时复制 `karenbot-uninstall.py` 到安装目录，并在
-  HKCU `...\Uninstall\KarenBot` 写入卸载项；卸载使用安装目录内的 Python，
+- **Windows 卸载项**：把冻结安装器 exe（或源码脚本 + 系统 Python）复制到
+  `%LOCALAPPDATA%\KarenBot\Uninstall`，并在 HKCU `...\Uninstall\KarenBot`
+  写入卸载项；卸载进程在安装目录之外，能删除安装目录内的 Python 运行时，
   不依赖原始安装器 exe，也不需要管理员权限。
 - **中文路径**：安装目录/源码/安装包路径含非 ASCII 字符时提前报错，并提示
   `%PUBLIC%\KarenBot`；默认目录若因用户名带中文，会自动改用 `%PUBLIC%`。

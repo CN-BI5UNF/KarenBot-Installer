@@ -1615,11 +1615,42 @@ class _FakeWinreg:
         self.deleted.append(key)
 
 
-def test_write_uninstaller_copies_core(tmp_path):
-    target = installer._write_uninstaller(tmp_path)
-    assert target is not None and target.is_file()
-    text = target.read_text(encoding="utf-8")
-    assert "--uninstall" in text
+def test_prepare_windows_uninstall_launcher_source_mode(tmp_path, monkeypatch):
+    local = tmp_path / "local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setattr(installer.sys, "frozen", False, raising=False)
+    install_dir = tmp_path / "install"
+    install_dir.mkdir()
+    prepared = installer._prepare_windows_uninstall_launcher(install_dir)
+    assert prepared is not None
+    command, launcher = prepared
+    assert launcher == (
+        local
+        / "KarenBot"
+        / installer.WINDOWS_UNINSTALL_DIRNAME
+        / installer.UNINSTALLER_FILENAME
+    )
+    assert launcher.is_file()
+    assert command == [installer.sys.executable, str(launcher)]
+
+
+def test_prepare_windows_uninstall_launcher_frozen_mode(tmp_path, monkeypatch):
+    local = tmp_path / "local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    fake_exe = tmp_path / "KarenBot-Installer.exe"
+    fake_exe.write_bytes(b"exe")
+    monkeypatch.setattr(installer.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(installer.sys, "executable", str(fake_exe))
+    install_dir = tmp_path / "install"
+    install_dir.mkdir()
+    prepared = installer._prepare_windows_uninstall_launcher(install_dir)
+    assert prepared is not None
+    command, launcher = prepared
+    assert launcher.name == "KarenBot-Installer.exe"
+    assert launcher.read_bytes() == b"exe"
+    assert command == [str(launcher)]
 
 
 def test_register_windows_uninstall_writes_hkcu(tmp_path, monkeypatch):
@@ -1628,22 +1659,23 @@ def test_register_windows_uninstall_writes_hkcu(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "winreg", fake)
     install_dir = tmp_path / "install"
     install_dir.mkdir()
-    (install_dir / installer.UNINSTALLER_FILENAME).write_text(
-        "# uninstaller\n", encoding="utf-8"
-    )
     python = tmp_path / "python.exe"
     python.write_bytes(b"")
+    script = tmp_path / installer.UNINSTALLER_FILENAME
+    script.write_text("# uninstaller\n", encoding="utf-8")
     icon = tmp_path / "icon.ico"
     icon.write_bytes(b"")
+    command = [str(python), str(script)]
     installer._register_windows_uninstall(
-        install_dir, python=python, icon=icon
+        install_dir, command=command, icon=icon
     )
     assert fake.values["DisplayName"] == (fake.REG_SZ, "KarenBot")
     assert fake.values["Publisher"] == (fake.REG_SZ, "CN-BI5UNF")
-    command = str(fake.values["UninstallString"][1])
-    assert str(python) in command
-    assert str(install_dir) in command
-    assert "--uninstall" in command
+    command_text = str(fake.values["UninstallString"][1])
+    for part in command:
+        assert part in command_text
+    assert str(install_dir) in command_text
+    assert "--uninstall" in command_text
     assert fake.values["NoModify"] == (fake.REG_DWORD, 1)
     assert fake.values["NoRepair"] == (fake.REG_DWORD, 1)
 
@@ -1656,7 +1688,9 @@ def test_unregister_windows_uninstall_deletes_key(monkeypatch):
     assert fake.deleted == [installer.WINDOWS_UNINSTALL_KEY]
 
 
-def test_uninstall_removes_uninstaller_and_registry(tmp_path, monkeypatch):
+def test_uninstall_removes_registry_and_uninstaller_copy(
+    tmp_path, monkeypatch
+):
     install_dir = tmp_path / "install"
     (install_dir / "app" / "backend").mkdir(parents=True)
     (install_dir / "app" / "modules.json").write_text(
@@ -1665,10 +1699,16 @@ def test_uninstall_removes_uninstaller_and_registry(tmp_path, monkeypatch):
     (install_dir / installer.INSTALL_MARKER_NAME).write_text(
         "{}", encoding="utf-8"
     )
-    (install_dir / installer.UNINSTALLER_FILENAME).write_text(
+    local = tmp_path / "local"
+    uninstall_root = (
+        local / "KarenBot" / installer.WINDOWS_UNINSTALL_DIRNAME
+    )
+    uninstall_root.mkdir(parents=True)
+    (uninstall_root / installer.UNINSTALLER_FILENAME).write_text(
         "# uninstaller\n", encoding="utf-8"
     )
     fake = _FakeWinreg()
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
     monkeypatch.setattr(installer, "IS_WINDOWS", True)
     monkeypatch.setitem(sys.modules, "winreg", fake)
     monkeypatch.setattr(installer, "ensure_app_not_running", lambda *_a, **_k: None)
@@ -1680,25 +1720,7 @@ def test_uninstall_removes_uninstaller_and_registry(tmp_path, monkeypatch):
 
     assert fake.deleted == [installer.WINDOWS_UNINSTALL_KEY]
     assert not install_dir.exists()
-
-
-def test_windows_uninstall_python_prefers_portable(tmp_path, monkeypatch):
-    monkeypatch.setattr(installer, "IS_WINDOWS", True)
-    install_dir = tmp_path / "install"
-    venv_python = install_dir / "venv" / "Scripts" / "python.exe"
-    venv_python.parent.mkdir(parents=True)
-    venv_python.write_bytes(b"")
-    portable = tmp_path / "app" / "runtime" / "python.exe"
-    portable.parent.mkdir(parents=True)
-    portable.write_bytes(b"")
-    assert (
-        installer._windows_uninstall_python(install_dir, portable)
-        == portable
-    )
-    assert (
-        installer._windows_uninstall_python(install_dir, None)
-        == venv_python
-    )
+    assert not uninstall_root.exists()
 
 
 def test_uninstall_removes_install_artifacts(tmp_path, monkeypatch):

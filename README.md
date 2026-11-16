@@ -160,11 +160,14 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
     数据固定在 `<安装目录>/data/instances/default`，升级只替换 `app/`，
     不会碰用户配置、聊天库、工作区或自定义人格。旧版 `app/data` 会在
     升级时自动迁移；backend 不支持该变量时回退到 `app/data` 迁移。
-17. **Windows 卸载入口**：安装时把安装器核心复制为安装目录内的
-    `karenbot-uninstall.py`，并在
+17. **Windows 卸载入口**：安装时把冻结安装器 exe（源码运行时为安装器核心
+    脚本 + 系统 Python）复制到 `%LOCALAPPDATA%\KarenBot\Uninstall`，并在
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\KarenBot`
-    写入免管理员权限的卸载项。用户可以在 Windows“设置 → 应用”中直接
-    卸载，即使原始安装器 exe 已删除；卸载流程会清理该注册表项。
+    写入免管理员权限的卸载项。卸载进程在安装目录之外运行，因此能删除
+    安装目录内的 `app/`、`venv/` 和运行数据；即使原始安装器 exe 已删除，
+    用户仍可在 Windows“设置 → 应用”中直接卸载。卸载流程会清理注册表项；
+    卸载器副本因正在运行可能保留，可稍后手动删除。冻结安装器 exe 也支持
+    `--uninstall --dir <安装目录> --non-interactive`，便于脚本化卸载。
 18. **小屏友好**：镜像/字体/外观等选项默认收进“高级设置”，默认窗口高度
     降到 560~640；1366×768 或 1080p 150% 缩放下打开即可看到“开始安装”。
 

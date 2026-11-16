@@ -106,10 +106,7 @@ LAUNCHER_FILENAMES: tuple[str, ...] = (
     "launch-webui.sh",
 )
 UNINSTALLER_FILENAME = "karenbot-uninstall.py"
-ENTRYPOINT_FILENAMES: tuple[str, ...] = (
-    *LAUNCHER_FILENAMES,
-    UNINSTALLER_FILENAME,
-)
+WINDOWS_UNINSTALL_DIRNAME = "Uninstall"
 WINDOWS_UNINSTALL_KEY = (
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\KarenBot"
 )
@@ -773,6 +770,7 @@ def _first_locked_file(root: Path) -> Path | None:
     """
     if not IS_WINDOWS or not root.is_dir():
         return None
+    self_path = os.path.normcase(os.path.abspath(sys.executable))
     candidates: list[Path] = [
         root / "runtime" / "python.exe",
         root / "runtime" / "pythonw.exe",
@@ -789,6 +787,10 @@ def _first_locked_file(root: Path) -> Path | None:
     seen: set[str] = set()
     for path in candidates:
         if not path.is_file():
+            continue
+        if os.path.normcase(os.path.abspath(str(path))) == self_path:
+            # 从安装目录内的 python.exe 运行卸载脚本时，不能把自己的
+            # 解释器误判为“被占用”。
             continue
         key = str(path).casefold()
         if key in seen:
@@ -3968,73 +3970,91 @@ def _write_install_marker(
     )
 
 
-def _write_uninstaller(install_dir: Path) -> Path | None:
-    """把安装器核心复制为安装目录内的独立卸载脚本。
+def _windows_uninstall_root() -> Path:
+    base = Path(
+        os.environ.get("LOCALAPPDATA")
+        or (Path.home() / "AppData" / "Local")
+    )
+    return base / "KarenBot" / WINDOWS_UNINSTALL_DIRNAME
 
-    Windows 的“应用和功能”只需要 Python + 这个脚本即可卸载，不依赖用户
-    是否保留了原始安装器 exe。
+
+def _prepare_windows_uninstall_launcher(
+    install_dir: Path,
+) -> tuple[list[str], Path] | None:
+    """准备安装目录之外的卸载入口，返回 (命令前缀, 图标候选)。
+
+    卸载进程不能运行在安装目录内，否则 Windows 无法删除正在使用的
+    `app/runtime/python.exe` 或 `venv/Scripts/python.exe`。冻结安装器复制
+    自身到 `%LOCALAPPDATA%\\KarenBot\\Uninstall`；源码运行则复制核心脚本
+    并用当前系统 Python（都在安装目录之外）。
     """
-    source = _resource_path("karen_install.py")
-    if not source.is_file():
-        log(f"跳过卸载脚本：找不到安装器核心源码 {source}")
+    if not IS_WINDOWS:
         return None
-    target = install_dir / UNINSTALLER_FILENAME
+    root = _windows_uninstall_root()
     try:
-        if target.exists():
-            target.chmod(target.stat().st_mode | stat.S_IWRITE)
-        shutil.copy2(source, target)
+        root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        log(f"写入卸载脚本失败（可忽略）：{target}：{exc}")
+        log(f"跳过 Windows 卸载项：无法创建 {root}：{exc}")
         return None
-    return target
-
-
-def _windows_uninstall_python(
-    install_dir: Path, portable_python: Path | None
-) -> Path | None:
-    """选择安装目录内可用的 python.exe；不使用用户外部的 venv。"""
-    candidates: list[Path | None] = [
-        portable_python,
-        _venv_python(install_dir / "venv"),
-        _portable_runtime_python(install_dir),
-    ]
-    for candidate in candidates:
-        if candidate is not None and candidate.is_file():
-            return candidate
-    return None
+    if getattr(sys, "frozen", False):
+        source = Path(sys.executable)
+        target = root / "KarenBot-Installer.exe"
+        command = [str(target)]
+    else:
+        python = Path(sys.executable).resolve()
+        try:
+            python.relative_to(install_dir.resolve())
+        except ValueError:
+            pass
+        else:
+            log("跳过 Windows 卸载项：运行安装器的 Python 位于安装目录内")
+            return None
+        source = _resource_path("karen_install.py")
+        target = root / UNINSTALLER_FILENAME
+        command = [sys.executable, str(target)]
+    same_path = os.path.normcase(
+        os.path.abspath(str(source))
+    ) == os.path.normcase(os.path.abspath(str(target)))
+    if source.is_file() and not same_path:
+        try:
+            if target.exists():
+                target.chmod(target.stat().st_mode | stat.S_IWRITE)
+            shutil.copy2(source, target)
+        except OSError as exc:
+            log(f"写入 Windows 卸载入口失败（可忽略）：{target}：{exc}")
+            return None
+    if not target.is_file():
+        return None
+    return command, target
 
 
 def _register_windows_uninstall(
     install_dir: Path,
     *,
-    python: Path,
+    command: list[str],
     icon: Path | None,
 ) -> None:
     """写入 HKCU 卸载项；失败只记日志，不影响已完成的安装。"""
     if not IS_WINDOWS:
-        return
-    script = install_dir / UNINSTALLER_FILENAME
-    if not script.is_file():
-        log("跳过 Windows 卸载项：安装目录内没有卸载脚本")
         return
     try:
         import winreg
     except ImportError as exc:
         log(f"跳过 Windows 卸载项：缺少 winreg（{exc}）")
         return
-    command = (
-        f'"{python}" "{script}" --uninstall '
-        f'--dir "{install_dir}" --non-interactive'
+    command_text = (
+        " ".join(f'"{part}"' for part in command)
+        + f' --uninstall --dir "{install_dir}" --non-interactive'
     )
-    icon_path = icon if icon is not None else install_dir
+    icon_path = icon if icon is not None else Path(command[0])
     string_values = {
         "DisplayName": "KarenBot",
         "DisplayVersion": INSTALLER_VERSION,
         "Publisher": WINDOWS_PUBLISHER,
         "InstallLocation": str(install_dir),
         "DisplayIcon": str(icon_path),
-        "UninstallString": command,
-        "QuietUninstallString": command,
+        "UninstallString": command_text,
+        "QuietUninstallString": command_text,
         "InstallDate": time.strftime("%Y%m%d"),
         "Comments": "KarenBot installer-managed uninstall entry",
         "URLInfoAbout": "https://github.com/CN-BI5UNF/KarenBot-Installer",
@@ -4244,10 +4264,14 @@ def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
     _clean_fonts(install_dir)
     _clean_skins()
     _unregister_windows_uninstall()
-    try:
-        (install_dir / UNINSTALLER_FILENAME).unlink(missing_ok=True)
-    except OSError as exc:
-        log(f"删除卸载脚本失败（可手动删除）：{exc}")
+    if IS_WINDOWS:
+        uninstall_root = _windows_uninstall_root()
+        if uninstall_root.exists():
+            _remove_tree(uninstall_root, strict=False)
+            log(
+                f"Windows 卸载入口副本：{uninstall_root}"
+                "（若仍在运行可稍后手动删除）"
+            )
     try:
         install_dir.rmdir()
     except OSError:
@@ -4481,7 +4505,7 @@ def _restore_install_entrypoints(
     marker_existed: bool,
 ) -> None:
     """回滚时恢复旧启动器/安装标记，避免旧 app 配新数据根。"""
-    for name in ENTRYPOINT_FILENAMES:
+    for name in LAUNCHER_FILENAMES:
         target = install_dir / name
         if name in existing_launchers:
             backup = launcher_backup / name
@@ -4794,7 +4818,7 @@ def install(
         backup_dir.mkdir(parents=True, exist_ok=True)
         existing_launchers = {
             name
-            for name in ENTRYPOINT_FILENAMES
+            for name in LAUNCHER_FILENAMES
             if (install_dir / name).is_file()
         }
         marker_path = install_dir / INSTALL_MARKER_NAME
@@ -4833,8 +4857,6 @@ def install(
             installer=installer_kind,
             components=components,
         )
-        if IS_WINDOWS:
-            _write_uninstaller(install_dir)
         if old_app.exists() or (
             data_root is None
             and _external_data_dir(install_dir).is_dir()
@@ -4847,18 +4869,19 @@ def install(
             )
         if old_app.exists():
             _remove_tree(old_app, strict=False)
-        if IS_WINDOWS and (install_dir / UNINSTALLER_FILENAME).is_file():
-            python = _windows_uninstall_python(
-                install_dir, portable_target
-            )
-            if python is None:
-                log("跳过 Windows 卸载项：安装目录内没有可用的 Python")
+        if IS_WINDOWS:
+            prepared = _prepare_windows_uninstall_launcher(install_dir)
+            if prepared is None:
+                log("跳过 Windows 卸载项：无法准备安装目录外的卸载入口")
             else:
+                command, launcher = prepared
                 try:
                     _register_windows_uninstall(
                         install_dir,
-                        python=python,
-                        icon=prebuilt_target or _shortcut_icon(install_dir),
+                        command=command,
+                        icon=prebuilt_target
+                        or _shortcut_icon(install_dir)
+                        or launcher,
                     )
                 except Exception as exc:  # noqa: BLE001 - 不能因注册表失败毁掉安装
                     log(f"写入 Windows 卸载项失败（可手动卸载）：{exc}")
@@ -5093,12 +5116,6 @@ def self_test() -> None:
             or marker.get("installer") != "self-test"
         ):
             fail("self-test: 安装标记异常")
-        uninstaller = _write_uninstaller(root)
-        if (
-            uninstaller is None
-            or "--uninstall" not in uninstaller.read_text(encoding="utf-8")
-        ):
-            fail("self-test: 卸载脚本不可用")
     log("self-test 通过")
 
 
