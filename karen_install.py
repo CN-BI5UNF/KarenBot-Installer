@@ -70,7 +70,7 @@ def _resource_path(name: str) -> Path:
 
 MIRRORS_FILE = _resource_path("mirrors.json")
 WINDOWS_PACKAGE_FILE = _resource_path("windows-gui-package.json")
-INSTALLER_VERSION = "1.0.1-dev"
+INSTALLER_VERSION = "1.0.0-rc"
 USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 # 仅探测 256KB：既够区分镜像吞吐，又能缩短公共镜像的流量/长尾耗时。
 PROBE_BYTES = 256 * 1024

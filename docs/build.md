@@ -67,6 +67,6 @@ xvfb-run -a python gui_install.py --smoke-test
 
 ## 版本
 
-- `VERSION` / `INSTALLER_VERSION`：`1.0.1-dev`
-- Windows 文件版本：`packaging/windows-version-info.txt`（FileVersion `1.0.1`）
-- 发布 tag：`v1.0.1-dev`（Pre-release）
+- `VERSION` / `INSTALLER_VERSION`：`1.0.0-rc`
+- Windows 文件版本：`packaging/windows-version-info.txt`（FileVersion `1.0.0`）
+- 发布 tag：`v1.0.0-rc`（Pre-release）
