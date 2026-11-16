@@ -107,6 +107,58 @@ def _print_console(text: str) -> None:
         pass
 
 
+def _apply_window_icon(window: Any) -> None:
+    """给 Tk 窗口绑定内置图标；X11 不接受 .ico 时静默跳过。"""
+    try:
+        icon_file = core.installer_icon_path()
+        if icon_file is not None and icon_file.is_file():
+            window.iconbitmap(default=str(icon_file))
+    except Exception:  # noqa: BLE001 - 非 Windows Tk 可能只接受 XBM
+        pass
+
+
+def _create_hidden_root() -> tk.Tk | None:
+    """为卸载确认框创建隐藏主窗口；无图形环境时返回 None。"""
+    if tk is None:
+        return None
+    try:
+        _enable_dpi_awareness()
+        root = tk.Tk()
+        root.withdraw()
+    except Exception:  # noqa: BLE001 - 无 DISPLAY / Tk 初始化失败
+        return None
+    _apply_window_icon(root)
+    return root
+
+
+def _destroy_root(root: tk.Tk | None) -> None:
+    if root is None:
+        return
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
+def _show_dialog(
+    kind: str,
+    title: str,
+    message: str,
+    *,
+    parent: Any | None = None,
+) -> None:
+    """消息框只做尽力提示；弹窗失败不能改变卸载结果或退出码。"""
+    if messagebox is None:
+        return
+    try:
+        if kind == "error":
+            messagebox.showerror(title, message, parent=parent)
+        else:
+            messagebox.showinfo(title, message, parent=parent)
+    except Exception:  # noqa: BLE001 - 窗口已销毁/无图形环境
+        pass
+
+
 def _open_path(path: Path) -> None:
     if os.name == "nt":
         startfile = getattr(os, "startfile", None)
@@ -130,6 +182,7 @@ class InstallerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
+        _apply_window_icon(self.root)
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         width = 900
@@ -157,6 +210,7 @@ class InstallerApp:
         self._cancel = threading.Event()
         self._installed_dir: Path | None = None
         self._installed_frontend = "gui"
+        self._uninstall_keep_data = False
         self._running = False
         self._uninstall_check: str | None = None
         self._skin_radios: list[ttk.Radiobutton] = []
@@ -1172,6 +1226,7 @@ class InstallerApp:
             )
 
     def _on_error(self, message: str) -> None:
+        self._uninstall_keep_data = False
         self._worker = None
         self._close_progress_dialog()
         self._set_running(False)
@@ -1182,6 +1237,7 @@ class InstallerApp:
             messagebox.showerror("安装失败", message[:2000])
 
     def _on_cancelled(self) -> None:
+        self._uninstall_keep_data = False
         self._worker = None
         self._close_progress_dialog()
         self._set_running(False)
@@ -1207,15 +1263,18 @@ class InstallerApp:
                 f"{install_dir}\n不是 KarenBot 安装目录（缺少安装标记）。",
             )
             return
-        if not messagebox.askyesno(
+        keep_choice = messagebox.askyesnocancel(
             "卸载 KarenBot",
-            "将删除以下内容：\n"
-            f"{install_dir}\n\n"
-            "包括程序、启动器、快捷方式、字体和主题偏好；"
-            "运行数据目录（data/ 或旧版 app/data）也会一起删除。\n\n"
-            "确定卸载？",
-        ):
+            f"即将从以下目录卸载 KarenBot：\n{install_dir}\n\n"
+            "是否保留运行数据与自定义人格？\n\n"
+            "【是】仅卸载程序，保留 data/ 运行数据及自定义人格（推荐重装/排障时选择）\n"
+            "【否】彻底卸载，删除程序、运行数据及自定义人格\n"
+            "【取消】中止卸载",
+        )
+        if keep_choice is None:
             return
+        keep_data = bool(keep_choice)
+        self._uninstall_keep_data = keep_data
         self._cancel.clear()
         self._closing = False
         self._close_deadline = 0.0
@@ -1232,24 +1291,39 @@ class InstallerApp:
         self._open_progress_dialog(
             title="正在卸载 KarenBot",
             cancel_text="取消卸载",
-            note="正在删除程序、启动器、快捷方式和运行数据；请不要手动打开或删除安装目录。",
+            note=(
+                "正在删除程序、启动器、快捷方式和主题偏好；"
+                "data/ 运行数据与自定义人格备份会被保留。\n"
+                "请不要手动打开或删除安装目录。"
+                if keep_data
+                else "正在删除程序、启动器、快捷方式、主题偏好、"
+                "运行数据和自定义人格；请不要手动打开或删除安装目录。"
+            ),
         )
         self._clear_log()
         self.notebook.select(1)
-        self._log_line(f"卸载：{install_dir}")
+        self._log_line(
+            f"卸载：{install_dir}（{'保留数据' if keep_data else '彻底删除'}）"
+        )
         core.set_log_sink(self._queue_log)
         core.set_progress_sink(self._queue_progress)
         core.set_status_sink(self._queue_status)
         self._worker = threading.Thread(
             target=self._run_uninstall,
-            kwargs={"install_dir": install_dir},
+            kwargs={"install_dir": install_dir, "keep_data": keep_data},
             daemon=True,
         )
         self._worker.start()
 
-    def _run_uninstall(self, *, install_dir: Path) -> None:
+    def _run_uninstall(
+        self, *, install_dir: Path, keep_data: bool = False
+    ) -> None:
         try:
-            result = core.uninstall(install_dir, cancel_event=self._cancel)
+            result = core.uninstall(
+                install_dir,
+                cancel_event=self._cancel,
+                keep_data=keep_data,
+            )
         except core.InstallCancelled:
             self._queue.put(("cancelled", None))
         except core.InstallFailure as exc:
@@ -1264,6 +1338,8 @@ class InstallerApp:
             core.set_status_sink(None)
 
     def _on_uninstalled(self, path: Path) -> None:
+        keep_data = self._uninstall_keep_data
+        self._uninstall_keep_data = False
         self._worker = None
         self._close_progress_dialog()
         self._set_running(False)
@@ -1275,9 +1351,19 @@ class InstallerApp:
         self.launch_button.configure(state="disabled")
         self.launch_safe_button.configure(state="disabled")
         self.uninstall_button.configure(state="disabled")
-        self._log_line(f"已卸载：{path}")
+        self._log_line(
+            f"已卸载：{path}（{'已保留数据' if keep_data else '已删除数据'}）"
+        )
         if not self._closing:
-            messagebox.showinfo("卸载完成", f"KarenBot 已卸载：\n{path}")
+            suffix = (
+                "\n\n已保留 data/ 运行数据与自定义人格备份，"
+                "重新安装时会自动恢复人格。"
+                if keep_data
+                else ""
+            )
+            messagebox.showinfo(
+                "卸载完成", f"KarenBot 已卸载：\n{path}{suffix}"
+            )
 
     def _cancel_install(self) -> None:
         if self._worker is None or not self._worker.is_alive():
@@ -1366,6 +1452,13 @@ class InstallerApp:
         height = max(230, window.winfo_reqheight())
         window.minsize(width, height)
         window.geometry(f"{width}x{height}+{x}+{y}")
+        # 进度期间锁定主窗口，避免用户在卸载/写入时重复点击配置控件；
+        # “查看日志”会先 close 本窗口释放 grab。
+        try:
+            window.grab_set()
+            window.focus_set()
+        except tk.TclError:
+            pass
         self._progress_window = window
 
     def _show_log_tab(self) -> None:
@@ -1674,6 +1767,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dir", dest="target_dir", default="", help="卸载目标目录"
     )
+    parser.add_argument(
+        "--keep-data",
+        action="store_true",
+        help="卸载时保留 data/ 运行数据与自定义人格（--non-interactive 时生效）",
+    )
     parser.add_argument("--non-interactive", action="store_true")
     return parser.parse_args(argv)
 
@@ -1712,20 +1810,88 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.uninstall:
         if not args.target_dir:
-            _print_console("--uninstall 需要 --dir 指定安装目录")
+            message = "--uninstall 需要 --dir 指定安装目录"
+            _print_console(message)
+            if not args.non_interactive:
+                root = _create_hidden_root()
+                if root is not None:
+                    try:
+                        _show_dialog("error", "卸载失败", message, parent=root)
+                    finally:
+                        _destroy_root(root)
             return 2
+
+        target_path = Path(args.target_dir).expanduser()
+        keep_data = bool(args.keep_data)
+        ui_root: tk.Tk | None = None
+        if not args.non_interactive:
+            ui_root = _create_hidden_root()
+            if ui_root is None:
+                _print_console(
+                    "无法显示交互式卸载确认（没有可用的图形界面）。\n"
+                    "如确认卸载，请加 --non-interactive 参数后重试。"
+                )
+                return 2
+            choice = messagebox.askyesnocancel(
+                "卸载 KarenBot",
+                f"即将卸载 KarenBot：\n{target_path}\n\n"
+                "是否保留运行数据与自定义人格？\n\n"
+                "【是】仅卸载程序，保留 data/ 运行数据及自定义人格\n"
+                "【否】彻底卸载，删除程序、运行数据及自定义人格\n"
+                "【取消】中止卸载",
+                parent=ui_root,
+            )
+            if choice is None:
+                _destroy_root(ui_root)
+                _print_console("卸载已取消")
+                return 1
+            keep_data = bool(choice)
+
         try:
-            result = core.uninstall(Path(args.target_dir))
+            result = core.uninstall(target_path, keep_data=keep_data)
         except core.InstallFailure as exc:
             _print_console(f"卸载失败：{exc.message}")
+            if ui_root is not None:
+                try:
+                    _show_dialog(
+                        "error", "卸载失败", exc.message[:2000], parent=ui_root
+                    )
+                finally:
+                    _destroy_root(ui_root)
             return 1
         except core.InstallCancelled:
             _print_console("卸载已取消")
+            _destroy_root(ui_root)
             return 1
         except Exception:  # noqa: BLE001 - windowed 版只能靠退出码
-            _print_console(traceback.format_exc())
+            err_text = traceback.format_exc()
+            _print_console(err_text)
+            if ui_root is not None:
+                try:
+                    _show_dialog(
+                        "error", "卸载失败", err_text[:2000], parent=ui_root
+                    )
+                finally:
+                    _destroy_root(ui_root)
             return 1
+
         _print_console(f"已卸载：{result}")
+        if ui_root is not None:
+            suffix = (
+                "\n\n已保留 data/ 运行数据与自定义人格备份，"
+                "重新安装时会自动恢复人格。"
+                if keep_data
+                else ""
+            )
+            try:
+                _show_dialog(
+                    "info",
+                    "卸载完成",
+                    f"KarenBot 已从以下位置卸载：\n{result}{suffix}",
+                    parent=ui_root,
+                )
+            finally:
+                _destroy_root(ui_root)
         return 0
     if _TK_ERROR is not None:
         _print_console(

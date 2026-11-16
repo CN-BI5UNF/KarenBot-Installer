@@ -99,3 +99,19 @@ def test_gui_exposes_mirror_and_uninstall_controls():
     assert "uninstall_button" in source
     assert "core.uninstall" in source
     assert "_config_widgets" in source
+
+
+def test_uninstall_ux_and_registry_metadata_contracts():
+    gui = (INSTALLER / "gui_install.py").read_text(encoding="utf-8")
+    core = (INSTALLER / "karen_install.py").read_text(encoding="utf-8")
+    # GUI：保留数据三态确认、模态进度窗、内置图标。
+    assert "--keep-data" in gui
+    assert "askyesnocancel" in gui
+    assert "keep_data" in gui
+    assert "grab_set" in gui
+    assert "installer_icon_path" in gui
+    # 核心：交互式/静默卸载入口与 ARP 体积字段。
+    assert "--keep-data" in core
+    assert "QuietUninstallString" in core
+    assert "EstimatedSize" in core
+    assert "_directory_size_kb" in core

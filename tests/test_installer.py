@@ -1295,6 +1295,24 @@ def test_upgrade_migrates_legacy_app_data_to_external_root(tmp_path):
     assert installer.DATA_ROOT_ENV in safe
 
 
+def test_install_restores_preserved_personas_from_data(tmp_path):
+    install_dir = tmp_path / "install"
+    preserved = install_dir / "data" / "personas" / "custom"
+    preserved.mkdir(parents=True)
+    (preserved / "persona_prompt.py").write_text(
+        "PROMPT = 'preserved'\n", encoding="utf-8"
+    )
+    source = _make_upgrade_source(tmp_path, data_root_supported=True)
+
+    _install_upgrade(source, install_dir)
+
+    assert (
+        install_dir / "app" / "personas" / "custom" / "persona_prompt.py"
+    ).read_text(encoding="utf-8") == "PROMPT = 'preserved'\n"
+    # 人格已经合并进 app/，备份不应留在 data/ 里重复出现。
+    assert not (install_dir / "data" / "personas").exists()
+
+
 def test_upgrade_keeps_app_data_when_backend_lacks_data_root(tmp_path):
     install_dir = tmp_path / "install"
     old_app = install_dir / "app"
@@ -1715,6 +1733,7 @@ def test_register_windows_uninstall_writes_hkcu(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "winreg", fake)
     install_dir = tmp_path / "install"
     install_dir.mkdir()
+    (install_dir / "payload.bin").write_bytes(b"x" * 4096)
     python = tmp_path / "python.exe"
     python.write_bytes(b"")
     script = tmp_path / installer.UNINSTALLER_FILENAME
@@ -1727,13 +1746,39 @@ def test_register_windows_uninstall_writes_hkcu(tmp_path, monkeypatch):
     )
     assert fake.values["DisplayName"] == (fake.REG_SZ, "KarenBot")
     assert fake.values["Publisher"] == (fake.REG_SZ, "CN-BI5UNF")
-    command_text = str(fake.values["UninstallString"][1])
+    interactive = str(fake.values["UninstallString"][1])
+    quiet = str(fake.values["QuietUninstallString"][1])
     for part in command:
-        assert part in command_text
-    assert str(install_dir) in command_text
-    assert "--uninstall" in command_text
+        assert part in interactive
+        assert part in quiet
+    assert str(install_dir) in interactive
+    assert "--uninstall" in interactive
+    # 系统“设置 → 应用”走交互式卸载；只有静默入口带 --non-interactive。
+    assert "--non-interactive" not in interactive
+    assert quiet == f"{interactive} --non-interactive"
     assert fake.values["NoModify"] == (fake.REG_DWORD, 1)
     assert fake.values["NoRepair"] == (fake.REG_DWORD, 1)
+    assert fake.values["EstimatedSize"] == (fake.REG_DWORD, 4)
+
+
+def test_directory_size_kb_counts_regular_files(tmp_path):
+    root = tmp_path / "install"
+    (root / "nested").mkdir(parents=True)
+    (root / "one.bin").write_bytes(b"x" * 2048)
+    (root / "nested" / "two.bin").write_bytes(b"x" * 512)
+    assert installer._directory_size_kb(root) == 2
+    assert installer._directory_size_kb(tmp_path / "missing") == 0
+
+
+def test_installer_icon_path_falls_back_to_packaging(tmp_path, monkeypatch):
+    missing = tmp_path / "missing.ico"
+    monkeypatch.setattr(installer, "_resource_path", lambda _name: missing)
+    expected = (
+        Path(installer.__file__).resolve().parent
+        / "packaging"
+        / "karenbot.ico"
+    )
+    assert installer.installer_icon_path() == expected
 
 
 def test_unregister_windows_uninstall_deletes_key(monkeypatch):
@@ -1810,6 +1855,136 @@ def test_uninstall_removes_install_artifacts(tmp_path, monkeypatch):
     assert not install_dir.exists()
     assert not font_root.exists()
     assert not (skin_dir / "skin").exists()
+
+
+def _make_uninstall_target(install_dir: Path) -> None:
+    (install_dir / "app" / "backend").mkdir(parents=True)
+    (install_dir / "app" / "modules.json").write_text(
+        '{"installer": "local-source"}', encoding="utf-8"
+    )
+    (install_dir / "app" / "personas" / "custom").mkdir(parents=True)
+    (
+        install_dir / "app" / "personas" / "custom" / "persona_prompt.py"
+    ).write_text("PROMPT = 'custom'\n", encoding="utf-8")
+    (install_dir / "venv").mkdir()
+    (install_dir / "data" / "instances" / "default").mkdir(parents=True)
+    (install_dir / "data" / "instances" / "default" / "config.yaml").write_text(
+        "x: 1\n", encoding="utf-8"
+    )
+    (install_dir / "launch-gui.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (install_dir / installer.INSTALL_MARKER_NAME).write_text(
+        "{}", encoding="utf-8"
+    )
+
+
+def _stub_uninstall_side_effects(monkeypatch, font_root: Path, skin_dir: Path):
+    monkeypatch.setattr(
+        installer, "ensure_app_not_running", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(installer, "_remove_shortcuts", lambda: None)
+    monkeypatch.setattr(
+        installer, "_font_dir", lambda *_args, **_kwargs: font_root
+    )
+    monkeypatch.setattr(installer, "_gui_skin_dirs", lambda: [skin_dir])
+
+
+def test_uninstall_keep_data_preserves_runtime_and_personas(
+    tmp_path, monkeypatch
+):
+    install_dir = tmp_path / "install"
+    _make_uninstall_target(install_dir)
+    font_root = tmp_path / "fonts"
+    skin_dir = tmp_path / "config" / "karen-gui"
+    skin_dir.mkdir(parents=True)
+    (skin_dir / "skin").write_text("karen\n", encoding="utf-8")
+    _stub_uninstall_side_effects(monkeypatch, font_root, skin_dir)
+
+    installer.uninstall(install_dir, keep_data=True)
+
+    assert not (install_dir / "app").exists()
+    assert not (install_dir / "venv").exists()
+    assert not (install_dir / "launch-gui.sh").exists()
+    assert not (install_dir / installer.INSTALL_MARKER_NAME).exists()
+    assert (
+        install_dir / "data" / "instances" / "default" / "config.yaml"
+    ).read_text(encoding="utf-8") == "x: 1\n"
+    assert (
+        install_dir / "data" / "personas" / "custom" / "persona_prompt.py"
+    ).read_text(encoding="utf-8") == "PROMPT = 'custom'\n"
+    # 保留数据的卸载不应清理主题偏好，方便重装后沿用。
+    assert (skin_dir / "skin").exists()
+
+
+def test_uninstall_keep_data_migrates_legacy_app_data(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    _make_uninstall_target(install_dir)
+    legacy = install_dir / "app" / "data"
+    (legacy / "memory" / "default").mkdir(parents=True)
+    (legacy / "config.yaml").write_text("legacy", encoding="utf-8")
+    (legacy / "memory" / "default" / "chat.json").write_text(
+        "[]", encoding="utf-8"
+    )
+    font_root = tmp_path / "fonts"
+    skin_dir = tmp_path / "config" / "karen-gui"
+    _stub_uninstall_side_effects(monkeypatch, font_root, skin_dir)
+
+    installer.uninstall(install_dir, keep_data=True)
+
+    target = install_dir / "data" / "instances" / "default"
+    # 现有外部数据优先，旧版 app/data 只补充缺失文件。
+    assert (target / "config.yaml").read_text(encoding="utf-8") == "x: 1\n"
+    assert (target / "memory" / "default" / "chat.json").is_file()
+    assert not (install_dir / "app").exists()
+
+
+def test_uninstall_cli_passes_keep_data(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    def fake_uninstall(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return path
+
+    monkeypatch.setattr(installer, "uninstall", fake_uninstall)
+    assert (
+        installer.main(
+            ["--uninstall", "--dir", str(tmp_path), "--keep-data"]
+        )
+        == 0
+    )
+    assert captured["path"] == tmp_path
+    assert captured["keep_data"] is True
+
+
+def test_restore_preserved_personas_merges_without_overwriting(tmp_path):
+    install_dir = tmp_path / "install"
+    source = install_dir / "data" / "personas"
+    (source / "custom").mkdir(parents=True)
+    (source / "custom" / "persona_prompt.py").write_text(
+        "custom", encoding="utf-8"
+    )
+    (source / "builtin").mkdir()
+    (source / "builtin" / "persona_prompt.py").write_text(
+        "old", encoding="utf-8"
+    )
+    target_app = install_dir / "app"
+    (target_app / "personas" / "builtin").mkdir(parents=True)
+    (target_app / "personas" / "builtin" / "persona_prompt.py").write_text(
+        "new", encoding="utf-8"
+    )
+
+    installer._restore_preserved_personas(install_dir, target_app)
+
+    assert (
+        target_app / "personas" / "custom" / "persona_prompt.py"
+    ).read_text(encoding="utf-8") == "custom"
+    assert (
+        target_app / "personas" / "builtin" / "persona_prompt.py"
+    ).read_text(encoding="utf-8") == "new"
+    # 备份要保留到整套安装流程结束后才能删除。
+    assert source.is_dir()
+    installer._discard_preserved_personas(install_dir)
+    assert not source.exists()
 
 
 def test_uninstall_refuses_unknown_directory(tmp_path):

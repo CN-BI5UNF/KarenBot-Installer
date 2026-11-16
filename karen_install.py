@@ -68,6 +68,18 @@ def _resource_path(name: str) -> Path:
     return Path(__file__).with_name(name)
 
 
+def installer_icon_path() -> Path | None:
+    """返回安装器自带的 ``karenbot.ico``；源码/冻结模式都可用。"""
+    candidates = (
+        _resource_path("karenbot.ico"),
+        Path(__file__).resolve().parent / "packaging" / "karenbot.ico",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
 MIRRORS_FILE = _resource_path("mirrors.json")
 WINDOWS_PACKAGE_FILE = _resource_path("windows-gui-package.json")
 INSTALLER_VERSION = "1.0.0-rc"
@@ -3839,9 +3851,10 @@ def _shortcut_icon(install_dir: Path) -> Path | None:
         app_root / "gui" / "assets" / "karenbot.ico",
         app_root / "assets" / "karenbot.ico",
         app_root / "karenbot.ico",
-        _resource_path("karenbot.ico"),
-        Path(__file__).resolve().parent / "packaging" / "karenbot.ico",
     ]
+    bundled = installer_icon_path()
+    if bundled is not None:
+        candidates.append(bundled)
     for path in candidates:
         if path.is_file():
             return path
@@ -4028,6 +4041,23 @@ def _prepare_windows_uninstall_launcher(
     return command, target
 
 
+def _directory_size_kb(root: Path) -> int:
+    """计算目录中普通文件的总大小（KB），供 Windows ARP 的 EstimatedSize 使用。"""
+    total_bytes = 0
+    try:
+        for current, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                try:
+                    info = os.lstat(os.path.join(current, name))
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    total_bytes += info.st_size
+    except OSError:
+        return 0
+    return max(1, total_bytes // 1024) if total_bytes > 0 else 0
+
+
 def _register_windows_uninstall(
     install_dir: Path,
     *,
@@ -4042,10 +4072,14 @@ def _register_windows_uninstall(
     except ImportError as exc:
         log(f"跳过 Windows 卸载项：缺少 winreg（{exc}）")
         return
-    command_text = (
+    base_command = (
         " ".join(f'"{part}"' for part in command)
-        + f' --uninstall --dir "{install_dir}" --non-interactive'
+        + f' --uninstall --dir "{install_dir}"'
     )
+    # “设置 → 应用”点击卸载时走 UninstallString，必须保留交互式确认；
+    # 脚本/静默卸载再通过 QuietUninstallString 追加 --non-interactive。
+    interactive_command = base_command
+    quiet_command = f"{base_command} --non-interactive"
     icon_path = icon if icon is not None else Path(command[0])
     string_values = {
         "DisplayName": "KarenBot",
@@ -4053,12 +4087,13 @@ def _register_windows_uninstall(
         "Publisher": WINDOWS_PUBLISHER,
         "InstallLocation": str(install_dir),
         "DisplayIcon": str(icon_path),
-        "UninstallString": command_text,
-        "QuietUninstallString": command_text,
+        "UninstallString": interactive_command,
+        "QuietUninstallString": quiet_command,
         "InstallDate": time.strftime("%Y%m%d"),
         "Comments": "KarenBot installer-managed uninstall entry",
         "URLInfoAbout": "https://github.com/CN-BI5UNF/KarenBot-Installer",
     }
+    estimated_kb = _directory_size_kb(install_dir)
     try:
         with winreg.CreateKeyEx(
             winreg.HKEY_CURRENT_USER,
@@ -4073,6 +4108,14 @@ def _register_windows_uninstall(
             for name in ("NoModify", "NoRepair"):
                 winreg.SetValueEx(
                     handle, name, 0, winreg.REG_DWORD, 1
+                )
+            if estimated_kb > 0:
+                winreg.SetValueEx(
+                    handle,
+                    "EstimatedSize",
+                    0,
+                    winreg.REG_DWORD,
+                    min(estimated_kb, 0xFFFFFFFF),
                 )
     except OSError as exc:
         log(f"写入 Windows 卸载项失败（可手动卸载）：{exc}")
@@ -4230,7 +4273,59 @@ def _clean_skins() -> None:
             log(f"删除主题偏好失败（可手动删除）：{skin}：{exc}")
 
 
-def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
+def _preserve_legacy_data_for_uninstall(
+    install_dir: Path, *, cancel_event: Any | None = None
+) -> None:
+    """把旧版 ``app/data`` 合并到 ``data/instances/default``。
+
+    ``app/data`` 可能是指向外部 ``data/`` 的符号链接；这种情况下保留
+    外部 ``data/`` 就够了，绝不能把目录复制进自身。
+    """
+    legacy = install_dir / "app" / "data"
+    if not legacy.is_dir():
+        return
+    _check_cancel(cancel_event)
+    external = install_dir / "data"
+    target = _external_data_dir(install_dir)
+    try:
+        legacy_resolved = legacy.resolve()
+        external_resolved = external.resolve()
+        target_resolved = target.resolve()
+    except OSError as exc:
+        fail(
+            "检查旧版运行数据目录失败，已中止卸载并保留安装目录：\n"
+            f"{legacy}\n原始错误：{exc}"
+        )
+    if legacy_resolved in {target_resolved, external_resolved}:
+        stage(f"运行数据已位于保留目录：{external}")
+        return
+    if external_resolved in legacy_resolved.parents:
+        # app/data 已经指向 data/ 的子目录，保留 data/ 即可。
+        stage(f"运行数据已位于保留目录：{external}")
+        return
+    if legacy_resolved in target_resolved.parents:
+        fail(
+            "无法安全迁移旧版运行数据：保留目录位于 app/data 内部。\n"
+            f"请先手动备份 {legacy} 后再卸载。"
+        )
+    stage("正在备份并保留运行数据…")
+    copied = _merge_legacy_data(
+        legacy,
+        target,
+        error_message="备份运行数据失败，已中止卸载并保留安装目录：",
+    )
+    if copied:
+        stage(f"已保留旧版运行数据：{copied} 个文件")
+    else:
+        log("旧版运行数据已包含在现有 data/ 中")
+
+
+def uninstall(
+    install_dir: Path,
+    *,
+    cancel_event: Any | None = None,
+    keep_data: bool = False,
+) -> Path:
     """卸载安装器写入的目录、启动器、快捷方式、字体和主题偏好。"""
     install_dir = install_dir.expanduser().resolve()
     if install_dir in {Path("/"), Path.home()}:
@@ -4242,7 +4337,19 @@ def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
         )
     ensure_app_not_running(install_dir)
     stage(f"卸载 KarenBot：{install_dir}")
-    for name in ("app", "app.old", "venv", PYTHON_RUNTIME_DIRNAME, "data"):
+    if keep_data:
+        _preserve_legacy_data_for_uninstall(
+            install_dir, cancel_event=cancel_event
+        )
+        _check_cancel(cancel_event)
+        _backup_personas_for_uninstall(install_dir)
+        _check_cancel(cancel_event)
+    remove_dirs: tuple[str, ...] = (
+        ("app", "app.old", "venv", PYTHON_RUNTIME_DIRNAME)
+        if keep_data
+        else ("app", "app.old", "venv", PYTHON_RUNTIME_DIRNAME, "data")
+    )
+    for name in remove_dirs:
         _check_cancel(cancel_event)
         target = install_dir / name
         if target.exists():
@@ -4262,7 +4369,8 @@ def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
         log(f"删除安装标记失败（可手动删除）：{exc}")
     _remove_shortcuts()
     _clean_fonts(install_dir)
-    _clean_skins()
+    if not keep_data:
+        _clean_skins()
     _unregister_windows_uninstall()
     if IS_WINDOWS:
         uninstall_root = _windows_uninstall_root()
@@ -4272,10 +4380,14 @@ def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
                 f"Windows 卸载入口副本：{uninstall_root}"
                 "（若仍在运行可稍后手动删除）"
             )
-    try:
-        install_dir.rmdir()
-    except OSError:
-        pass
+    preserved_data = install_dir / "data"
+    if not keep_data or not preserved_data.exists():
+        try:
+            install_dir.rmdir()
+        except OSError:
+            pass
+    if keep_data and preserved_data.exists():
+        log(f"已保留运行数据目录：{preserved_data}")
     stage(f"卸载完成：{install_dir}")
     return install_dir
 
@@ -4293,6 +4405,102 @@ def _app_supports_data_root(app_root: Path) -> bool:
 def _external_data_dir(install_dir: Path) -> Path:
     """KAREN_DATA_ROOT 下 backend 的默认实例数据目录。"""
     return install_dir / "data" / "instances" / "default"
+
+
+_PRESERVED_PERSONAS_DIRNAME = "personas"
+
+
+def _preserved_personas_dir(install_dir: Path) -> Path:
+    """卸载时备份自定义人格的位置；重装后合并回 ``app/personas``。"""
+    return install_dir / "data" / _PRESERVED_PERSONAS_DIRNAME
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    """两个路径相同或互为祖先时返回 True；用于阻止目录复制进自身。"""
+    try:
+        first_resolved = first.resolve()
+        second_resolved = second.resolve()
+    except OSError:
+        return False
+    return (
+        first_resolved == second_resolved
+        or first_resolved in second_resolved.parents
+        or second_resolved in first_resolved.parents
+    )
+
+
+def _backup_personas_for_uninstall(install_dir: Path) -> None:
+    """把 ``app/personas`` 复制到 ``data/personas``，供保留数据卸载使用。"""
+    source = install_dir / "app" / "personas"
+    if not source.is_dir():
+        return
+    target = _preserved_personas_dir(install_dir)
+    if _paths_overlap(source, target):
+        fail(
+            "无法备份自定义人格：data/personas 与 app/personas 路径重叠。\n"
+            f"{source} <-> {target}"
+        )
+    stage("正在备份自定义人格…")
+    try:
+        if target.is_dir():
+            _remove_tree(target, strict=True)
+        elif target.exists():
+            target.unlink()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            source,
+            target,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    except OSError as exc:
+        fail(
+            "备份自定义人格失败，已中止卸载并保留安装目录：\n"
+            f"{source} -> {target}\n原始错误：{exc}"
+        )
+    log(f"已备份自定义人格：{target}")
+
+
+def _restore_preserved_personas(
+    install_dir: Path, target_app: Path, *, cancel_event: Any | None = None
+) -> None:
+    """把 ``data/personas`` 合并回新安装的 ``app/personas``。
+
+    只补充新版本缺失的文件，不覆盖新版自带人格。成功合并后备份会保留到
+    整个安装流程结束，避免后续步骤失败回滚时把用户人格一起删掉。
+    """
+    source = _preserved_personas_dir(install_dir)
+    if not source.is_dir():
+        return
+    _check_cancel(cancel_event)
+    target = target_app / "personas"
+    if _paths_overlap(source, target):
+        fail(
+            "无法恢复自定义人格：data/personas 与 app/personas 路径重叠。\n"
+            f"{source} <-> {target}"
+        )
+    stage("正在恢复保留的自定义人格…")
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        copied = _merge_tree_missing(source, target, strict=True)
+    except OSError as exc:
+        fail(
+            "恢复自定义人格失败，已中止安装并保留人格备份：\n"
+            f"{source} -> {target}\n原始错误：{exc}"
+        )
+    if copied:
+        stage(f"已恢复保留的自定义人格：{copied} 个文件")
+    else:
+        log("保留的自定义人格已包含在当前版本中")
+
+
+def _discard_preserved_personas(install_dir: Path) -> None:
+    """安装成功后删除人格备份；失败只记日志，下次安装会再次合并。"""
+    source = _preserved_personas_dir(install_dir)
+    if not source.exists():
+        return
+    _remove_tree(source, strict=False)
+    if source.exists():
+        log(f"人格备份暂未删除（可稍后手动删除）：{source}")
 
 
 def _merge_tree_missing(
@@ -4390,12 +4598,17 @@ def _move_legacy_data(source: Path, target: Path) -> None:
         )
 
 
-def _merge_legacy_data(source: Path, target: Path) -> int:
+def _merge_legacy_data(
+    source: Path,
+    target: Path,
+    *,
+    error_message: str = "合并运行数据失败，已中止安装并保留旧版本：",
+) -> int:
     try:
         return _merge_tree_missing(source, target, strict=True)
     except OSError as exc:
         fail(
-            "合并运行数据失败，已中止安装并保留旧版本：\n"
+            f"{error_message}\n"
             f"{source} -> {target}\n原始错误：{exc}"
         )
 
@@ -4696,6 +4909,11 @@ def install(
                 "render_mode": render_mode if frontend == "gui" else "auto",
             },
         )
+        # 先把卸载时保留的人格合并进暂存目录：失败时旧安装完全没动，
+        # 成功后再整体替换 app/，避免恢复失败留下半套安装。
+        _restore_preserved_personas(
+            install_dir, app_root, cancel_event=cancel_event
+        )
 
         target_app = install_dir / "app"
         old_app = install_dir / "app.old"
@@ -4885,6 +5103,7 @@ def install(
                     )
                 except Exception as exc:  # noqa: BLE001 - 不能因注册表失败毁掉安装
                     log(f"写入 Windows 卸载项失败（可手动卸载）：{exc}")
+        _discard_preserved_personas(install_dir)
         stage(f"安装完成：{install_dir}")
         log(f"启动：{launch_target(install_dir, frontend)}")
         if frontend == "gui":
@@ -5095,6 +5314,14 @@ def self_test() -> None:
         if (merged_tree / "kept.txt").read_text(encoding="utf-8") != "kept":
             fail("self-test: 合并结果异常")
 
+        size_root = root / "size"
+        size_root.mkdir()
+        (size_root / "payload.bin").write_bytes(b"x" * 2048)
+        if _directory_size_kb(size_root) != 2:
+            fail("self-test: EstimatedSize 计算异常")
+        if installer_icon_path() is None:
+            fail("self-test: 缺少内置 karenbot.ico")
+
         app_root = root / "app"
         (app_root / "app_config").mkdir(parents=True)
         (app_root / "app_config" / "paths.py").write_text(
@@ -5210,6 +5437,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="卸载 --dir 指向的 KarenBot（同时清理快捷方式、字体和主题偏好）",
     )
     parser.add_argument(
+        "--keep-data",
+        action="store_true",
+        help="卸载时保留 data/ 运行数据与自定义人格（备份到 data/personas）",
+    )
+    parser.add_argument(
         "--windows-gui-asset",
         default="",
         help="覆盖 Windows GUI 预构建包的 URL（测试/私有镜像）",
@@ -5239,7 +5471,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.require_verified:
         os.environ["KAREN_REQUIRE_VERIFIED"] = "1"
     if args.uninstall:
-        target = uninstall(Path(args.dir))
+        target = uninstall(Path(args.dir), keep_data=args.keep_data)
         print(f"已卸载：{target}")
         return 0
     set_mirror_override(args.mirror)

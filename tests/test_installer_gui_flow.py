@@ -268,17 +268,79 @@ def test_gui_reports_uninstall_success(monkeypatch, tmp_path):
     (install_dir / "app" / "modules.json").write_text(
         '{"installer": "local-source"}', encoding="utf-8"
     )
-    monkeypatch.setattr(
-        karen_install,
-        "uninstall",
-        lambda path, **_kwargs: path,
-    )
+    captured: dict[str, object] = {}
+
+    def fake_uninstall(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return path
+
+    monkeypatch.setattr(karen_install, "uninstall", fake_uninstall)
     try:
         app.install_dir.set(str(install_dir))
         app._start_uninstall()
         assert _pump(root, lambda: app.status.get() == "已卸载")
         assert messages and messages[-1][0] == "info"
         assert app._installed_dir is None
+        assert captured["keep_data"] is False
+    finally:
+        root.destroy()
+
+
+def test_gui_uninstall_keep_data_choice(monkeypatch, tmp_path):
+    root, app, messages = _make_app(tmp_path, monkeypatch)
+    install_dir = tmp_path / "install"
+    (install_dir / "app").mkdir(parents=True)
+    (install_dir / "app" / "modules.json").write_text(
+        '{"installer": "local-source"}', encoding="utf-8"
+    )
+    captured: dict[str, object] = {}
+
+    def fake_uninstall(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return path
+
+    monkeypatch.setattr(karen_install, "uninstall", fake_uninstall)
+    monkeypatch.setattr(
+        gui_install.messagebox,
+        "askyesnocancel",
+        lambda *args, **kwargs: True,
+    )
+    try:
+        app.install_dir.set(str(install_dir))
+        app._start_uninstall()
+        assert _pump(root, lambda: app.status.get() == "已卸载")
+        assert captured["keep_data"] is True
+        assert "已保留" in messages[-1][1][1]
+    finally:
+        root.destroy()
+
+
+def test_gui_uninstall_cancel_choice_does_not_start_worker(
+    monkeypatch, tmp_path
+):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    install_dir = tmp_path / "install"
+    (install_dir / "app").mkdir(parents=True)
+    (install_dir / "app" / "modules.json").write_text(
+        '{"installer": "local-source"}', encoding="utf-8"
+    )
+    called: list[object] = []
+    monkeypatch.setattr(
+        karen_install, "uninstall", lambda *args, **kwargs: called.append(args)
+    )
+    monkeypatch.setattr(
+        gui_install.messagebox,
+        "askyesnocancel",
+        lambda *args, **kwargs: None,
+    )
+    try:
+        app.install_dir.set(str(install_dir))
+        app._start_uninstall()
+        assert app._worker is None
+        assert called == []
+        assert app._uninstall_keep_data is False
     finally:
         root.destroy()
 
@@ -337,30 +399,149 @@ def test_gui_self_test_entrypoint_failure(monkeypatch):
     assert gui_install.main(["--self-test"]) == 1
 
 
-def test_gui_uninstall_cli_entrypoint(monkeypatch, tmp_path):
-    calls: list[Path] = []
+@pytest.mark.parametrize(
+    ("extra_args", "expected_keep_data"),
+    (([], False), (["--keep-data"], True)),
+)
+def test_gui_uninstall_cli_entrypoint(
+    monkeypatch, tmp_path, extra_args, expected_keep_data
+):
+    calls: list[tuple[Path, dict]] = []
 
-    def fake_uninstall(path, **_kwargs):
-        calls.append(path)
+    def fake_uninstall(path, **kwargs):
+        calls.append((path, kwargs))
         return path
 
     monkeypatch.setattr(gui_install.core, "uninstall", fake_uninstall)
     assert (
         gui_install.main(
-            ["--uninstall", "--dir", str(tmp_path), "--non-interactive"]
+            [
+                "--uninstall",
+                "--dir",
+                str(tmp_path),
+                "--non-interactive",
+                *extra_args,
+            ]
         )
         == 0
     )
-    assert calls == [tmp_path]
+    assert calls[0][0] == tmp_path
+    assert calls[0][1]["keep_data"] is expected_keep_data
 
 
-def test_gui_progress_dialog_is_non_modal(monkeypatch, tmp_path):
+class _FakeRoot:
+    def __init__(self) -> None:
+        self.destroyed = False
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+def test_gui_uninstall_interactive_prompt_passes_keep_data(
+    monkeypatch, tmp_path
+):
+    root = _FakeRoot()
+    calls: list[tuple[Path, dict]] = []
+    messages: list[tuple[str, tuple]] = []
+
+    def fake_uninstall(path, **kwargs):
+        calls.append((path, kwargs))
+        return path
+
+    monkeypatch.setattr(gui_install, "_create_hidden_root", lambda: root)
+    monkeypatch.setattr(
+        gui_install.messagebox,
+        "askyesnocancel",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        gui_install.messagebox,
+        "showinfo",
+        lambda *args, **kwargs: messages.append(("info", args)),
+    )
+    monkeypatch.setattr(gui_install.core, "uninstall", fake_uninstall)
+    assert gui_install.main(["--uninstall", "--dir", str(tmp_path)]) == 0
+    assert calls[0][1]["keep_data"] is True
+    assert messages and "已保留" in messages[-1][1][1]
+    assert root.destroyed
+
+
+def test_gui_uninstall_interactive_requires_gui(monkeypatch, tmp_path):
+    called: list[bool] = []
+    monkeypatch.setattr(gui_install, "_create_hidden_root", lambda: None)
+    monkeypatch.setattr(
+        gui_install.core, "uninstall", lambda *args, **kwargs: called.append(True)
+    )
+    assert gui_install.main(["--uninstall", "--dir", str(tmp_path)]) == 2
+    assert called == []
+
+
+def test_gui_uninstall_interactive_shows_failure(monkeypatch, tmp_path):
+    root = _FakeRoot()
+    messages: list[tuple[str, tuple]] = []
+
+    def _boom(_path, **_kwargs):
+        raise gui_install.core.InstallFailure("KarenBot 仍在运行")
+
+    monkeypatch.setattr(gui_install, "_create_hidden_root", lambda: root)
+    monkeypatch.setattr(
+        gui_install.messagebox,
+        "askyesnocancel",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        gui_install.messagebox,
+        "showerror",
+        lambda *args, **kwargs: messages.append(("error", args)),
+    )
+    monkeypatch.setattr(gui_install.core, "uninstall", _boom)
+    assert gui_install.main(["--uninstall", "--dir", str(tmp_path)]) == 1
+    assert messages and messages[-1][0] == "error"
+    assert "仍在运行" in messages[-1][1][1]
+    assert root.destroyed
+
+
+def test_gui_applies_bundled_window_icon(monkeypatch, tmp_path):
+    icon = tmp_path / "karenbot.ico"
+    icon.write_bytes(b"ico")
+    calls: list[dict] = []
+
+    class _Window:
+        def iconbitmap(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(
+        gui_install.core, "installer_icon_path", lambda: icon
+    )
+    gui_install._apply_window_icon(_Window())
+    assert calls == [{"default": str(icon)}]
+
+
+def test_gui_window_icon_failure_is_ignored(monkeypatch, tmp_path):
+    icon = tmp_path / "karenbot.ico"
+    icon.write_bytes(b"ico")
+
+    class _Window:
+        def iconbitmap(self, **_kwargs):
+            raise gui_install.tk.TclError("X11 expects a bitmap")
+
+    monkeypatch.setattr(
+        gui_install.core, "installer_icon_path", lambda: icon
+    )
+    gui_install._apply_window_icon(_Window())
+
+
+def test_gui_progress_dialog_is_modal(monkeypatch, tmp_path):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
     try:
+        root.deiconify()
+        root.update()
         app._open_progress_dialog()
         assert app._progress_window is not None
-        assert app._progress_window.grab_current() is None
+        root.update()
+        assert app._progress_window.grab_current() == app._progress_window
         app._close_progress_dialog()
+        assert root.grab_current() is None
     finally:
         root.destroy()
 

@@ -236,9 +236,10 @@ PowerShell 调用，并移除了 `-ExecutionPolicy Bypass`。同时移除“完�
 ## 23. 卸载弹窗写着“正在安装”/“查看日志”被弹窗遮挡
 
 **处理**：进度弹窗的标题、粗体标题、说明和取消按钮文本参数化；卸载时显示
-“正在卸载 KarenBot / 取消卸载”。点击“查看日志”会关闭 transient 进度弹窗，
-主窗口底部仍有进度条和状态行，不再被永远置顶的弹窗挡住。卸载线程也会
-接收取消事件。
+“正在卸载 KarenBot / 取消卸载”。进度弹窗会 `grab_set()` 锁定主窗口，
+避免安装/卸载期间重复点击配置控件；点击“查看日志”会先关闭 transient
+进度弹窗并释放 grab，主窗口底部仍有进度条和状态行。卸载线程也会接收
+取消事件。
 
 ## 24. 点击“开始安装”后卡在“在线安装：解析 Release 版本…”
 
@@ -273,14 +274,36 @@ Windows“设置 → 应用”里也搜不到 KarenBot，只能手动删除安�
 **处理**：安装时把冻结安装器 exe（源码运行时为 `karen_install.py` +
 系统 Python）复制到 `%LOCALAPPDATA%\KarenBot\Uninstall`，并在 HKCU 写入
 `Uninstall\KarenBot` 项（DisplayName/DisplayVersion/Publisher/DisplayIcon/
-InstallLocation/UninstallString/NoModify/NoRepair）。卸载进程在安装目录
-之外运行，因此能删除 `app/runtime/python.exe`、`venv` 等正在被安装目录内
-Python 占用的文件；不需要管理员权限，也不依赖原始安装器 exe。卸载结束后
-删除注册表项；卸载器副本因正在运行可能保留，可稍后手动删除。
-源码运行时如果找不到安装器核心脚本，则跳过注册表写入并记录日志，不影响
-安装本身。冻结安装器 exe 的 GUI 入口也支持
-`--uninstall --dir ... --non-interactive`，因此复制的 exe 可以直接作为
-卸载器使用。
+InstallLocation/UninstallString/QuietUninstallString/EstimatedSize/
+NoModify/NoRepair）。`UninstallString` 不带 `--non-interactive`，从
+Windows“设置 → 应用”点击卸载会先弹出三态确认；`QuietUninstallString`
+带 `--non-interactive`，供脚本静默卸载。`EstimatedSize` 按安装目录内
+普通文件总大小（KB）写入。卸载进程在安装目录之外运行，因此能删除
+`app/runtime/python.exe`、`venv` 等正在被安装目录内 Python 占用的文件；
+不需要管理员权限，也不依赖原始安装器 exe。卸载结束后删除注册表项；
+卸载器副本因正在运行可能保留，可稍后手动删除。源码运行时如果找不到
+安装器核心脚本，则跳过注册表写入并记录日志，不影响安装本身。冻结安装器
+exe 的 GUI 入口也支持
+`--uninstall --dir ... --non-interactive [--keep-data]`，因此复制的 exe
+可以直接作为卸载器使用。
+
+## 29. 卸载时无法保留 data/ 与自定义人格
+
+**现象**：旧版卸载会无条件删除 `app/`、`venv/` 和 `data/`；用户为了
+排查环境执行“卸载重装”或误点系统卸载时，聊天记录、配置、向量库和自建
+人格会一起丢失。
+
+**处理**：新增 `--keep-data`（核心 CLI 与 GUI 卸载入口均支持）。GUI
+卸载确认框提供三态选择：【是】仅卸载程序并保留数据，【否】彻底删除，
+【取消】中止。保留数据时：
+
+- `data/` 原样留在安装目录（新版 backend 的 `KAREN_DATA_ROOT`）；
+- 旧版 `app/data` 会先合并到 `data/instances/default`，再删除 `app/`；
+- `app/personas` 会备份到 `data/personas`；下次安装把其中缺失的人格
+  合并回 `app/personas`，不覆盖新版自带人格。
+
+主题偏好仅在彻底卸载时清理；字体和快捷方式仍会删除。默认（不带
+`--keep-data` 且确认框选择【否】）行为与旧版一致，仍会删除全部数据。
 
 ## 27. 小屏笔记本/高 DPI 下窗口占满首屏
 

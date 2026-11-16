@@ -145,7 +145,9 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
     占用失败。
 11. **卸载**：CLI `--uninstall` 或 GUI “卸载…” 按钮会清理程序目录、
     启动器、快捷方式、字体、主题偏好和运行数据目录，但只对带安装标记的
-    目录生效。
+    目录生效。`--keep-data` / GUI 卸载确认框的“是”只卸载程序，保留
+    `data/` 运行数据，并把 `app/personas` 备份到 `data/personas`；下次
+    安装会自动把自定义人格合并回 `app/personas`。
 12. **残损环境自愈**：被取消/杀软中断后留下的半残 `venv` 会在下次安装时
     自动检测并重建，不需要手工删除。
 13. **断点续传**：带 SHA256 的资产中断后保留 `.part` 和来源标记；只有同一
@@ -153,7 +155,8 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
     字节拼接。旧版没有来源标记的临时文件只在带 SHA256 时允许续传，最终
     校验兜底。
 14. **日志与诊断**：安装日志实时落盘到 `%TEMP%\karenbot-install.log`，
-    GUI 提供“复制日志 / 保存日志 / 查看日志”；进度窗不再阻塞主窗口。
+    GUI 提供“复制日志 / 保存日志 / 查看日志”；进度窗以模态方式锁定主窗口，
+    避免安装/卸载过程中重复点击配置控件，“查看日志”会先释放模态再切页。
 15. **已有安装可直接管理**：启动安装器时如果目标目录已安装，会直接启用
     “打开安装目录 / 启动 / 兼容模式启动”，不需要先重装一次。
 16. **程序与数据分离**：新版 backend 支持 `KAREN_DATA_ROOT`；启动器把运行
@@ -165,9 +168,13 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\KarenBot`
     写入免管理员权限的卸载项。卸载进程在安装目录之外运行，因此能删除
     安装目录内的 `app/`、`venv/` 和运行数据；即使原始安装器 exe 已删除，
-    用户仍可在 Windows“设置 → 应用”中直接卸载。卸载流程会清理注册表项；
-    卸载器副本因正在运行可能保留，可稍后手动删除。冻结安装器 exe 也支持
-    `--uninstall --dir <安装目录> --non-interactive`，便于脚本化卸载。
+    用户仍可在 Windows“设置 → 应用”中直接卸载。注册表分别写入交互式
+    `UninstallString` 和带 `--non-interactive` 的 `QuietUninstallString`，
+    并写入 `EstimatedSize`；从“设置 → 应用”点击卸载会先弹出“保留数据 /
+    彻底删除 / 取消”三态确认。卸载流程会清理注册表项；卸载器副本因正在
+    运行可能保留，可稍后手动删除。冻结安装器 exe 也支持
+    `--uninstall --dir <安装目录> --non-interactive [--keep-data]`，
+    便于脚本化卸载。
 18. **小屏友好**：镜像/字体/外观等选项默认收进“高级设置”，默认窗口高度
     降到 560~640；1366×768 或 1080p 150% 缩放下打开即可看到“开始安装”。
 
@@ -216,6 +223,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `--windows-gui-asset URL` | 覆盖 Windows GUI 预构建包 URL（本地路径或测试镜像） |
 | `--bundle-tag <tag>` | Windows GUI 便携包所在的安装器 Release tag；默认 `auto` |
 | `--uninstall` | 卸载 `--dir` 指向的 KarenBot，并清理快捷方式/字体/主题偏好/运行数据 |
+| `--keep-data` | 卸载时保留 `data/` 运行数据，并备份 `app/personas` 到 `data/personas` |
 | `--probe-url` | 只对镜像做测速并退出 |
 | `--list-mirrors` | 列出内置镜像后退出 |
 | `--dry-run` | 打印最终配置，不执行安装 |
@@ -343,7 +351,9 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
   用户再次运行修复/卸载）；
 - Windows GUI 预构建包按 DLL/typelib 契约检查，缺运行时直接报错；
 - 卸载只对带 `.karen-installer.json`（或 `app/modules.json` installer 字段）
-  的目录生效，避免误删用户指定目录。
+  的目录生效，避免误删用户指定目录；
+- 卸载默认删除运行数据；`--keep-data` 或 GUI 确认框选“是”时只删除程序，
+  保留 `data/` 并把 `app/personas` 备份到 `data/personas`，下次安装恢复。
 
 ## 当前限制
 
