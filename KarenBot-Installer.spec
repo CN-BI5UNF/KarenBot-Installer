@@ -4,16 +4,19 @@
 Windows 使用 windowed 子系统（无黑框），并写入文件版本信息；Linux 保留
 console，方便 `--check` / `--smoke-test` 和终端启动时看到错误。
 
-体积优化：剔除安装器不使用的 decimal/unicodedata/unittest/pdb、pydoc/
-doctest/xmlrpc/bdb/sqlite3、inspect/ast/dis、statistics/fractions、FTP/
-getopt 等标准库，以及 Tcl 的时区库、tcltest 和 Tk 演示图片。安装器只使用
-Tkinter 基础控件，这些数据对功能没有影响，但会拖慢单文件冷启动解压。
-冻结版通过 `--self-test` 覆盖解压/校验/启动器路径，CI 会实际运行。
+体积优化：剔除安装器不使用的 decimal/unittest/pdb、pydoc/doctest/xmlrpc/
+bdb/sqlite3、inspect/ast/dis、statistics/fractions、FTP/getopt 等标准库，
+以及 Tcl 的时区库、tcltest 和 Tk 演示图片。安装器只使用 Tkinter 基础控件，
+这些数据对功能没有影响，但会拖慢单文件冷启动解压。冻结版通过 `--self-test`
+覆盖解压/校验/IDNA/启动器路径，CI 会实际运行。
 
 刻意保留：pickle（concurrent.futures → multiprocessing 依赖）、
 calendar（urllib → email → _parseaddr 依赖）、gzip/bz2/lzma（tarfile
-依赖）以及 Tcl 的全部 encoding 表。Windows 的 ANSI 代码页因系统区域设置
-而异，删掉非中文编码会让部分语言的系统上 Tk 初始化失败。
+依赖）、unicodedata（socket 解析域名时调用 `host.encode("idna")`，
+encodings.idna 和 stringprep 依赖它；删掉后所有网络请求都会报
+`LookupError: unknown encoding: idna`）以及 Tcl 的全部 encoding 表。
+Windows 的 ANSI 代码页因系统区域设置而异，删掉非中文编码会让部分语言的
+系统上 Tk 初始化失败。
 
 winreg 只在 Windows 构建时加入 hiddenimports；Windows 卸载入口由冻结
 安装器把自身复制到 `%LOCALAPPDATA%/KarenBot/Uninstall`，不依赖 DATAS。
@@ -40,9 +43,13 @@ a = Analysis(
     binaries=[],
     datas=DATAS,
     hiddenimports=(
-        ["karen_install", "winreg"]
-        if sys.platform.startswith("win")
-        else ["karen_install"]
+        [
+            "karen_install",
+            "encodings.idna",
+            "stringprep",
+            "unicodedata",
+        ]
+        + (["winreg"] if sys.platform.startswith("win") else [])
     ),
     hookspath=[],
     hooksconfig={},
@@ -51,7 +58,6 @@ a = Analysis(
         # 注意：不能排除 multiprocessing —— concurrent.futures 包的 __init__
         # 会无条件导入 ProcessPoolExecutor，冻结后会 ModuleNotFoundError。
         "decimal",
-        "unicodedata",
         "unittest",
         "pdb",
         "pydoc",

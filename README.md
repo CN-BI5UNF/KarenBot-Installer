@@ -23,7 +23,7 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 ```bash
 sha=v1.0.0-rc
 want=2358b7ea0e1e8bcf421db5c4d93d370b421170839a8ff78c9d456c8e97558b57
-core=7e75c314d4174e27d06c3761138da95661ffb228627b2e94ace9c546f68ba9dd
+core=77c8c296c77839bda148b2921961ee9cd2f261414449dd2ed19da39fd18dc2b8
 KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
   ok=0
   for u in \
