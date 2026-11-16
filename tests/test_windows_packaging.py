@@ -33,6 +33,16 @@ def test_spec_bundles_contract_and_windows_version_info():
     assert 'console=not sys.platform.startswith("win")' in spec
 
 
+def test_spec_keeps_idna_codec_dependencies():
+    """socket 解析任意域名都会调用 idna 编解码；缺依赖时所有网络请求失败。"""
+    spec = (INSTALLER / "KarenBot-Installer.spec").read_text(encoding="utf-8")
+    assert '"encodings.idna"' in spec
+    assert '"stringprep"' in spec
+    assert '"unicodedata"' in spec
+    excludes = spec.split("excludes=", 1)[1].split("]", 1)[0]
+    assert '"unicodedata"' not in excludes
+
+
 def test_windows_build_scripts_are_pinned_and_verify_artifact():
     build = (INSTALLER / "scripts" / "build_windows.ps1").read_text(
         encoding="utf-8"

@@ -61,9 +61,11 @@ xvfb-run -a python gui_install.py --self-test
 xvfb-run -a python gui_install.py --smoke-test
 ```
 
-`--self-test` 不联网，覆盖 tar.gz/zip 解压、SHA256、首包魔数、atom 解析、
-缺失文件合并、数据根探测、启动器和安装标记；冻结版 CI 会实际运行它，
-用来兜住 PyInstaller excludes 误删依赖（例如 quopri）。
+`--self-test` 不联网，覆盖 tar.gz/zip 解压、SHA256、IDNA 编解码、首包魔数、
+atom 解析、缺失文件合并、数据根探测、启动器和安装标记；冻结版 CI 会实际
+运行它，用来兜住 PyInstaller excludes 误删依赖（例如 quopri、unicodedata）。
+缺少 IDNA 时 socket 解析任何域名都会报 `LookupError: unknown encoding: idna`，
+即使网络本身正常也无法测速或下载。
 
 ## 版本
 

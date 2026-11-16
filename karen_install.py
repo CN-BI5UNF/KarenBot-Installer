@@ -5029,6 +5029,15 @@ def self_test() -> None:
         if sha256_file(source_file) != digest:
             fail("self-test: SHA256 计算异常")
 
+        # socket 解析域名时会调用 host.encode("idna")；冻结包缺少
+        # encodings.idna/stringprep/unicodedata 时，所有网络请求都会失败。
+        try:
+            encoded_host = "münchen.de".encode("idna")
+        except (LookupError, UnicodeError) as exc:
+            fail(f"self-test: IDNA 编解码不可用：{exc}")
+        if encoded_host != b"xn--mnchen-3ya.de":
+            fail("self-test: IDNA 编解码结果异常")
+
         tar_path = root / "sample.tar.gz"
         with tarfile.open(tar_path, "w:gz") as tar:
             info = tarfile.TarInfo("nested/payload.txt")
