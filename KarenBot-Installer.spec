@@ -16,7 +16,7 @@ calendar（urllib → email → _parseaddr 依赖）、gzip/bz2/lzma（tarfile
 而异，删掉非中文编码会让部分语言的系统上 Tk 初始化失败。
 
 winreg 只在 Windows 构建时加入 hiddenimports；Windows 卸载入口由冻结
-安装器把自身复制到 `%LOCALAPPDATA%\KarenBot\Uninstall`，不依赖 DATAS。
+安装器把自身复制到 `%LOCALAPPDATA%/KarenBot/Uninstall`，不依赖 DATAS。
 """
 
 import sys

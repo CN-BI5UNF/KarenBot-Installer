@@ -123,6 +123,19 @@ jobs:
           if ($t.ExitCode -ne 0) {
             throw "--self-test failed with exit code $($t.ExitCode)"
           }
+          $dir = Join-Path $env:RUNNER_TEMP "kb-uninstall-smoke"
+          New-Item -ItemType Directory -Force -Path "$dir\app" | Out-Null
+          Set-Content -Path "$dir\app\modules.json" -Value '{"installer":"smoke"}'
+          Set-Content -Path "$dir\.karen-installer.json" -Value '{}'
+          $u = Start-Process -FilePath "dist\KarenBot-Installer.exe" `
+            -ArgumentList "--uninstall --dir `"$dir`" --non-interactive" `
+            -Wait -PassThru
+          if ($u.ExitCode -ne 0) {
+            throw "--uninstall failed with exit code $($u.ExitCode)"
+          }
+          if (Test-Path $dir) {
+            throw "uninstall left the install directory behind"
+          }
 
       - name: Capture Windows installer UI
         shell: pwsh
