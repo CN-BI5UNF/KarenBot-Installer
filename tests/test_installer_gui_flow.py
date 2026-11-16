@@ -360,6 +360,7 @@ def test_gui_unverified_prompt_controls_env(monkeypatch, tmp_path):
         )
         assert app._confirm_unverified_source(online=True, frontend="webui")
         assert os.environ[karen_install.UNVERIFIED_ENV] == "1"
+        os.environ.pop(karen_install.UNVERIFIED_ENV, None)
 
         monkeypatch.setattr(
             gui_install.messagebox,
