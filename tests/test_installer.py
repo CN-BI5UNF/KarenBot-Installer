@@ -11,6 +11,7 @@ import socketserver
 import sys
 import tarfile
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -127,11 +128,43 @@ def test_install_fonts_writes_fontconfig(tmp_path, monkeypatch):
         destination.write_bytes(b"font")
         return destination
 
+    monkeypatch.setattr(
+        installer,
+        "_rank_direct_sources",
+        lambda urls, **_kwargs: list(urls),
+    )
     monkeypatch.setattr(installer, "download", fake_download)
     installer.install_fonts()
     assert (root / "NotoSansSC-VF.otf").is_file()
     assert (root / "NotoSerifSC-VF.otf").is_file()
     assert (root / "fonts.conf").is_file()
+
+
+def test_rank_direct_sources_orders_by_score(monkeypatch):
+    def fake_probe(url, _mirror, **_kwargs):
+        if url.endswith("bad.otf"):
+            return {"ok": False, "url": url, "score": 0.0}
+        return {
+            "ok": True,
+            "url": url,
+            "score": 100.0 if url.endswith("good.otf") else 10.0,
+            "latency": 0.1,
+        }
+
+    monkeypatch.setattr(installer, "probe_mirror", fake_probe)
+    ordered = installer._rank_direct_sources(
+        [
+            "https://a.test/bad.otf",
+            "https://b.test/slow.otf",
+            "https://c.test/good.otf",
+            "https://c.test/good.otf",
+        ]
+    )
+    assert ordered == [
+        "https://c.test/good.otf",
+        "https://b.test/slow.otf",
+        "https://a.test/bad.otf",
+    ]
 
 
 def test_probe_mirrors_returns_failures(local_server):
@@ -606,6 +639,147 @@ def test_latest_release_tag_falls_back_to_atom(monkeypatch):
         ("owner/repo", "releases/latest"),
         ("owner/repo", "releases.atom"),
     ]
+
+
+class _PageResponse:
+    def __init__(self, data: bytes, url: str) -> None:
+        self._data = data
+        self._url = url
+
+    def read(self, _size: int = -1) -> bytes:
+        return self._data
+
+    def geturl(self) -> str:
+        return self._url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def _race_mirrors(monkeypatch):
+    installer.reset_runtime_caches()
+    monkeypatch.delenv("KAREN_INSTALL_MIRROR", raising=False)
+    monkeypatch.setattr(
+        installer,
+        "_MIRROR_CACHE",
+        [
+            {"name": "direct", "kind": "direct", "enabled": True},
+            {
+                "name": "fast",
+                "kind": "prefix",
+                "prefix": "https://fast.test",
+                "enabled": True,
+            },
+        ],
+    )
+    monkeypatch.setattr(installer, "GITHUB_PAGE_STAGGER", 0.05)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_TIMEOUT", 0.5)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_TOTAL_TIMEOUT", 2.0)
+
+
+def test_github_page_race_prefers_fast_mirror(monkeypatch):
+    _race_mirrors(monkeypatch)
+    calls: list[str] = []
+
+    def fake_urlopen(request, **_kwargs):
+        url = request.full_url
+        calls.append(url)
+        if url.startswith("https://fast.test/"):
+            return _PageResponse(
+                b"<html>/releases/tag/vFAST</html>", url
+            )
+        time.sleep(0.5)
+        return _PageResponse(b"<html>/releases/tag/vDIRECT</html>", url)
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    started = time.monotonic()
+    data, final_url = installer._fetch_github_page(
+        "owner/repo",
+        "releases/latest",
+        validator=installer._latest_page_valid,
+    )
+    elapsed = time.monotonic() - started
+    assert b"vFAST" in data
+    assert "fast.test" in final_url
+    assert elapsed < 0.4
+    assert any("fast.test" in url for url in calls)
+
+
+def test_github_page_race_skips_invalid_mirror(monkeypatch):
+    _race_mirrors(monkeypatch)
+
+    def fake_urlopen(request, **_kwargs):
+        url = request.full_url
+        if url.startswith("https://fast.test/"):
+            return _PageResponse(
+                b"<html>/releases/tag/vFAST</html>", url
+            )
+        return _PageResponse(b"<html>no release tag</html>", url)
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    data, _final_url = installer._fetch_github_page(
+        "owner/repo",
+        "releases/latest",
+        validator=installer._latest_page_valid,
+    )
+    assert b"vFAST" in data
+
+
+def test_github_page_race_direct_404_is_definitive(monkeypatch):
+    _race_mirrors(monkeypatch)
+    # 给直连错误足够时间先到达，避免测试线程调度导致镜像被提前启动。
+    monkeypatch.setattr(installer, "GITHUB_PAGE_STAGGER", 0.5)
+    calls: list[str] = []
+
+    def fake_urlopen(request, **_kwargs):
+        url = request.full_url
+        calls.append(url)
+        if url.startswith("https://github.com/"):
+            raise installer.urllib.error.HTTPError(
+                url, 404, "Not Found", {}, None
+            )
+        return _PageResponse(b"<html>/releases/tag/vFAST</html>", url)
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(SystemExit) as error:
+        installer._fetch_github_page(
+            "owner/repo",
+            "releases/latest",
+            validator=installer._latest_page_valid,
+        )
+    assert "没有可用的 Release" in error.value.message
+    assert all("fast.test" not in url for url in calls)
+
+
+def test_github_page_race_reports_all_failures(monkeypatch):
+    _race_mirrors(monkeypatch)
+
+    def fake_urlopen(_request, **_kwargs):
+        raise TimeoutError("simulated timeout")
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    started = time.monotonic()
+    with pytest.raises(SystemExit) as error:
+        installer._fetch_github_page("owner/repo", "releases.atom")
+    assert "无法访问 GitHub" in error.value.message
+    assert "direct" in error.value.message
+    assert "fast" in error.value.message
+    assert time.monotonic() - started < 2.0
+
+
+def test_atom_page_validator_and_try_parser():
+    feed = (
+        b'<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        b'<link rel="alternate" href="https://github.com/owner/repo/'
+        b'releases/tag/v0.9.0"/></entry></feed>'
+    )
+    assert installer._try_release_tag_from_atom(feed) == "v0.9.0"
+    assert installer._atom_page_valid(feed, "") is True
+    assert installer._try_release_tag_from_atom(b"<html>error</html>") is None
+    assert installer._atom_page_valid(b"<html>error</html>", "") is False
 
 
 def test_path_problem_rejects_non_ascii_on_windows(monkeypatch):

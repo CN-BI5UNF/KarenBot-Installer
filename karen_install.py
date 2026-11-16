@@ -75,8 +75,15 @@ USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 PROBE_BYTES = 256 * 1024
 PROBE_TIMEOUT = 8.0
 PROBE_WORKERS = 16
+DIRECT_SOURCE_PROBE_WORKERS = 5
 DOWNLOAD_TIMEOUT = 30
 DOWNLOAD_CHUNK = 256 * 1024
+# GitHub Release 页面/feed 的并发竞速：先试直连，1.5 秒无响应就并发
+# 启动镜像；首个有效响应立即胜出，避免串行等待 15 个镜像各 10~20 秒。
+GITHUB_PAGE_TIMEOUT = 10.0
+GITHUB_PAGE_STAGGER = 1.5
+GITHUB_PAGE_MAX_PARALLEL = 4
+GITHUB_PAGE_TOTAL_TIMEOUT = 25.0
 # 同一次安装内复用镜像排序结果的窗口期；避免每个资产都重测 15 个镜像。
 RANK_CACHE_TTL = 300.0
 UNVERIFIED_ENV = "KAREN_ALLOW_UNVERIFIED"
@@ -1790,6 +1797,48 @@ def download_from_sources(
     fail("所有下载来源都失败：\n" + "\n".join(errors))
 
 
+def _rank_direct_sources(
+    urls: Iterable[str], *, timeout: float = PROBE_TIMEOUT
+) -> list[str]:
+    """并发探测多个直链源，按评分排序；失败源保留在末尾。
+
+    字体等资产来自 raw.githubusercontent.com / jsdelivr 等多个独立域名，
+    不是 GitHub 镜像前缀，因此单独探测而不走 rank_mirrors。
+    """
+    entries = list(
+        dict.fromkeys(str(url).strip() for url in urls if str(url).strip())
+    )
+    if not entries:
+        return []
+
+    def _probe(entry: tuple[int, str]) -> tuple[str, dict[str, Any]]:
+        index, url = entry
+        return url, probe_mirror(
+            url,
+            {"name": f"source-{index}", "kind": "direct", "enabled": True},
+            timeout=timeout,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(DIRECT_SOURCE_PROBE_WORKERS, len(entries))
+    ) as pool:
+        results = list(pool.map(_probe, enumerate(entries)))
+    good = [
+        (url, result) for url, result in results if result.get("ok")
+    ]
+    good.sort(
+        key=lambda item: (
+            -float(item[1].get("score") or 0),
+            float(item[1].get("latency") or 999),
+        )
+    )
+    ordered = [url for url, _result in good]
+    ordered.extend(
+        url for url, result in results if not result.get("ok")
+    )
+    return ordered
+
+
 def _safe_tar_extract(
     archive: Path,
     destination: Path,
@@ -2118,38 +2167,12 @@ def _online_archive_url(repo: str, tag: str) -> str:
     return ONLINE_ARCHIVE_TEMPLATE.format(repo=repo, tag=tag)
 
 
-def _fetch_github_page(
-    repo: str, path: str, *, timeout: float = 20
-) -> tuple[bytes, str]:
-    """按 direct → 镜像顺序抓取 GitHub 页面，返回 (内容, 最终 URL)。"""
-    url = f"https://github.com/{repo}/{path}"
-    errors: list[str] = []
-    for mirror in available_mirrors():
-        target = mirrored_url(url, mirror)
-        try:
-            with urllib.request.urlopen(
-                _request(target), timeout=timeout
-            ) as response:
-                data = response.read(2 * 1024 * 1024)
-                return data, response.geturl()
-        except Exception as exc:  # noqa: BLE001
-            errors.append(
-                f"{mirror.get('name', '?')}: {type(exc).__name__}: {exc}"
-            )
-    fail(
-        "无法访问 GitHub：\n"
-        + "\n".join(errors)
-        + "\n请检查网络、代理、DNS 或防火墙；如果使用代理，请确认 "
-        + "HTTPS_PROXY/HTTP_PROXY 配置正确。"
-    )
-
-
-def _release_tag_from_atom(data: bytes) -> str:
-    """从 GitHub releases.atom 的第一条记录取 tag。"""
+def _parse_release_feed(data: bytes) -> tuple[str | None, str]:
+    """解析 releases.atom；返回 (tag, 失败原因)。"""
     try:
         root = ElementTree.fromstring(data)
     except ElementTree.ParseError as exc:
-        fail(f"GitHub Release feed 解析失败：{exc}")
+        return None, f"GitHub Release feed 解析失败：{exc}"
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     for entry in root.findall("atom:entry", ns):
         link = entry.find("atom:link", ns)
@@ -2157,8 +2180,155 @@ def _release_tag_from_atom(data: bytes) -> str:
         match = re.search(r"/releases/tag/([0-9A-Za-z._-]+)", href)
         if match:
             tag = unquote(match.group(1))
-            return _validate_online_tag(tag)
-    fail("GitHub Release feed 中没有可用的版本")
+            try:
+                return _validate_online_tag(tag), ""
+            except SystemExit as exc:
+                return None, getattr(exc, "message", f"无效的 Release tag：{tag}")
+    return None, "GitHub Release feed 中没有可用的版本"
+
+
+def _try_release_tag_from_atom(data: bytes) -> str | None:
+    return _parse_release_feed(data)[0]
+
+
+def _release_tag_from_atom(data: bytes) -> str:
+    """从 GitHub releases.atom 的第一条记录取 tag。"""
+    tag, error = _parse_release_feed(data)
+    if tag is None:
+        fail(error)
+    return tag
+
+
+def _latest_page_valid(data: bytes, final_url: str) -> bool:
+    haystack = final_url + "\n" + data.decode("utf-8", "ignore")
+    return re.search(r"/releases/tag/([0-9A-Za-z._-]+)", haystack) is not None
+
+
+def _atom_page_valid(data: bytes, _final_url: str) -> bool:
+    return _try_release_tag_from_atom(data) is not None
+
+
+def _fetch_github_page(
+    repo: str,
+    path: str,
+    *,
+    timeout: float | None = None,
+    validator: Callable[[bytes, str], bool] | None = None,
+) -> tuple[bytes, str]:
+    """并发竞速抓取 GitHub 页面，返回首个有效 (内容, 最终 URL)。
+
+    先请求列表中的第一个镜像（通常是 direct）；超过 stagger 仍无结果时
+    并发启动后续镜像。首个通过 ``validator`` 的响应立即胜出；其余请求
+    放在 daemon 线程里，不会阻塞安装器退出。
+    """
+    if timeout is None:
+        timeout = GITHUB_PAGE_TIMEOUT
+    url = f"https://github.com/{repo}/{path}"
+    mirrors = available_mirrors()
+    if not mirrors:
+        fail("没有可用的 GitHub 镜像。")
+    results: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    errors: list[str] = []
+
+    def _worker(mirror: dict[str, Any]) -> None:
+        name = str(mirror.get("name") or "?")
+        target = mirrored_url(url, mirror)
+        try:
+            with urllib.request.urlopen(
+                _request(target), timeout=timeout
+            ) as response:
+                data = response.read(2 * 1024 * 1024)
+                final_url = response.geturl()
+            if stop.is_set():
+                return
+            if not data:
+                results.put(("error", name, b"", "响应为空"))
+                return
+            if validator is not None and not validator(data, final_url):
+                results.put(
+                    ("error", name, b"", "响应不是有效的 GitHub Release 页面")
+                )
+                return
+            results.put(("ok", name, data, final_url))
+        except urllib.error.HTTPError as exc:
+            # 直连 404 是权威结论（仓库没有该 Release/稳定版），不需要再
+            # 让 15 个镜像逐个重试；交给调用方回退 releases.atom。
+            kind = "definitive" if (
+                exc.code == 404 and mirror.get("kind") == "direct"
+            ) else "error"
+            if not stop.is_set():
+                results.put((kind, name, b"", f"HTTP {exc.code}"))
+        except Exception as exc:  # noqa: BLE001
+            if not stop.is_set():
+                results.put(
+                    ("error", name, b"", f"{type(exc).__name__}: {exc}")
+                )
+
+    started = 0
+    in_flight = 0
+
+    def _start_next() -> None:
+        nonlocal started, in_flight
+        mirror = mirrors[started]
+        started += 1
+        in_flight += 1
+        threading.Thread(
+            target=_worker,
+            args=(mirror,),
+            daemon=True,
+            name=f"github-page-{mirror.get('name', started)}",
+        ).start()
+
+    now = time.monotonic()
+    next_start = now + GITHUB_PAGE_STAGGER
+    deadline = now + GITHUB_PAGE_TOTAL_TIMEOUT
+    _start_next()
+    while True:
+        now = time.monotonic()
+        while (
+            started < len(mirrors)
+            and in_flight < GITHUB_PAGE_MAX_PARALLEL
+            and (in_flight == 0 or now >= next_start)
+        ):
+            _start_next()
+            next_start = time.monotonic() + GITHUB_PAGE_STAGGER
+            now = time.monotonic()
+        if in_flight == 0 and started >= len(mirrors):
+            break
+        if now >= deadline:
+            break
+        wait = deadline - now
+        if started < len(mirrors) and in_flight < GITHUB_PAGE_MAX_PARALLEL:
+            wait = min(wait, max(0.0, next_start - now))
+        # 轮询一小段时间，尽早发现快速失败并启动下一个镜像。
+        wait = min(max(wait, 0.05), 0.25)
+        try:
+            kind, name, data, detail = results.get(timeout=wait)
+        except queue.Empty:
+            continue
+        in_flight -= 1
+        if kind == "ok":
+            stop.set()
+            if errors:
+                log(
+                    f"GitHub 页面 {repo}/{path}：{len(errors)} 个镜像失败，"
+                    f"使用 {name}"
+                )
+            return data, detail
+        if kind == "definitive":
+            stop.set()
+            fail(f"GitHub 没有可用的 Release：{name}: {detail}")
+        errors.append(f"{name}: {detail}")
+    stop.set()
+    if not errors:
+        errors.append(f"总超时（{int(GITHUB_PAGE_TOTAL_TIMEOUT)} 秒）")
+    fail(
+        "无法访问 GitHub：\n"
+        + "\n".join(errors)
+        + "\n请检查网络、代理、DNS 或防火墙；如果使用代理，请确认 "
+        + "HTTPS_PROXY/HTTP_PROXY 配置正确。"
+    )
 
 
 def _latest_release_tag(
@@ -2171,7 +2341,9 @@ def _latest_release_tag(
     """
     _check_cancel(cancel_event)
     try:
-        data, final_url = _fetch_github_page(repo, "releases/latest")
+        data, final_url = _fetch_github_page(
+            repo, "releases/latest", validator=_latest_page_valid
+        )
         haystack = final_url + "\n" + data.decode("utf-8", "ignore")
         match = re.search(r"/releases/tag/([0-9A-Za-z._-]+)", haystack)
         if match:
@@ -2182,7 +2354,9 @@ def _latest_release_tag(
         message = getattr(exc, "message", str(exc))
         log(f"{repo} 稳定版检查失败，改查 releases.atom：{message.splitlines()[0]}")
     _check_cancel(cancel_event)
-    data, _final_url = _fetch_github_page(repo, "releases.atom")
+    data, _final_url = _fetch_github_page(
+        repo, "releases.atom", validator=_atom_page_valid
+    )
     tag = _release_tag_from_atom(data)
     log(f"{repo} 未找到稳定版，选择最新 Release：{tag}")
     return tag, "最新版"
@@ -2981,8 +3155,9 @@ def install_fonts(
             log(f"字体校验失败，重新下载：{name}")
             target.unlink(missing_ok=True)
         try:
+            sources = _rank_direct_sources(item["urls"])
             download_from_sources(
-                item["urls"],
+                sources,
                 target,
                 expected_sha256=expected,
                 cancel_event=cancel_event,

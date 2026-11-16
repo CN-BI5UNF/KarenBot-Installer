@@ -113,7 +113,9 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 1. **镜像测速自动选择**：`mirrors.json` 内置 GitHub 直连和多个公共镜像；
    并发探测资产前 256KB，按吞吐 + 首字节延迟评分，自动选最快且低延迟的
    方案；下载失败自动换下一个镜像。同一次安装内复用测速结果（5 分钟
-   窗口），不会为每个资产重复测速。
+   窗口），不会为每个资产重复测速。Release 页面/feed 解析也采用并发竞速：
+   先请求直连，1.5 秒无响应就并发启动镜像，首个有效响应立即胜出；直连
+   404 视为权威结论直接回退 `releases.atom`，不再串行等待所有镜像。
 2. **在线 Release 安装**：Linux 下载 backend 核心包 + GUI/WebUI 源码模块；
    Windows 原生 GUI 下载 `KarenBot-Windows-x64.zip` 便携包。
 3. **内置人格补齐**：backend 仓库的 `personas/` 只有空壳；Windows 便携包
@@ -126,7 +128,9 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
    资产；选择不使用时会明确提醒 Windows 观感问题需要自行解决。
 6. **字体自动拉取**：安装时下载 GUI 实际使用的 Noto Sans SC / Noto Serif SC
    可变字体，写到 GUI 读取的位置，并生成只追加该目录的 `fonts.conf`；
-   不把字体打进安装器。
+   不把字体打进安装器。字体候选源（raw.githubusercontent.com、jsdelivr
+   等）会先并发探测前 256KB，按评分排序后再下载，避免在失效源上逐个
+   等待超时；最终仍用内置 SHA256 校验。
 7. **渲染回退**：启动入口在 GTK 初始化前设置渲染环境；GUI 自带的
    `gui.launcher` 还会按 stage 自动回退到 Cairo 软件渲染。另提供
    `launch-gui-safe` / “KarenBot GUI (兼容模式)”入口。
