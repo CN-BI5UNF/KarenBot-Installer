@@ -170,6 +170,8 @@ def test_spec_trims_tcl_data_and_embeds_icon():
     assert '"inspect"' in spec
     assert '"statistics"' in spec
     assert '"pickle"' not in spec  # concurrent.futures 依赖，不能排除
+    assert "karen_install.py" in spec  # 复制为 karenbot-uninstall.py
+    assert '"winreg"' in spec
 
 
 def test_windows_bundle_ships_shortcut_icon():

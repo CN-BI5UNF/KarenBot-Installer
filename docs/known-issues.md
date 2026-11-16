@@ -248,8 +248,10 @@ PowerShell 调用，并移除了 `-ExecutionPolicy Bypass`。同时移除“完�
 
 **处理**：Release 页面/feed 改为并发竞速：先请求 direct，1.5 秒无响应
 立即并发启动后续镜像，首个通过校验的响应胜出；其余请求是 daemon 线程，
-不会阻塞安装器退出。直连 404 视为“没有稳定版/Release”的权威结论，直接
-回退 `releases.atom`，不再让 15 个镜像逐个重试同一个必然失败的 URL。
+不会阻塞安装器退出。单请求 5 秒、总预算 25 秒，15 个镜像都能被尝试；
+直连在 `releases/latest` 上返回 404 时视为“没有稳定版”的权威结论，直接
+回退 `releases.atom`（atom 的 404 仍会尝试镜像），并给已启动镜像 0.5 秒
+收尾窗口。校验器返回具体内容原因，不再把坏 feed 误报成纯网络错误。
 
 ## 25. 字体下载在失效源上逐个等待超时
 
@@ -258,5 +260,21 @@ gitmirror 等），原实现按静态顺序串行尝试；前两个源慢时，�
 经历多次 30 秒下载超时。
 
 **处理**：先对候选源并发探测前 256KB，按吞吐/延迟评分排序，再从最优源
-下载；探测失败的源仍保留在末尾作为兜底。字体下载最终仍用内置 SHA256
-校验，失败不会阻塞安装。
+下载；第一个可用源出现后最多再等 0.5 秒收集其他快源，不再为慢源/死源
+阻塞；探测失败的源仍保留在末尾作为兜底。探测过程响应取消事件。字体下载
+最终仍用内置 SHA256 校验，失败不会阻塞安装。
+
+## 26. 删除安装器后找不到卸载入口
+
+**现象**：用户下载安装器到临时目录，安装完成后删除或移动了原始 exe；
+Windows“设置 → 应用”里也搜不到 KarenBot，只能手动删除安装目录，残留
+快捷方式、字体和 `%APPDATA%\karen-gui` 偏好。
+
+**处理**：安装时把安装器核心复制为 `<安装目录>\karenbot-uninstall.py`，
+并在 HKCU 写入 `Uninstall\KarenBot` 项（DisplayName/DisplayVersion/
+Publisher/DisplayIcon/InstallLocation/UninstallString/NoModify/NoRepair）。
+卸载命令使用安装目录内的便携 Python 或托管 venv 执行
+`karenbot-uninstall.py --uninstall --dir ... --non-interactive`，不需要
+管理员权限，也不依赖原始安装器 exe。卸载结束后删除注册表项和卸载脚本。
+如果安装目录内没有可用的 Python（例如 `--skip-deps` 且使用外部 venv），
+则跳过注册表写入并记录日志，不影响安装本身。

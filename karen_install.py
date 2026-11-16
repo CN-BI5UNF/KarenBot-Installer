@@ -77,14 +77,20 @@ PROBE_BYTES = 256 * 1024
 PROBE_TIMEOUT = 8.0
 PROBE_WORKERS = 16
 DIRECT_SOURCE_PROBE_WORKERS = 5
+DIRECT_SOURCE_GOOD_GRACE = 0.5
 DOWNLOAD_TIMEOUT = 30
 DOWNLOAD_CHUNK = 256 * 1024
 # GitHub Release 页面/feed 的并发竞速：先试直连，1.5 秒无响应就并发
-# 启动镜像；首个有效响应立即胜出，避免串行等待 15 个镜像各 10~20 秒。
-GITHUB_PAGE_TIMEOUT = 10.0
+# 启动镜像；首个有效响应立即胜出。单请求 5 秒、总预算 25 秒，确保 15 个
+# 镜像在总预算内都能被尝试，而不是串行等待。
+GITHUB_PAGE_TIMEOUT = 5.0
 GITHUB_PAGE_STAGGER = 1.5
 GITHUB_PAGE_MAX_PARALLEL = 4
 GITHUB_PAGE_TOTAL_TIMEOUT = 25.0
+# 直连 404 后给已启动的镜像一个很短的窗口，避免同一时刻到达的有效响应
+# 被“无稳定版”的结论抢先丢弃。
+GITHUB_PAGE_DEFINITIVE_GRACE = 0.5
+FONT_PROBE_TIMEOUT = 5.0
 # 同一次安装内复用镜像排序结果的窗口期；避免每个资产都重测 15 个镜像。
 RANK_CACHE_TTL = 300.0
 UNVERIFIED_ENV = "KAREN_ALLOW_UNVERIFIED"
@@ -99,6 +105,15 @@ LAUNCHER_FILENAMES: tuple[str, ...] = (
     "launch-gui-safe.sh",
     "launch-webui.sh",
 )
+UNINSTALLER_FILENAME = "karenbot-uninstall.py"
+ENTRYPOINT_FILENAMES: tuple[str, ...] = (
+    *LAUNCHER_FILENAMES,
+    UNINSTALLER_FILENAME,
+)
+WINDOWS_UNINSTALL_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\KarenBot"
+)
+WINDOWS_PUBLISHER = "CN-BI5UNF"
 # 安装目录峰值空间预检（在线安装/下载解压需要额外余量）。
 DISK_REQUIREMENTS = {
     "gui": 1200 * 1024 * 1024,
@@ -1799,13 +1814,17 @@ def download_from_sources(
 
 
 def _rank_direct_sources(
-    urls: Iterable[str], *, timeout: float = PROBE_TIMEOUT
+    urls: Iterable[str],
+    *,
+    timeout: float = PROBE_TIMEOUT,
+    cancel_event: Any | None = None,
 ) -> list[str]:
     """并发探测多个直链源，按评分排序；失败源保留在末尾。
 
     字体等资产来自 raw.githubusercontent.com / jsdelivr 等多个独立域名，
     不是 GitHub 镜像前缀，因此单独探测而不走 rank_mirrors。
     """
+    _check_cancel(cancel_event)
     entries = list(
         dict.fromkeys(str(url).strip() for url in urls if str(url).strip())
     )
@@ -1813,6 +1832,7 @@ def _rank_direct_sources(
         return []
 
     def _probe(entry: tuple[int, str]) -> tuple[str, dict[str, Any]]:
+        _check_cancel(cancel_event)
         index, url = entry
         return url, probe_mirror(
             url,
@@ -1820,12 +1840,61 @@ def _rank_direct_sources(
             timeout=timeout,
         )
 
-    with concurrent.futures.ThreadPoolExecutor(
+    pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=min(DIRECT_SOURCE_PROBE_WORKERS, len(entries))
-    ) as pool:
-        results = list(pool.map(_probe, enumerate(entries)))
+    )
+    futures = {
+        pool.submit(_probe, entry): entry[1]
+        for entry in enumerate(entries)
+    }
+    pending = set(futures)
+    results_by_url: dict[str, dict[str, Any]] = {}
+    deadline = time.monotonic() + timeout
+    good_seen_at: float | None = None
+    try:
+        while pending:
+            _check_cancel(cancel_event)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=min(remaining, 0.25),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                url = futures[future]
+                try:
+                    _url, result = future.result()
+                except InstallCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    result = {
+                        "ok": False,
+                        "url": url,
+                        "score": 0.0,
+                        "error": str(exc),
+                    }
+                results_by_url[url] = result
+                if result.get("ok") and good_seen_at is None:
+                    good_seen_at = time.monotonic()
+            # 已有一个可用源后最多再等 0.5 秒，收集并发的快源；不再
+            # 为慢源/死源阻塞字体下载。
+            if (
+                good_seen_at is not None
+                and time.monotonic() - good_seen_at
+                >= DIRECT_SOURCE_GOOD_GRACE
+            ):
+                break
+    finally:
+        for future in pending:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+    _check_cancel(cancel_event)
     good = [
-        (url, result) for url, result in results if result.get("ok")
+        (url, result)
+        for url, result in results_by_url.items()
+        if result.get("ok")
     ]
     good.sort(
         key=lambda item: (
@@ -1834,9 +1903,11 @@ def _rank_direct_sources(
         )
     )
     ordered = [url for url, _result in good]
-    ordered.extend(
-        url for url, result in results if not result.get("ok")
-    )
+    seen = set(ordered)
+    for url in entries:
+        if url not in seen:
+            ordered.append(url)
+            seen.add(url)
     return ordered
 
 
@@ -2157,9 +2228,18 @@ def _validate_portable_gui(app_root: Path, python: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _validate_online_tag(value: str) -> str:
+_ONLINE_TAG_RE = re.compile(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}")
+
+
+def _valid_online_tag(value: str) -> str | None:
+    """无副作用的 tag 校验；解析候选 feed 时不能调用 fail()。"""
     tag = str(value or "").strip()
-    if not re.fullmatch(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}", tag):
+    return tag if _ONLINE_TAG_RE.fullmatch(tag) else None
+
+
+def _validate_online_tag(value: str) -> str:
+    tag = _valid_online_tag(value)
+    if tag is None:
         fail(f"无效的 Release tag：{value!r}")
     return tag
 
@@ -2168,45 +2248,77 @@ def _online_archive_url(repo: str, tag: str) -> str:
     return ONLINE_ARCHIVE_TEMPLATE.format(repo=repo, tag=tag)
 
 
-def _parse_release_feed(data: bytes) -> tuple[str | None, str]:
-    """解析 releases.atom；返回 (tag, 失败原因)。"""
+def _parse_release_feed(
+    data: bytes, repo: str | None = None
+) -> tuple[str | None, str]:
+    """解析 releases.atom；返回 (tag, 失败原因)。
+
+    跳过格式错误或无效 tag 的条目，继续扫描后续条目，避免第一条坏数据
+    把整个 feed 判死。
+    """
     try:
         root = ElementTree.fromstring(data)
-    except ElementTree.ParseError as exc:
+    except (ElementTree.ParseError, LookupError) as exc:
         return None, f"GitHub Release feed 解析失败：{exc}"
     ns = {"atom": "http://www.w3.org/2005/Atom"}
+    last_error = ""
     for entry in root.findall("atom:entry", ns):
         link = entry.find("atom:link", ns)
         href = str(link.attrib.get("href") or "") if link is not None else ""
+        if repo is not None and f"/{repo}/releases/tag/" not in href:
+            continue
         match = re.search(r"/releases/tag/([0-9A-Za-z._-]+)", href)
-        if match:
-            tag = unquote(match.group(1))
-            try:
-                return _validate_online_tag(tag), ""
-            except SystemExit as exc:
-                return None, getattr(exc, "message", f"无效的 Release tag：{tag}")
-    return None, "GitHub Release feed 中没有可用的版本"
+        if not match:
+            continue
+        raw_tag = unquote(match.group(1))
+        tag = _valid_online_tag(raw_tag)
+        if tag is None:
+            last_error = f"无效的 Release tag：{raw_tag!r}"
+            continue
+        return tag, ""
+    return None, last_error or "GitHub Release feed 中没有可用的版本"
 
 
-def _try_release_tag_from_atom(data: bytes) -> str | None:
-    return _parse_release_feed(data)[0]
+def _try_release_tag_from_atom(
+    data: bytes, repo: str | None = None
+) -> str | None:
+    return _parse_release_feed(data, repo)[0]
 
 
-def _release_tag_from_atom(data: bytes) -> str:
-    """从 GitHub releases.atom 的第一条记录取 tag。"""
-    tag, error = _parse_release_feed(data)
+def _release_tag_from_atom(
+    data: bytes, repo: str | None = None
+) -> str:
+    """从 GitHub releases.atom 的第一条有效记录取 tag。"""
+    tag, error = _parse_release_feed(data, repo)
     if tag is None:
         fail(error)
     return tag
 
 
-def _latest_page_valid(data: bytes, final_url: str) -> bool:
-    haystack = final_url + "\n" + data.decode("utf-8", "ignore")
-    return re.search(r"/releases/tag/([0-9A-Za-z._-]+)", haystack) is not None
+def _latest_page_validator(
+    repo: str,
+) -> Callable[[bytes, str], str | None]:
+    pattern = re.compile(
+        rf"/{re.escape(repo)}/releases/tag/([0-9A-Za-z._-]+)"
+    )
+
+    def _valid(data: bytes, final_url: str) -> str | None:
+        haystack = final_url + "\n" + data.decode("utf-8", "ignore")
+        if pattern.search(haystack) is not None:
+            return None
+        return "响应不是有效的 Release 页面（缺少该仓库的 tag 链接）"
+
+    return _valid
 
 
-def _atom_page_valid(data: bytes, _final_url: str) -> bool:
-    return _try_release_tag_from_atom(data) is not None
+def _atom_page_validator(
+    repo: str,
+) -> Callable[[bytes, str], str | None]:
+    def _valid(data: bytes, _final_url: str) -> str | None:
+        tag, error = _parse_release_feed(data, repo)
+        return None if tag is not None else error
+
+    return _valid
 
 
 def _fetch_github_page(
@@ -2214,13 +2326,14 @@ def _fetch_github_page(
     path: str,
     *,
     timeout: float | None = None,
-    validator: Callable[[bytes, str], bool] | None = None,
+    validator: Callable[[bytes, str], str | None] | None = None,
 ) -> tuple[bytes, str]:
     """并发竞速抓取 GitHub 页面，返回首个有效 (内容, 最终 URL)。
 
     先请求列表中的第一个镜像（通常是 direct）；超过 stagger 仍无结果时
-    并发启动后续镜像。首个通过 ``validator`` 的响应立即胜出；其余请求
-    放在 daemon 线程里，不会阻塞安装器退出。
+    并发启动后续镜像。``validator`` 返回 None 表示有效，返回字符串表示
+    具体原因；首个有效响应立即胜出。其余请求放在 daemon 线程里，不会
+    阻塞安装器退出。
     """
     if timeout is None:
         timeout = GITHUB_PAGE_TIMEOUT
@@ -2239,24 +2352,36 @@ def _fetch_github_page(
             with urllib.request.urlopen(
                 _request(target), timeout=timeout
             ) as response:
-                data = response.read(2 * 1024 * 1024)
                 final_url = response.geturl()
+                chunks: list[bytes] = []
+                remaining = 2 * 1024 * 1024
+                while remaining > 0:
+                    if stop.is_set():
+                        return
+                    chunk = response.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                data = b"".join(chunks)
             if stop.is_set():
                 return
             if not data:
                 results.put(("error", name, b"", "响应为空"))
                 return
-            if validator is not None and not validator(data, final_url):
-                results.put(
-                    ("error", name, b"", "响应不是有效的 GitHub Release 页面")
-                )
-                return
+            if validator is not None:
+                problem = validator(data, final_url)
+                if problem:
+                    results.put(("error", name, b"", problem))
+                    return
             results.put(("ok", name, data, final_url))
         except urllib.error.HTTPError as exc:
             # 直连 404 是权威结论（仓库没有该 Release/稳定版），不需要再
             # 让 15 个镜像逐个重试；交给调用方回退 releases.atom。
             kind = "definitive" if (
-                exc.code == 404 and mirror.get("kind") == "direct"
+                path == "releases/latest"
+                and exc.code == 404
+                and mirror.get("kind", "direct") == "direct"
             ) else "error"
             if not stop.is_set():
                 results.put((kind, name, b"", f"HTTP {exc.code}"))
@@ -2318,10 +2443,43 @@ def _fetch_github_page(
                 )
             return data, detail
         if kind == "definitive":
+            definitive_error = f"{name}: {detail}"
+            grace_deadline = (
+                time.monotonic() + GITHUB_PAGE_DEFINITIVE_GRACE
+            )
+            while in_flight > 0 and time.monotonic() < grace_deadline:
+                try:
+                    pending = results.get(
+                        timeout=max(
+                            0.01,
+                            min(0.1, grace_deadline - time.monotonic()),
+                        )
+                    )
+                except queue.Empty:
+                    continue
+                if pending[0] == "ok":
+                    stop.set()
+                    return pending[2], pending[3]
+                in_flight -= 1
+                if pending[0] != "definitive":
+                    errors.append(f"{pending[1]}: {pending[3]}")
             stop.set()
-            fail(f"GitHub 没有可用的 Release：{name}: {detail}")
+            message = f"GitHub 没有可用的 Release：{definitive_error}"
+            if errors:
+                message += "\n" + "\n".join(errors)
+            fail(message)
         errors.append(f"{name}: {detail}")
     stop.set()
+    # 截止前可能已经收到成功响应；先排空队列，避免把它误报成超时。
+    while True:
+        try:
+            kind, name, data, detail = results.get_nowait()
+        except queue.Empty:
+            break
+        if kind == "ok":
+            return data, detail
+        if kind == "error":
+            errors.append(f"{name}: {detail}")
     if not errors:
         errors.append(f"总超时（{int(GITHUB_PAGE_TOTAL_TIMEOUT)} 秒）")
     fail(
@@ -2337,16 +2495,21 @@ def _latest_release_tag(
 ) -> tuple[str, str]:
     """优先 GitHub 的 latest 稳定版，否则用 releases.atom 的最新版本。
 
-    不使用 GitHub API，避免未登录时的 60 次/小时限流；页面和 feed 都走
-    direct → 镜像回退。
+    不使用 GitHub API，避免未登录时的 60 次/小时限流；页面/feed 先直连，
+    超时后并发竞速镜像；直连 404 直接回退 atom。
     """
     _check_cancel(cancel_event)
     try:
         data, final_url = _fetch_github_page(
-            repo, "releases/latest", validator=_latest_page_valid
+            repo,
+            "releases/latest",
+            validator=_latest_page_validator(repo),
         )
         haystack = final_url + "\n" + data.decode("utf-8", "ignore")
-        match = re.search(r"/releases/tag/([0-9A-Za-z._-]+)", haystack)
+        match = re.search(
+            rf"/{re.escape(repo)}/releases/tag/([0-9A-Za-z._-]+)",
+            haystack,
+        )
         if match:
             tag = _validate_online_tag(unquote(match.group(1)))
             log(f"{repo} 选择版本：{tag}（稳定版）")
@@ -2356,9 +2519,11 @@ def _latest_release_tag(
         log(f"{repo} 稳定版检查失败，改查 releases.atom：{message.splitlines()[0]}")
     _check_cancel(cancel_event)
     data, _final_url = _fetch_github_page(
-        repo, "releases.atom", validator=_atom_page_valid
+        repo,
+        "releases.atom",
+        validator=_atom_page_validator(repo),
     )
-    tag = _release_tag_from_atom(data)
+    tag = _release_tag_from_atom(data, repo)
     log(f"{repo} 未找到稳定版，选择最新 Release：{tag}")
     return tag, "最新版"
 
@@ -3156,7 +3321,11 @@ def install_fonts(
             log(f"字体校验失败，重新下载：{name}")
             target.unlink(missing_ok=True)
         try:
-            sources = _rank_direct_sources(item["urls"])
+            sources = _rank_direct_sources(
+                item["urls"],
+                timeout=FONT_PROBE_TIMEOUT,
+                cancel_event=cancel_event,
+            )
             download_from_sources(
                 sources,
                 target,
@@ -3799,6 +3968,116 @@ def _write_install_marker(
     )
 
 
+def _write_uninstaller(install_dir: Path) -> Path | None:
+    """把安装器核心复制为安装目录内的独立卸载脚本。
+
+    Windows 的“应用和功能”只需要 Python + 这个脚本即可卸载，不依赖用户
+    是否保留了原始安装器 exe。
+    """
+    source = _resource_path("karen_install.py")
+    if not source.is_file():
+        log(f"跳过卸载脚本：找不到安装器核心源码 {source}")
+        return None
+    target = install_dir / UNINSTALLER_FILENAME
+    try:
+        shutil.copy2(source, target)
+    except OSError as exc:
+        log(f"写入卸载脚本失败（可忽略）：{target}：{exc}")
+        return None
+    return target
+
+
+def _windows_uninstall_python(
+    install_dir: Path, portable_python: Path | None
+) -> Path | None:
+    """选择安装目录内可用的 python.exe；不使用用户外部的 venv。"""
+    candidates: list[Path | None] = [
+        portable_python,
+        _venv_python(install_dir / "venv"),
+        _portable_runtime_python(install_dir),
+    ]
+    for candidate in candidates:
+        if candidate is not None and candidate.is_file():
+            return candidate
+    return None
+
+
+def _register_windows_uninstall(
+    install_dir: Path,
+    *,
+    python: Path,
+    icon: Path | None,
+) -> None:
+    """写入 HKCU 卸载项；失败只记日志，不影响已完成的安装。"""
+    if not IS_WINDOWS:
+        return
+    script = install_dir / UNINSTALLER_FILENAME
+    if not script.is_file():
+        log("跳过 Windows 卸载项：安装目录内没有卸载脚本")
+        return
+    try:
+        import winreg
+    except ImportError as exc:
+        log(f"跳过 Windows 卸载项：缺少 winreg（{exc}）")
+        return
+    command = (
+        f'"{python}" "{script}" --uninstall '
+        f'--dir "{install_dir}" --non-interactive'
+    )
+    icon_path = icon if icon is not None else install_dir
+    string_values = {
+        "DisplayName": "KarenBot",
+        "DisplayVersion": INSTALLER_VERSION,
+        "Publisher": WINDOWS_PUBLISHER,
+        "InstallLocation": str(install_dir),
+        "DisplayIcon": str(icon_path),
+        "UninstallString": command,
+        "QuietUninstallString": command,
+        "InstallDate": time.strftime("%Y%m%d"),
+        "Comments": "KarenBot installer-managed uninstall entry",
+        "URLInfoAbout": "https://github.com/CN-BI5UNF/KarenBot-Installer",
+    }
+    try:
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            WINDOWS_UNINSTALL_KEY,
+            0,
+            winreg.KEY_WRITE,
+        ) as handle:
+            for name, value in string_values.items():
+                winreg.SetValueEx(
+                    handle, name, 0, winreg.REG_SZ, value
+                )
+            for name in ("NoModify", "NoRepair"):
+                winreg.SetValueEx(
+                    handle, name, 0, winreg.REG_DWORD, 1
+                )
+    except OSError as exc:
+        log(f"写入 Windows 卸载项失败（可手动卸载）：{exc}")
+        return
+    log(f"已注册 Windows 卸载项：{WINDOWS_UNINSTALL_KEY}")
+
+
+def _unregister_windows_uninstall() -> None:
+    """删除 HKCU 卸载项；不存在时静默跳过。"""
+    if not IS_WINDOWS:
+        return
+    try:
+        import winreg
+    except ImportError:
+        return
+    try:
+        winreg.DeleteKey(
+            winreg.HKEY_CURRENT_USER, WINDOWS_UNINSTALL_KEY
+        )
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        log(f"删除 Windows 卸载项失败（可在注册表编辑器中删除）：{exc}")
+        return
+    log("已删除 Windows 卸载项")
+
+
 def read_install_marker(install_dir: Path) -> dict[str, Any] | None:
     """读取安装标记；缺失/损坏时返回 None，供 GUI 恢复启动入口。"""
     try:
@@ -3962,6 +4241,11 @@ def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
     _remove_shortcuts()
     _clean_fonts(install_dir)
     _clean_skins()
+    _unregister_windows_uninstall()
+    try:
+        (install_dir / UNINSTALLER_FILENAME).unlink(missing_ok=True)
+    except OSError as exc:
+        log(f"删除卸载脚本失败（可手动删除）：{exc}")
     try:
         install_dir.rmdir()
     except OSError:
@@ -4195,7 +4479,7 @@ def _restore_install_entrypoints(
     marker_existed: bool,
 ) -> None:
     """回滚时恢复旧启动器/安装标记，避免旧 app 配新数据根。"""
-    for name in LAUNCHER_FILENAMES:
+    for name in ENTRYPOINT_FILENAMES:
         target = install_dir / name
         if name in existing_launchers:
             backup = launcher_backup / name
@@ -4508,7 +4792,7 @@ def install(
         backup_dir.mkdir(parents=True, exist_ok=True)
         existing_launchers = {
             name
-            for name in LAUNCHER_FILENAMES
+            for name in ENTRYPOINT_FILENAMES
             if (install_dir / name).is_file()
         }
         marker_path = install_dir / INSTALL_MARKER_NAME
@@ -4547,6 +4831,8 @@ def install(
             installer=installer_kind,
             components=components,
         )
+        if IS_WINDOWS:
+            _write_uninstaller(install_dir)
         if old_app.exists() or (
             data_root is None
             and _external_data_dir(install_dir).is_dir()
@@ -4559,6 +4845,21 @@ def install(
             )
         if old_app.exists():
             _remove_tree(old_app, strict=False)
+        if IS_WINDOWS and (install_dir / UNINSTALLER_FILENAME).is_file():
+            python = _windows_uninstall_python(
+                install_dir, portable_target
+            )
+            if python is None:
+                log("跳过 Windows 卸载项：安装目录内没有可用的 Python")
+            else:
+                try:
+                    _register_windows_uninstall(
+                        install_dir,
+                        python=python,
+                        icon=prebuilt_target or _shortcut_icon(install_dir),
+                    )
+                except Exception as exc:  # noqa: BLE001 - 不能因注册表失败毁掉安装
+                    log(f"写入 Windows 卸载项失败（可手动卸载）：{exc}")
         stage(f"安装完成：{install_dir}")
         log(f"启动：{launch_target(install_dir, frontend)}")
         if frontend == "gui":
@@ -4790,6 +5091,12 @@ def self_test() -> None:
             or marker.get("installer") != "self-test"
         ):
             fail("self-test: 安装标记异常")
+        uninstaller = _write_uninstaller(root)
+        if (
+            uninstaller is None
+            or "--uninstall" not in uninstaller.read_text(encoding="utf-8")
+        ):
+            fail("self-test: 卸载脚本不可用")
     log("self-test 通过")
 
 

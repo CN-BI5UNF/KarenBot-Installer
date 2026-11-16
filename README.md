@@ -160,6 +160,11 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
     数据固定在 `<安装目录>/data/instances/default`，升级只替换 `app/`，
     不会碰用户配置、聊天库、工作区或自定义人格。旧版 `app/data` 会在
     升级时自动迁移；backend 不支持该变量时回退到 `app/data` 迁移。
+17. **Windows 卸载入口**：安装时把安装器核心复制为安装目录内的
+    `karenbot-uninstall.py`，并在
+    `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\KarenBot`
+    写入免管理员权限的卸载项。用户可以在 Windows“设置 → 应用”中直接
+    卸载，即使原始安装器 exe 已删除；卸载流程会清理该注册表项。
 
 ## 已知问题处理
 
@@ -214,7 +219,8 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 
 `mirrors.json` 维护 GitHub 直连和公共前缀镜像。测速并发请求实际资产的前
 256KB，按吞吐和首字节延迟评分；下载失败自动换下一个镜像。Release 元数据
-（`releases/latest` / `releases.atom`）也走 direct → 镜像回退。
+（`releases/latest` / `releases.atom`）先直连，超过 1.5 秒再并发启动镜像；
+直连 404 视为没有稳定版/Release，直接回退 atom。
 
 第三方镜像能看到下载请求，也可能篡改内容。安装器对可执行资产执行以下策略：
 
@@ -322,7 +328,8 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
   提供的清单不用于可执行资产；
 - Windows GUI 便携包缺少可信 SHA256 时中止，除非显式设置
   `KAREN_ALLOW_UNVERIFIED=1`；
-- Windows 默认 per-user 安装，不触发 UAC；
+- Windows 默认 per-user 安装，不触发 UAC；卸载项写入 HKCU
+  `...\Uninstall\KarenBot`，卸载完成后删除；
 - 安装器只替换 `<install>/app`；新版 backend 的运行数据固定在
   `<install>/data/instances/default`，升级不会删除；旧版 `app/data` 会在
   升级时迁移。升级失败会自动把 `app.old` 换回 `app/`；覆盖安装前会检测

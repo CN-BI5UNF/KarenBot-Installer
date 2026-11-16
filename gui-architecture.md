@@ -66,7 +66,8 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
 ## 安装核心
 
 - 镜像测速：并发探测前 512KB，吞吐 + 首字节延迟评分，失败换镜像；
-- Release 解析：`releases/latest` → `releases.atom`，页面和 feed 都走镜像回退；
+- Release 解析：`releases/latest` → `releases.atom`，页面/feed 先直连、超时后
+  并发竞速镜像；直连 404 视为无稳定版，直接回退 atom；
 - Linux 在线安装：backend 核心包 + GUI/WebUI 源码模块；
 - Windows 原生 GUI：下载 `KarenBot-Windows-x64.zip`，按契约校验 GTK4 DLL/typelib；
 - 本地安装：源码、tar/zip、预构建包；
@@ -93,6 +94,9 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
   安装器校验 `runtime/python.exe`、GTK4/Adwaita DLL、Gtk/Adw typelib。
 - **运行数据**：启动器注入 `KAREN_DATA_ROOT=<安装目录>/data`，升级只替换
   `app/`；旧版 `app/data` 会迁移，避免覆盖安装清空用户数据。
+- **Windows 卸载项**：安装时复制 `karenbot-uninstall.py` 到安装目录，并在
+  HKCU `...\Uninstall\KarenBot` 写入卸载项；卸载使用安装目录内的 Python，
+  不依赖原始安装器 exe，也不需要管理员权限。
 - **中文路径**：安装目录/源码/安装包路径含非 ASCII 字符时提前报错，并提示
   `%PUBLIC%\KarenBot`；默认目录若因用户名带中文，会自动改用 `%PUBLIC%`。
 - **权限预检**：安装前写一个探针文件验证目录可写；不可写时提示改用

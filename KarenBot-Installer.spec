@@ -14,6 +14,9 @@ Tkinter 基础控件，这些数据对功能没有影响，但会拖慢单文件
 calendar（urllib → email → _parseaddr 依赖）、gzip/bz2/lzma（tarfile
 依赖）以及 Tcl 的全部 encoding 表。Windows 的 ANSI 代码页因系统区域设置
 而异，删掉非中文编码会让部分语言的系统上 Tk 初始化失败。
+
+DATAS 里的 karen_install.py 用于 Windows 安装时复制成
+`karenbot-uninstall.py`；winreg 只在 Windows 构建时加入 hiddenimports。
 """
 
 import sys
@@ -27,6 +30,8 @@ ICON_FILE = INSTALLER_DIR / "packaging" / "karenbot.ico"
 DATAS = [
     (str(INSTALLER_DIR / "mirrors.json"), "."),
     (str(INSTALLER_DIR / "windows-gui-package.json"), "."),
+    # Windows“应用和功能”的卸载脚本会把它复制到安装目录。
+    (str(INSTALLER_DIR / "karen_install.py"), "."),
 ]
 if ICON_FILE.is_file():
     DATAS.append((str(ICON_FILE), "."))
@@ -36,7 +41,11 @@ a = Analysis(
     pathex=[str(INSTALLER_DIR)],
     binaries=[],
     datas=DATAS,
-    hiddenimports=["karen_install"],
+    hiddenimports=(
+        ["karen_install", "winreg"]
+        if sys.platform.startswith("win")
+        else ["karen_install"]
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -69,7 +78,6 @@ a = Analysis(
         "ftplib",
         "netrc",
         "tracemalloc",
-        "quopri",
         "getopt",
     ],
     noarchive=False,

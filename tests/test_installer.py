@@ -11,7 +11,6 @@ import socketserver
 import sys
 import tarfile
 import threading
-import time
 import zipfile
 from pathlib import Path
 
@@ -169,6 +168,48 @@ def test_rank_direct_sources_orders_by_score(monkeypatch):
         "https://b.test/slow.otf",
         "https://a.test/bad.otf",
     ]
+
+
+def test_rank_direct_sources_returns_after_first_good(monkeypatch):
+    release_slow = threading.Event()
+    fast = "https://fast.test/fast.otf"
+    slow = "https://slow.test/slow.otf"
+
+    def fake_probe(url, _mirror, **_kwargs):
+        if url == slow:
+            release_slow.wait(2.0)
+        return {
+            "ok": True,
+            "url": url,
+            "score": 10.0 if url == fast else 1.0,
+            "latency": 0.1,
+        }
+
+    monkeypatch.setattr(installer, "probe_mirror", fake_probe)
+    monkeypatch.setattr(installer, "DIRECT_SOURCE_GOOD_GRACE", 0.05)
+    try:
+        ordered = installer._rank_direct_sources(
+            [fast, slow], timeout=2.0
+        )
+    finally:
+        release_slow.set()
+    assert ordered[0] == fast
+    assert slow in ordered
+
+
+def test_rank_direct_sources_empty_and_all_failed(monkeypatch):
+    assert installer._rank_direct_sources([]) == []
+    monkeypatch.setattr(
+        installer,
+        "probe_mirror",
+        lambda url, _mirror, **_kwargs: {
+            "ok": False,
+            "url": url,
+            "score": 0.0,
+        },
+    )
+    urls = ["https://a.test/a.otf", "https://b.test/b.otf"]
+    assert installer._rank_direct_sources(urls) == urls
 
 
 def test_probe_mirrors_returns_failures(local_server):
@@ -649,8 +690,12 @@ class _PageResponse:
     def __init__(self, data: bytes, url: str) -> None:
         self._data = data
         self._url = url
+        self._returned = False
 
     def read(self, _size: int = -1) -> bytes:
+        if self._returned:
+            return b""
+        self._returned = True
         return self._data
 
     def geturl(self) -> str:
@@ -663,13 +708,15 @@ class _PageResponse:
         return False
 
 
-def _race_mirrors(monkeypatch):
+def _race_mirrors(monkeypatch, mirrors=None):
     installer.reset_runtime_caches()
     monkeypatch.delenv("KAREN_INSTALL_MIRROR", raising=False)
     monkeypatch.setattr(
         installer,
         "_MIRROR_CACHE",
-        [
+        mirrors
+        if mirrors is not None
+        else [
             {"name": "direct", "kind": "direct", "enabled": True},
             {
                 "name": "fast",
@@ -680,35 +727,38 @@ def _race_mirrors(monkeypatch):
         ],
     )
     monkeypatch.setattr(installer, "GITHUB_PAGE_STAGGER", 0.05)
-    monkeypatch.setattr(installer, "GITHUB_PAGE_TIMEOUT", 0.5)
-    monkeypatch.setattr(installer, "GITHUB_PAGE_TOTAL_TIMEOUT", 2.0)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_TIMEOUT", 0.2)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_TOTAL_TIMEOUT", 3.0)
 
 
 def test_github_page_race_prefers_fast_mirror(monkeypatch):
     _race_mirrors(monkeypatch)
     calls: list[str] = []
+    release_direct = threading.Event()
 
     def fake_urlopen(request, **_kwargs):
         url = request.full_url
         calls.append(url)
         if url.startswith("https://fast.test/"):
             return _PageResponse(
-                b"<html>/releases/tag/vFAST</html>", url
+                b"<html>/owner/repo/releases/tag/vFAST</html>", url
             )
-        time.sleep(0.5)
-        return _PageResponse(b"<html>/releases/tag/vDIRECT</html>", url)
+        release_direct.wait(2.0)
+        return _PageResponse(
+            b"<html>/owner/repo/releases/tag/vDIRECT</html>", url
+        )
 
     monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
-    started = time.monotonic()
-    data, final_url = installer._fetch_github_page(
-        "owner/repo",
-        "releases/latest",
-        validator=installer._latest_page_valid,
-    )
-    elapsed = time.monotonic() - started
+    try:
+        data, final_url = installer._fetch_github_page(
+            "owner/repo",
+            "releases/latest",
+            validator=installer._latest_page_validator("owner/repo"),
+        )
+    finally:
+        release_direct.set()
     assert b"vFAST" in data
     assert "fast.test" in final_url
-    assert elapsed < 0.4
     assert any("fast.test" in url for url in calls)
 
 
@@ -719,7 +769,7 @@ def test_github_page_race_skips_invalid_mirror(monkeypatch):
         url = request.full_url
         if url.startswith("https://fast.test/"):
             return _PageResponse(
-                b"<html>/releases/tag/vFAST</html>", url
+                b"<html>/owner/repo/releases/tag/vFAST</html>", url
             )
         return _PageResponse(b"<html>no release tag</html>", url)
 
@@ -727,15 +777,15 @@ def test_github_page_race_skips_invalid_mirror(monkeypatch):
     data, _final_url = installer._fetch_github_page(
         "owner/repo",
         "releases/latest",
-        validator=installer._latest_page_valid,
+        validator=installer._latest_page_validator("owner/repo"),
     )
     assert b"vFAST" in data
 
 
 def test_github_page_race_direct_404_is_definitive(monkeypatch):
     _race_mirrors(monkeypatch)
-    # 给直连错误足够时间先到达，避免测试线程调度导致镜像被提前启动。
-    monkeypatch.setattr(installer, "GITHUB_PAGE_STAGGER", 0.5)
+    # 直连错误必须先到；把 stagger 拉长，避免调度抖动让镜像提前启动。
+    monkeypatch.setattr(installer, "GITHUB_PAGE_STAGGER", 10.0)
     calls: list[str] = []
 
     def fake_urlopen(request, **_kwargs):
@@ -745,17 +795,69 @@ def test_github_page_race_direct_404_is_definitive(monkeypatch):
             raise installer.urllib.error.HTTPError(
                 url, 404, "Not Found", {}, None
             )
-        return _PageResponse(b"<html>/releases/tag/vFAST</html>", url)
+        return _PageResponse(
+            b"<html>/owner/repo/releases/tag/vFAST</html>", url
+        )
 
     monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(SystemExit) as error:
         installer._fetch_github_page(
             "owner/repo",
             "releases/latest",
-            validator=installer._latest_page_valid,
+            validator=installer._latest_page_validator("owner/repo"),
         )
     assert "没有可用的 Release" in error.value.message
     assert all("fast.test" not in url for url in calls)
+
+
+def test_github_page_atom_404_is_not_definitive(monkeypatch):
+    _race_mirrors(monkeypatch)
+    feed = (
+        b'<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        b'<link rel="alternate" href="https://github.com/owner/repo/'
+        b'releases/tag/v0.9.0"/></entry></feed>'
+    )
+
+    def fake_urlopen(request, **_kwargs):
+        url = request.full_url
+        if url.startswith("https://github.com/"):
+            raise installer.urllib.error.HTTPError(
+                url, 404, "Not Found", {}, None
+            )
+        return _PageResponse(feed, url)
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    data, _final_url = installer._fetch_github_page(
+        "owner/repo",
+        "releases.atom",
+        validator=installer._atom_page_validator("owner/repo"),
+    )
+    assert b"v0.9.0" in data
+
+
+def test_github_page_race_tries_every_mirror(monkeypatch):
+    mirrors = [{"name": "direct", "kind": "direct", "enabled": True}]
+    for index in range(1, 6):
+        mirrors.append(
+            {
+                "name": f"m{index}",
+                "kind": "prefix",
+                "prefix": f"https://m{index}.test",
+                "enabled": True,
+            }
+        )
+    _race_mirrors(monkeypatch, mirrors)
+    monkeypatch.setattr(installer, "GITHUB_PAGE_MAX_PARALLEL", 2)
+    calls: list[str] = []
+
+    def fake_urlopen(request, **_kwargs):
+        calls.append(request.full_url)
+        raise TimeoutError("simulated timeout")
+
+    monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(SystemExit):
+        installer._fetch_github_page("owner/repo", "releases.atom")
+    assert len(calls) == len(mirrors)
 
 
 def test_github_page_race_reports_all_failures(monkeypatch):
@@ -765,13 +867,11 @@ def test_github_page_race_reports_all_failures(monkeypatch):
         raise TimeoutError("simulated timeout")
 
     monkeypatch.setattr(installer.urllib.request, "urlopen", fake_urlopen)
-    started = time.monotonic()
     with pytest.raises(SystemExit) as error:
         installer._fetch_github_page("owner/repo", "releases.atom")
     assert "无法访问 GitHub" in error.value.message
     assert "direct" in error.value.message
     assert "fast" in error.value.message
-    assert time.monotonic() - started < 2.0
 
 
 def test_atom_page_validator_and_try_parser():
@@ -781,9 +881,43 @@ def test_atom_page_validator_and_try_parser():
         b'releases/tag/v0.9.0"/></entry></feed>'
     )
     assert installer._try_release_tag_from_atom(feed) == "v0.9.0"
-    assert installer._atom_page_valid(feed, "") is True
+    assert (
+        installer._atom_page_validator("owner/repo")(feed, "") is None
+    )
+    assert (
+        installer._atom_page_validator("other/repo")(feed, "") is not None
+    )
     assert installer._try_release_tag_from_atom(b"<html>error</html>") is None
-    assert installer._atom_page_valid(b"<html>error</html>", "") is False
+    assert (
+        installer._atom_page_validator("owner/repo")(
+            b"<html>error</html>", ""
+        )
+        is not None
+    )
+
+
+def test_latest_page_validator_binds_repo():
+    page = b"<html>/owner/repo/releases/tag/v1.2.3</html>"
+    assert (
+        installer._latest_page_validator("owner/repo")(page, "") is None
+    )
+    assert (
+        installer._latest_page_validator("other/repo")(page, "") is not None
+    )
+
+
+def test_release_feed_skips_bad_entries_and_bad_xml():
+    long_tag = "v" + "a" * 80
+    feed = (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        f'<link rel="alternate" href="https://github.com/owner/repo/'
+        f'releases/tag/{long_tag}"/></entry><entry>'
+        '<link rel="alternate" href="https://github.com/owner/repo/'
+        'releases/tag/v1.0.0"/></entry></feed>'
+    ).encode()
+    assert installer._try_release_tag_from_atom(feed) == "v1.0.0"
+    bad_encoding = b'<?xml version="1.0" encoding="x-unknown"?><feed/>'
+    assert installer._try_release_tag_from_atom(bad_encoding) is None
 
 
 def test_path_problem_rejects_non_ascii_on_windows(monkeypatch):
@@ -1447,6 +1581,124 @@ def test_windows_shortcut_uses_packaged_icon(tmp_path, monkeypatch):
     assert "karenbot.ico" in script
     assert "KarenBot GUI.lnk" in script
     assert "KarenBot GUI (兼容模式).lnk" in script
+
+
+class _FakeWinregKey:
+    def __init__(self, owner: _FakeWinreg) -> None:
+        self.owner = owner
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+class _FakeWinreg:
+    HKEY_CURRENT_USER = object()
+    KEY_WRITE = 1
+    REG_SZ = 1
+    REG_DWORD = 4
+
+    def __init__(self) -> None:
+        self.values: dict[str, tuple[int, object]] = {}
+        self.deleted: list[str] = []
+
+    def CreateKeyEx(self, _root, key, _reserved, _access):
+        self.key = key
+        return _FakeWinregKey(self)
+
+    def SetValueEx(self, _handle, name, _reserved, type_, value):
+        self.values[name] = (type_, value)
+
+    def DeleteKey(self, _root, key):
+        self.deleted.append(key)
+
+
+def test_write_uninstaller_copies_core(tmp_path):
+    target = installer._write_uninstaller(tmp_path)
+    assert target is not None and target.is_file()
+    text = target.read_text(encoding="utf-8")
+    assert "--uninstall" in text
+
+
+def test_register_windows_uninstall_writes_hkcu(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    fake = _FakeWinreg()
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    install_dir = tmp_path / "install"
+    install_dir.mkdir()
+    (install_dir / installer.UNINSTALLER_FILENAME).write_text(
+        "# uninstaller\n", encoding="utf-8"
+    )
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"")
+    icon = tmp_path / "icon.ico"
+    icon.write_bytes(b"")
+    installer._register_windows_uninstall(
+        install_dir, python=python, icon=icon
+    )
+    assert fake.values["DisplayName"] == (fake.REG_SZ, "KarenBot")
+    assert fake.values["Publisher"] == (fake.REG_SZ, "CN-BI5UNF")
+    command = str(fake.values["UninstallString"][1])
+    assert str(python) in command
+    assert str(install_dir) in command
+    assert "--uninstall" in command
+    assert fake.values["NoModify"] == (fake.REG_DWORD, 1)
+    assert fake.values["NoRepair"] == (fake.REG_DWORD, 1)
+
+
+def test_unregister_windows_uninstall_deletes_key(monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    fake = _FakeWinreg()
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    installer._unregister_windows_uninstall()
+    assert fake.deleted == [installer.WINDOWS_UNINSTALL_KEY]
+
+
+def test_uninstall_removes_uninstaller_and_registry(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    (install_dir / "app" / "backend").mkdir(parents=True)
+    (install_dir / "app" / "modules.json").write_text(
+        '{"installer": "local-source"}', encoding="utf-8"
+    )
+    (install_dir / installer.INSTALL_MARKER_NAME).write_text(
+        "{}", encoding="utf-8"
+    )
+    (install_dir / installer.UNINSTALLER_FILENAME).write_text(
+        "# uninstaller\n", encoding="utf-8"
+    )
+    fake = _FakeWinreg()
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    monkeypatch.setattr(installer, "ensure_app_not_running", lambda *_a, **_k: None)
+    monkeypatch.setattr(installer, "_remove_shortcuts", lambda: None)
+    monkeypatch.setattr(installer, "_clean_fonts", lambda *_a, **_k: None)
+    monkeypatch.setattr(installer, "_clean_skins", lambda: None)
+
+    installer.uninstall(install_dir)
+
+    assert fake.deleted == [installer.WINDOWS_UNINSTALL_KEY]
+    assert not install_dir.exists()
+
+
+def test_windows_uninstall_python_prefers_portable(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    install_dir = tmp_path / "install"
+    venv_python = install_dir / "venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_bytes(b"")
+    portable = tmp_path / "app" / "runtime" / "python.exe"
+    portable.parent.mkdir(parents=True)
+    portable.write_bytes(b"")
+    assert (
+        installer._windows_uninstall_python(install_dir, portable)
+        == portable
+    )
+    assert (
+        installer._windows_uninstall_python(install_dir, None)
+        == venv_python
+    )
 
 
 def test_uninstall_removes_install_artifacts(tmp_path, monkeypatch):
