@@ -16,6 +16,7 @@ import argparse
 import concurrent.futures
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import platform
@@ -4689,6 +4690,107 @@ def interactive_setup() -> dict[str, Any] | None:
         "gui_skin": gui_skin,
         "render_mode": render_mode,
     }
+
+
+def self_test() -> None:
+    """冻结版离线自检：覆盖解压、校验、数据根、启动器与安装标记。"""
+    with tempfile.TemporaryDirectory(prefix="karen-self-test-") as raw:
+        root = Path(raw)
+        payload = b"karen-self-test\n" * 32
+        digest = hashlib.sha256(payload).hexdigest()
+        source_file = root / "payload.txt"
+        source_file.write_bytes(payload)
+        if sha256_file(source_file) != digest:
+            fail("self-test: SHA256 计算异常")
+
+        tar_path = root / "sample.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tar:
+            info = tarfile.TarInfo("nested/payload.txt")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        tar_out = root / "tar-out"
+        extract_archive(tar_path, tar_out)
+        if (tar_out / "nested" / "payload.txt").read_bytes() != payload:
+            fail("self-test: tar.gz 解压异常")
+
+        zip_path = root / "sample.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("nested/payload.txt", payload)
+        zip_out = root / "zip-out"
+        extract_archive(zip_path, zip_out)
+        if (zip_out / "nested" / "payload.txt").read_bytes() != payload:
+            fail("self-test: zip 解压异常")
+
+        if (
+            _probe_payload_problem(
+                "https://example.test/backend.tar.gz",
+                b"\x1f\x8b" + b"x" * 300,
+                "application/octet-stream",
+            )
+            is not None
+        ):
+            fail("self-test: gzip 魔数校验异常")
+        if not _probe_payload_problem(
+            "https://example.test/asset.bin",
+            b'{"code": 429, "msg": "rate limit"}',
+            "application/json",
+        ):
+            fail("self-test: JSON 错误页未被识别")
+
+        feed = (
+            b'<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+            b'<link rel="alternate" href="https://github.com/o/r/'
+            b'releases/tag/v1.2.3"/></entry></feed>'
+        )
+        if _try_release_tag_from_atom(feed) != "v1.2.3":
+            fail("self-test: releases.atom 解析异常")
+
+        if not (
+            mirror_score(100.0, 0.1) > mirror_score(100.0, 1.0)
+            and mirror_score(100.0, 0.1) > 0
+        ):
+            fail("self-test: mirror_score 异常")
+
+        old_tree = root / "old-tree"
+        merged_tree = root / "merged-tree"
+        old_tree.mkdir()
+        (old_tree / "kept.txt").write_text("kept", encoding="utf-8")
+        if _merge_tree_missing(old_tree, merged_tree, strict=True) != 1:
+            fail("self-test: 缺失文件合并异常")
+        if (merged_tree / "kept.txt").read_text(encoding="utf-8") != "kept":
+            fail("self-test: 合并结果异常")
+
+        app_root = root / "app"
+        (app_root / "app_config").mkdir(parents=True)
+        (app_root / "app_config" / "paths.py").write_text(
+            'DATA_ROOT_ENV_VAR = "KAREN_DATA_ROOT"\n', encoding="utf-8"
+        )
+        if not _app_supports_data_root(app_root):
+            fail("self-test: KAREN_DATA_ROOT 能力探测异常")
+        data_root = root / "data"
+        _write_launchers(
+            root,
+            app_root,
+            root / "venv",
+            "gui",
+            data_root=data_root,
+        )
+        launcher = launch_target(root, "gui")
+        if (
+            not launcher.is_file()
+            or DATA_ROOT_ENV
+            not in launcher.read_text(encoding="utf-8")
+        ):
+            fail("self-test: 启动器未写入数据根")
+        _write_install_marker(root, frontend="gui", installer="self-test")
+        marker = read_install_marker(root)
+        if (
+            not _looks_like_karenbot_install(root)
+            or not marker
+            or marker.get("installer") != "self-test"
+        ):
+            fail("self-test: 安装标记异常")
+    log("self-test 通过")
 
 
 def _print_mirrors() -> None:

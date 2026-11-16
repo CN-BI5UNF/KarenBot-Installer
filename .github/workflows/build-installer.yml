@@ -118,6 +118,11 @@ jobs:
           if ($p.ExitCode -ne 0) {
             throw "--check failed with exit code $($p.ExitCode)"
           }
+          $t = Start-Process -FilePath "dist\KarenBot-Installer.exe" `
+            -ArgumentList "--self-test" -Wait -PassThru
+          if ($t.ExitCode -ne 0) {
+            throw "--self-test failed with exit code $($t.ExitCode)"
+          }
 
       - name: Capture Windows installer UI
         shell: pwsh
@@ -382,7 +387,9 @@ jobs:
             dist/KarenBot-Installer --max-mib 60
 
       - name: Smoke check frozen binary
-        run: xvfb-run -a dist/KarenBot-Installer --smoke-test
+        run: |
+          xvfb-run -a dist/KarenBot-Installer --self-test
+          xvfb-run -a dist/KarenBot-Installer --smoke-test
 
       - name: Rename and checksum Linux binary
         run: |

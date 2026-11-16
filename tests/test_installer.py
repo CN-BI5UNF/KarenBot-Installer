@@ -140,6 +140,10 @@ def test_install_fonts_writes_fontconfig(tmp_path, monkeypatch):
     assert (root / "fonts.conf").is_file()
 
 
+def test_self_test_passes():
+    installer.self_test()
+
+
 def test_rank_direct_sources_orders_by_score(monkeypatch):
     def fake_probe(url, _mirror, **_kwargs):
         if url.endswith("bad.otf"):

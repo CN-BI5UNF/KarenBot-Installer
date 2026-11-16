@@ -305,6 +305,21 @@ def test_gui_log_copy_and_save(monkeypatch, tmp_path):
         root.destroy()
 
 
+def test_gui_self_test_entrypoint(monkeypatch):
+    calls: list[bool] = []
+    monkeypatch.setattr(gui_install.core, "self_test", lambda: calls.append(True))
+    assert gui_install.main(["--self-test"]) == 0
+    assert calls == [True]
+
+
+def test_gui_self_test_entrypoint_failure(monkeypatch):
+    def _boom() -> None:
+        raise RuntimeError("self-test boom")
+
+    monkeypatch.setattr(gui_install.core, "self_test", _boom)
+    assert gui_install.main(["--self-test"]) == 1
+
+
 def test_gui_progress_dialog_is_non_modal(monkeypatch, tmp_path):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
     try:

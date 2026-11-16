@@ -1624,6 +1624,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--smoke-test", action="store_true", help="打开窗口后自动退出（CI）"
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="离线自检解压/校验/启动器（冻结版 CI）",
+    )
     return parser.parse_args(argv)
 
 
@@ -1651,6 +1656,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0 if _TK_ERROR is None else 2
+    if args.self_test:
+        try:
+            core.self_test()
+        except BaseException:  # noqa: BLE001 - 自检失败要打印完整原因
+            _print_console(traceback.format_exc())
+            return 1
+        _print_console("self-test ok")
+        return 0
     if _TK_ERROR is not None:
         _print_console(
             "缺少 Tkinter。Linux 请安装 python3-tk；"

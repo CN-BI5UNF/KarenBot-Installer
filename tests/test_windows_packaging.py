@@ -166,6 +166,10 @@ def test_spec_trims_tcl_data_and_embeds_icon():
     assert "icon=" in spec
     assert "sqlite3" in spec
     assert "pydoc" in spec
+    assert "_tk_data/images" in spec
+    assert '"inspect"' in spec
+    assert '"statistics"' in spec
+    assert '"pickle"' not in spec  # concurrent.futures 依赖，不能排除
 
 
 def test_windows_bundle_ships_shortcut_icon():
