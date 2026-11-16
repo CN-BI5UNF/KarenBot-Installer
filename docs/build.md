@@ -24,7 +24,7 @@ PyInstaller 版本，打包后用 `scripts/check_artifact_size.py` 强制检查
 - `FileVersionInfo` 是否写入；
 - 嵌入清单是否启用 PerMonitorV2 DPI 感知和 longPathAware；
 - 文件大小是否异常；
-- `--check` 退出码；
+- `--check` / `--self-test` 退出码；
 - SHA256。
 
 `build-windows-bundle` 下载 gvsbuild GTK4 2026.8.0 和 python-build-standalone
@@ -57,8 +57,13 @@ GUI flow 测试需要显示环境：
 
 ```bash
 xvfb-run -a python -m pytest tests/test_installer_gui_flow.py -q
+xvfb-run -a python gui_install.py --self-test
 xvfb-run -a python gui_install.py --smoke-test
 ```
+
+`--self-test` 不联网，覆盖 tar.gz/zip 解压、SHA256、首包魔数、atom 解析、
+缺失文件合并、数据根探测、启动器/安装标记和卸载脚本复制；冻结版 CI 会
+实际运行它，用来兜住 PyInstaller excludes 误删依赖（例如 quopri）。
 
 ## 版本
 

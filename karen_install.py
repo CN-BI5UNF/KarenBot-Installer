@@ -3980,6 +3980,8 @@ def _write_uninstaller(install_dir: Path) -> Path | None:
         return None
     target = install_dir / UNINSTALLER_FILENAME
     try:
+        if target.exists():
+            target.chmod(target.stat().st_mode | stat.S_IWRITE)
         shutil.copy2(source, target)
     except OSError as exc:
         log(f"写入卸载脚本失败（可忽略）：{target}：{exc}")
