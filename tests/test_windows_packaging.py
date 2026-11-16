@@ -28,7 +28,8 @@ def test_spec_bundles_contract_and_windows_version_info():
     assert "mirrors.json" in spec
     assert "windows-gui-package.json" in spec
     assert "windows-version-info.txt" in spec
-    assert 'hiddenimports=["karen_install"]' in spec
+    assert "hiddenimports" in spec
+    assert '"karen_install"' in spec
     assert 'console=not sys.platform.startswith("win")' in spec
 
 
@@ -166,6 +167,11 @@ def test_spec_trims_tcl_data_and_embeds_icon():
     assert "icon=" in spec
     assert "sqlite3" in spec
     assert "pydoc" in spec
+    assert "_tk_data/images" in spec
+    assert '"inspect"' in spec
+    assert '"statistics"' in spec
+    assert '"pickle"' not in spec  # concurrent.futures 依赖，不能排除
+    assert '"winreg"' in spec
 
 
 def test_windows_bundle_ships_shortcut_icon():

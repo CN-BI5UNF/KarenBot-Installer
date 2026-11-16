@@ -237,6 +237,8 @@ class DemoDriver:
         self.app.create_shortcut.set(False)
         self.app.install_dir.set(str(self.install_dir))
         self.app._update_source_state()
+        if not self.app._advanced_open:
+            self.app._toggle_advanced()
         self.app._update_appearance_state()
         self.root.after(600, self._after_config_updated)
 

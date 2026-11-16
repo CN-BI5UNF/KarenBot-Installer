@@ -123,8 +123,8 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 
 **处理**：
 
-- `launch-gui.cmd` 优先使用同目录的 `pythonw.exe`，并用 `start "" /B`
-  让 cmd 立即退出；
+- `launch-gui.cmd` 优先使用同目录的 `pythonw.exe`，用 `start ""` 启动后
+  立即 `exit /b 0`，不保留 cmd 控制台；
 - `launch-gui-safe.cmd` 继续使用 `python.exe`，崩溃时 `pause`，方便查看
   报错；
 - 快捷方式优先使用预构建 exe 的图标，否则使用便携包里的
@@ -178,10 +178,13 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 **处理**：探测时校验 HTTP 状态码、`Content-Type`、文件魔数（gzip/zip/exe/
 字体等）和错误文本；`.tar.gz` 必须是 gzip 魔数，`.zip/.whl` 必须是 `PK`。
 
-## 17. 下载到 90% 断线后从头开始
+## 17. 下载到 90% 断线后从头开始 / 跨镜像拼接
 
-**处理**：失败/取消时保留 `.part`；下一次尝试发送 `Range: bytes=<已有>-`，
-服务端返回 206 时追加写入，返回 200 时覆盖重下；最终仍以 SHA256 校验。
+**处理**：失败/取消时保留 `.part` 和 `.origin`（来源 URL）；下一次只有同一
+镜像 URL 且资产带 SHA256 时才发送 `Range: bytes=<已有>-`。旧版没有来源标记
+的临时文件仅在带 SHA256 时允许续传，由最终校验兜底；切换镜像、来源不一致
+或没有哈希时重新下载，避免把镜像 A 的前半截与镜像 B 的后半截拼在一起。
+服务端返回 200 时覆盖重下；最终仍以 SHA256 校验。
 
 ## 18. 无哈希源码包静默走第三方镜像
 
@@ -189,6 +192,8 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 GUI 首次在线安装会弹窗让用户选择“允许镜像加速 / 仅直连 / 取消”，CLI 可用
 `--allow-unverified` 或 `KAREN_ALLOW_UNVERIFIED=1` 放行，也可用
 `KAREN_BACKEND_SHA256` / `KAREN_GUI_SHA256` / `KAREN_WEBUI_SHA256` 提供哈希。
+GUI 在“GitHub 镜像”已固定为 `direct` 时不再弹窗；选择结果通过显式参数
+传给核心，不再改写 `os.environ`，避免同进程后续安装被上一次选择污染。
 
 ## 19. 安装完成前关闭窗口导致旧版本不回滚
 
@@ -202,4 +207,95 @@ GUI 首次在线安装会弹窗让用户选择“允许镜像加速 / 仅直连 
 
 **处理**：进程占用检测改用 Toolhelp32 快照（ctypes），快捷方式清理直接
 删除 `.lnk`，不再为这两件事启动 PowerShell；创建快捷方式合并为一次
-PowerShell 调用，并移除了 `-ExecutionPolicy Bypass`。
+PowerShell 调用，并移除了 `-ExecutionPolicy Bypass`。同时移除“完成后删除
+安装器”功能，安装器始终保留，避免 `cmd /c for /L ... del` 自毁批处理触发
+杀软启发式拦截。
+
+## 21. 覆盖安装清空 `app/data`
+
+**现象**：升级时把旧 `app/` 改名为 `app.old`，新版本替换进去后直接删除
+`app.old`，用户配置、聊天库、工作区一起丢失。
+
+**处理**：新版 backend 支持 `KAREN_DATA_ROOT` 时，启动器把数据固定在
+`<安装目录>/data/instances/default`，升级只替换 `app/`；旧版 `app/data`
+会迁移过去。backend 不支持时回退到把旧数据迁移进新 `app/data`。迁移失败
+会随安装回滚，不会留下“新程序 + 旧数据”的半残状态。自定义人格/资源目录
+也会按“只补缺失文件”的方式保留。上次失败升级残留的 `app.old` 会先合并
+其中的 `data/`、`.env` 和自定义人格；如果只剩 `app.old`，会先恢复成当前
+`app` 再升级，不再直接删除。
+
+## 22. 镜像 HTTP 200 + JSON 限流页被当成源码包
+
+**现象**：测速成功后正式下载触发限流，镜像返回 HTTP 200 + `{"code":429}`；
+没有 SHA256 的源码包被当成下载成功，直到解压才报错。
+
+**处理**：正式下载的首个数据块（非续传）复用测速的 `_probe_payload_problem`
+校验文件魔数、`Content-Type` 和错误文本；发现 JSON/HTML/纯文本错误页立即
+换下一个镜像。下载场景不再用“首块不足 256 字节”判错，避免 TCP 分片误伤。
+
+## 23. 卸载弹窗写着“正在安装”/“查看日志”被弹窗遮挡
+
+**处理**：进度弹窗的标题、粗体标题、说明和取消按钮文本参数化；卸载时显示
+“正在卸载 KarenBot / 取消卸载”。点击“查看日志”会关闭 transient 进度弹窗，
+主窗口底部仍有进度条和状态行，不再被永远置顶的弹窗挡住。卸载线程也会
+接收取消事件。
+
+## 24. 点击“开始安装”后卡在“在线安装：解析 Release 版本…”
+
+**现象**：国内直连 GitHub 超时，`_fetch_github_page` 按静态镜像顺序串行
+请求；每个镜像最多等 20 秒，backend/frontend 各查 latest + atom，用户
+可能在开始安装后 30–45 秒才看到测速阶段。
+
+**处理**：Release 页面/feed 改为并发竞速：先请求 direct，1.5 秒无响应
+立即并发启动后续镜像，首个通过校验的响应胜出；其余请求是 daemon 线程，
+不会阻塞安装器退出。单请求 5 秒、总预算 25 秒，15 个镜像都能被尝试；
+直连在 `releases/latest` 上返回 404 时视为“没有稳定版”的权威结论，直接
+回退 `releases.atom`（atom 的 404 仍会尝试镜像），并给已启动镜像 0.5 秒
+收尾窗口。校验器返回具体内容原因，不再把坏 feed 误报成纯网络错误。
+
+## 25. 字体下载在失效源上逐个等待超时
+
+**现象**：Noto 字体有 5 个候选源（raw.githubusercontent.com、jsdelivr、
+gitmirror 等），原实现按静态顺序串行尝试；前两个源慢时，每个字体都要
+经历多次 30 秒下载超时。
+
+**处理**：先对候选源并发探测前 256KB，按吞吐/延迟评分排序，再从最优源
+下载；第一个可用源出现后最多再等 0.5 秒收集其他快源，不再为慢源/死源
+阻塞；探测失败的源仍保留在末尾作为兜底。探测过程响应取消事件。字体下载
+最终仍用内置 SHA256 校验，失败不会阻塞安装。
+
+## 26. 删除安装器后找不到卸载入口
+
+**现象**：用户下载安装器到临时目录，安装完成后删除或移动了原始 exe；
+Windows“设置 → 应用”里也搜不到 KarenBot，只能手动删除安装目录，残留
+快捷方式、字体和 `%APPDATA%\karen-gui` 偏好。
+
+**处理**：安装时把冻结安装器 exe（源码运行时为 `karen_install.py` +
+系统 Python）复制到 `%LOCALAPPDATA%\KarenBot\Uninstall`，并在 HKCU 写入
+`Uninstall\KarenBot` 项（DisplayName/DisplayVersion/Publisher/DisplayIcon/
+InstallLocation/UninstallString/NoModify/NoRepair）。卸载进程在安装目录
+之外运行，因此能删除 `app/runtime/python.exe`、`venv` 等正在被安装目录内
+Python 占用的文件；不需要管理员权限，也不依赖原始安装器 exe。卸载结束后
+删除注册表项；卸载器副本因正在运行可能保留，可稍后手动删除。
+源码运行时如果找不到安装器核心脚本，则跳过注册表写入并记录日志，不影响
+安装本身。冻结安装器 exe 的 GUI 入口也支持
+`--uninstall --dir ... --non-interactive`，因此复制的 exe 可以直接作为
+卸载器使用。
+
+## 27. 小屏笔记本/高 DPI 下窗口占满首屏
+
+**现象**：默认 900×720、最小 820×620 的窗口在 1366×768 或 1080p 150%
+缩放下几乎占满垂直空间，镜像/字体/外观选项把“开始安装”挤出首屏。
+
+**处理**：镜像、字体、外观和渲染选项默认收进“高级设置（镜像 / 字体 /
+外观）”，点击展开；默认窗口高度改为 560~640（按屏幕高度 72%），最小
+800×540。配置页本身可滚动，展开高级设置后仍可滚动到“开始安装”。
+
+## 28. Windows 快捷方式仍指向 launch-gui.cmd
+
+**说明**：当前 `.lnk` 的目标是 `launch-gui.cmd`，由它设置 `KAREN_DATA_ROOT`、
+`FONTCONFIG_FILE` 和 GTK/GSettings 便携环境后启动 `pythonw.exe`。把快捷方式
+直接指向 `runtime\pythonw.exe -m gui` 可以消除 cmd 壳并支持固定到任务栏，
+但需要 GUI 自己在 `__main__` 里加载同样的便携环境；这属于 GUI 仓库改造，
+安装器本轮不做，避免缺少环境变量导致 GTK 启动失败。双击 `.cmd` 的黑框已由
+`start ""` + `exit /b 0` 消除。

@@ -5,12 +5,18 @@ Windows 使用 windowed 子系统（无黑框），并写入文件版本信息�
 console，方便 `--check` / `--smoke-test` 和终端启动时看到错误。
 
 体积优化：剔除安装器不使用的 decimal/unicodedata/unittest/pdb、pydoc/
-doctest/xmlrpc/bdb/sqlite3 等标准库，以及 Tcl 的时区库、tcltest 和无关的
-消息表。安装器只使用 Tkinter 基础控件，这些数据对功能没有影响，但会拖慢
-单文件冷启动解压。
+doctest/xmlrpc/bdb/sqlite3、inspect/ast/dis、statistics/fractions、FTP/
+getopt 等标准库，以及 Tcl 的时区库、tcltest 和 Tk 演示图片。安装器只使用
+Tkinter 基础控件，这些数据对功能没有影响，但会拖慢单文件冷启动解压。
+冻结版通过 `--self-test` 覆盖解压/校验/启动器路径，CI 会实际运行。
 
-Tcl 的 encoding 表全部保留：Windows 的 ANSI 代码页因系统区域设置而异，
-删掉非中文编码会让部分语言的系统上 Tk 初始化失败。
+刻意保留：pickle（concurrent.futures → multiprocessing 依赖）、
+calendar（urllib → email → _parseaddr 依赖）、gzip/bz2/lzma（tarfile
+依赖）以及 Tcl 的全部 encoding 表。Windows 的 ANSI 代码页因系统区域设置
+而异，删掉非中文编码会让部分语言的系统上 Tk 初始化失败。
+
+winreg 只在 Windows 构建时加入 hiddenimports；Windows 卸载入口由冻结
+安装器把自身复制到 `%LOCALAPPDATA%/KarenBot/Uninstall`，不依赖 DATAS。
 """
 
 import sys
@@ -33,7 +39,11 @@ a = Analysis(
     pathex=[str(INSTALLER_DIR)],
     binaries=[],
     datas=DATAS,
-    hiddenimports=["karen_install"],
+    hiddenimports=(
+        ["karen_install", "winreg"]
+        if sys.platform.startswith("win")
+        else ["karen_install"]
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -58,6 +68,15 @@ a = Analysis(
         "_sqlite3",
         "_wmi",
         "_decimal",
+        "inspect",
+        "ast",
+        "dis",
+        "statistics",
+        "fractions",
+        "ftplib",
+        "netrc",
+        "tracemalloc",
+        "getopt",
     ],
     noarchive=False,
 )
@@ -68,6 +87,9 @@ def _keep_tcl_data(entry: tuple[str, str, str]) -> bool:
     dest, src = entry[0], entry[1]
     text = f"{dest}/{src}".replace("\\", "/").lower()
     if "/tzdata/" in text or "/tcltest/" in text:
+        return False
+    if "/_tk_data/images/" in text:
+        # Tk 演示/旧对话框图片，安装器只使用 ttk 控件和原生对话框。
         return False
     if "/_tcl_data/msgs/" in text:
         name = text.rsplit("/", 1)[-1]

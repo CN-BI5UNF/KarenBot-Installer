@@ -10,7 +10,7 @@ Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自
 Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装。
 
 仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
-`v1.0.1-dev`，安装器版本 `1.0.1-dev`）
+`v1.0.0-rc`，安装器版本 `1.0.0-rc`）
 
 ## 快速开始
 
@@ -21,9 +21,9 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 `install.sh` 后再执行：
 
 ```bash
-sha=cda3b6a
-want=a801720ffcf99ba7823abae159b3a3decbbe3cfb859d9168dfe11cc3c96ad5d0
-core=6c619eced711e40c344b96bf1f3a515b0517f705dbeb6dfb1ea73452e8596f23
+sha=v1.0.0-rc
+want=2358b7ea0e1e8bcf421db5c4d93d370b421170839a8ff78c9d456c8e97558b57
+core=7e75c314d4174e27d06c3761138da95661ffb228627b2e94ace9c546f68ba9dd
 KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
   ok=0
   for u in \
@@ -51,7 +51,7 @@ KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
 )
 ```
 
-上面的命令把 bootstrap 和安装核心都固定在 commit `cda3b6a`，并分别用
+上面的命令把 bootstrap 和安装核心都固定在 tag `v1.0.0-rc`，并分别用
 SHA256 校验脚本和 `karen_install.py`；这样即使使用第三方镜像，也不会执行
 被替换的旧脚本。想跟随 `main` 最新代码时，去掉 `KAREN_INSTALLER_REF` 和
 `KAREN_INSTALLER_SHA256` 即可。
@@ -113,7 +113,9 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 1. **镜像测速自动选择**：`mirrors.json` 内置 GitHub 直连和多个公共镜像；
    并发探测资产前 256KB，按吞吐 + 首字节延迟评分，自动选最快且低延迟的
    方案；下载失败自动换下一个镜像。同一次安装内复用测速结果（5 分钟
-   窗口），不会为每个资产重复测速。
+   窗口），不会为每个资产重复测速。Release 页面/feed 解析也采用并发竞速：
+   先请求直连，1.5 秒无响应就并发启动镜像，首个有效响应立即胜出；直连
+   404 视为权威结论直接回退 `releases.atom`，不再串行等待所有镜像。
 2. **在线 Release 安装**：Linux 下载 backend 核心包 + GUI/WebUI 源码模块；
    Windows 原生 GUI 下载 `KarenBot-Windows-x64.zip` 便携包。
 3. **内置人格补齐**：backend 仓库的 `personas/` 只有空壳；Windows 便携包
@@ -126,30 +128,48 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
    资产；选择不使用时会明确提醒 Windows 观感问题需要自行解决。
 6. **字体自动拉取**：安装时下载 GUI 实际使用的 Noto Sans SC / Noto Serif SC
    可变字体，写到 GUI 读取的位置，并生成只追加该目录的 `fonts.conf`；
-   不把字体打进安装器。
+   不把字体打进安装器。字体候选源（raw.githubusercontent.com、jsdelivr
+   等）会先并发探测前 256KB，按评分排序后再下载，避免在失效源上逐个
+   等待超时；最终仍用内置 SHA256 校验。
 7. **渲染回退**：启动入口在 GTK 初始化前设置渲染环境；GUI 自带的
    `gui.launcher` 还会按 stage 自动回退到 Cairo 软件渲染。另提供
    `launch-gui-safe` / “KarenBot GUI (兼容模式)”入口。
-8. **快捷方式与自删除**：Linux `.desktop`，Windows 一次 PowerShell 调用
-   创建全部开始菜单/桌面快捷方式；进程检测和快捷方式清理改用 ctypes /
-   直接删除，不再额外拉起 PowerShell。便携包没有 exe 时使用内置
-   `karenbot.ico`。打包版安装器默认保留自身；启用自删除后会在退出后重试
-   删除，避免被占用时静默失败。
+8. **快捷方式**：Linux `.desktop`，Windows 一次 PowerShell 调用创建全部
+   开始菜单/桌面快捷方式；进程检测和快捷方式清理改用 ctypes / 直接删除，
+   不再额外拉起 PowerShell。便携包没有 exe 时使用内置 `karenbot.ico`。
+   安装器完成安装后始终保留，方便后续修复或卸载。
 9. **可取消与实时日志**：下载、解压、`venv`/`pip` 子进程都会响应“取消”；
    `pip` 输出实时转发到“安装日志”页，失败时能看到真实报错。
 10. **安装前预检**：检查目录可写、磁盘余量（GUI 约 1.2 GB / WebUI 约
     400 MB）以及旧版 KarenBot 是否仍在运行，避免升级到最后一步才因文件
     占用失败。
 11. **卸载**：CLI `--uninstall` 或 GUI “卸载…” 按钮会清理程序目录、
-    启动器、快捷方式、字体和主题偏好，但只对带安装标记的目录生效。
+    启动器、快捷方式、字体、主题偏好和运行数据目录，但只对带安装标记的
+    目录生效。
 12. **残损环境自愈**：被取消/杀软中断后留下的半残 `venv` 会在下次安装时
     自动检测并重建，不需要手工删除。
-13. **断点续传**：下载中断时保留 `.part`，同一目标换镜像或再次下载会发
-    `Range` 请求续传；最终仍用 SHA256 校验完整性。
+13. **断点续传**：带 SHA256 的资产中断后保留 `.part` 和来源标记；只有同一
+    镜像 URL 才发送 `Range` 续传，切换镜像或缺少哈希时重新下载，避免跨源
+    字节拼接。旧版没有来源标记的临时文件只在带 SHA256 时允许续传，最终
+    校验兜底。
 14. **日志与诊断**：安装日志实时落盘到 `%TEMP%\karenbot-install.log`，
     GUI 提供“复制日志 / 保存日志 / 查看日志”；进度窗不再阻塞主窗口。
 15. **已有安装可直接管理**：启动安装器时如果目标目录已安装，会直接启用
     “打开安装目录 / 启动 / 兼容模式启动”，不需要先重装一次。
+16. **程序与数据分离**：新版 backend 支持 `KAREN_DATA_ROOT`；启动器把运行
+    数据固定在 `<安装目录>/data/instances/default`，升级只替换 `app/`，
+    不会碰用户配置、聊天库、工作区或自定义人格。旧版 `app/data` 会在
+    升级时自动迁移；backend 不支持该变量时回退到 `app/data` 迁移。
+17. **Windows 卸载入口**：安装时把冻结安装器 exe（源码运行时为安装器核心
+    脚本 + 系统 Python）复制到 `%LOCALAPPDATA%\KarenBot\Uninstall`，并在
+    `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\KarenBot`
+    写入免管理员权限的卸载项。卸载进程在安装目录之外运行，因此能删除
+    安装目录内的 `app/`、`venv/` 和运行数据；即使原始安装器 exe 已删除，
+    用户仍可在 Windows“设置 → 应用”中直接卸载。卸载流程会清理注册表项；
+    卸载器副本因正在运行可能保留，可稍后手动删除。冻结安装器 exe 也支持
+    `--uninstall --dir <安装目录> --non-interactive`，便于脚本化卸载。
+18. **小屏友好**：镜像/字体/外观等选项默认收进“高级设置”，默认窗口高度
+    降到 560~640；1366×768 或 1080p 150% 缩放下打开即可看到“开始安装”。
 
 ## 已知问题处理
 
@@ -195,8 +215,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `--require-verified` | 严格模式：任何未校验的可执行/源码资产都中止 |
 | `--windows-gui-asset URL` | 覆盖 Windows GUI 预构建包 URL（本地路径或测试镜像） |
 | `--bundle-tag <tag>` | Windows GUI 便携包所在的安装器 Release tag；默认 `auto` |
-| `--uninstall` | 卸载 `--dir` 指向的 KarenBot，并清理快捷方式/字体/主题偏好 |
-| `--self-delete` / `--keep-installer` | 安装后删除/保留安装器自身 |
+| `--uninstall` | 卸载 `--dir` 指向的 KarenBot，并清理快捷方式/字体/主题偏好/运行数据 |
 | `--probe-url` | 只对镜像做测速并退出 |
 | `--list-mirrors` | 列出内置镜像后退出 |
 | `--dry-run` | 打印最终配置，不执行安装 |
@@ -205,7 +224,8 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 
 `mirrors.json` 维护 GitHub 直连和公共前缀镜像。测速并发请求实际资产的前
 256KB，按吞吐和首字节延迟评分；下载失败自动换下一个镜像。Release 元数据
-（`releases/latest` / `releases.atom`）也走 direct → 镜像回退。
+（`releases/latest` / `releases.atom`）先直连，超过 1.5 秒再并发启动镜像；
+直连 404 视为没有稳定版/Release，直接回退 atom。
 
 第三方镜像能看到下载请求，也可能篡改内容。安装器对可执行资产执行以下策略：
 
@@ -313,10 +333,14 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
   提供的清单不用于可执行资产；
 - Windows GUI 便携包缺少可信 SHA256 时中止，除非显式设置
   `KAREN_ALLOW_UNVERIFIED=1`；
-- Windows 默认 per-user 安装，不触发 UAC；
-- 安装器只替换 `<install>/app`，不删除用户数据目录；升级失败会自动把
-  `app.old` 换回 `app/`；覆盖安装前会检测被占用的 exe/dll；
-- 自删除只在打包版且启用 `--self-delete`/GUI 勾选时执行；源码运行默认保留；
+- Windows 默认 per-user 安装，不触发 UAC；卸载项写入 HKCU
+  `...\Uninstall\KarenBot`，卸载完成后删除；
+- 安装器只替换 `<install>/app`；新版 backend 的运行数据固定在
+  `<install>/data/instances/default`，升级不会删除；旧版 `app/data` 会在
+  升级时迁移。升级失败会自动把 `app.old` 换回 `app/`；覆盖安装前会检测
+  被占用的 exe/dll；
+- 安装器完成安装后始终保留，不再提供自删除（降低杀软启发式误报，也方便
+  用户再次运行修复/卸载）；
 - Windows GUI 预构建包按 DLL/typelib 契约检查，缺运行时直接报错；
 - 卸载只对带 `.karen-installer.json`（或 `app/modules.json` installer 字段）
   的目录生效，避免误删用户指定目录。

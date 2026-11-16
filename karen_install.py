@@ -16,6 +16,7 @@ import argparse
 import concurrent.futures
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import platform
@@ -69,17 +70,47 @@ def _resource_path(name: str) -> Path:
 
 MIRRORS_FILE = _resource_path("mirrors.json")
 WINDOWS_PACKAGE_FILE = _resource_path("windows-gui-package.json")
-INSTALLER_VERSION = "1.0.1-dev"
+INSTALLER_VERSION = "1.0.0-rc"
 USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 # 仅探测 256KB：既够区分镜像吞吐，又能缩短公共镜像的流量/长尾耗时。
 PROBE_BYTES = 256 * 1024
 PROBE_TIMEOUT = 8.0
 PROBE_WORKERS = 16
+DIRECT_SOURCE_PROBE_WORKERS = 5
+DIRECT_SOURCE_GOOD_GRACE = 0.5
 DOWNLOAD_TIMEOUT = 30
 DOWNLOAD_CHUNK = 256 * 1024
+# GitHub Release 页面/feed 的并发竞速：先试直连，1.5 秒无响应就并发
+# 启动镜像；首个有效响应立即胜出。单请求 5 秒、总预算 25 秒，确保 15 个
+# 镜像在总预算内都能被尝试，而不是串行等待。
+GITHUB_PAGE_TIMEOUT = 5.0
+GITHUB_PAGE_STAGGER = 1.5
+GITHUB_PAGE_MAX_PARALLEL = 4
+GITHUB_PAGE_TOTAL_TIMEOUT = 25.0
+# 直连 404 后给已启动的镜像一个很短的窗口，避免同一时刻到达的有效响应
+# 被“无稳定版”的结论抢先丢弃。
+GITHUB_PAGE_DEFINITIVE_GRACE = 0.5
+FONT_PROBE_TIMEOUT = 5.0
 # 同一次安装内复用镜像排序结果的窗口期；避免每个资产都重测 15 个镜像。
 RANK_CACHE_TTL = 300.0
 UNVERIFIED_ENV = "KAREN_ALLOW_UNVERIFIED"
+# 新版 backend 的 AppPaths 支持该变量；启动器把运行数据固定在安装目录下，
+# 避免升级替换 app/ 时连带删除用户数据。
+DATA_ROOT_ENV = "KAREN_DATA_ROOT"
+LAUNCHER_FILENAMES: tuple[str, ...] = (
+    "launch-gui.cmd",
+    "launch-gui-safe.cmd",
+    "launch-webui.cmd",
+    "launch-gui.sh",
+    "launch-gui-safe.sh",
+    "launch-webui.sh",
+)
+UNINSTALLER_FILENAME = "karenbot-uninstall.py"
+WINDOWS_UNINSTALL_DIRNAME = "Uninstall"
+WINDOWS_UNINSTALL_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\KarenBot"
+)
+WINDOWS_PUBLISHER = "CN-BI5UNF"
 # 安装目录峰值空间预检（在线安装/下载解压需要额外余量）。
 DISK_REQUIREMENTS = {
     "gui": 1200 * 1024 * 1024,
@@ -739,6 +770,7 @@ def _first_locked_file(root: Path) -> Path | None:
     """
     if not IS_WINDOWS or not root.is_dir():
         return None
+    self_path = os.path.normcase(os.path.abspath(sys.executable))
     candidates: list[Path] = [
         root / "runtime" / "python.exe",
         root / "runtime" / "pythonw.exe",
@@ -755,6 +787,10 @@ def _first_locked_file(root: Path) -> Path | None:
     seen: set[str] = set()
     for path in candidates:
         if not path.is_file():
+            continue
+        if os.path.normcase(os.path.abspath(str(path))) == self_path:
+            # 从安装目录内的 python.exe 运行卸载脚本时，不能把自己的
+            # 解释器误判为“被占用”。
             continue
         key = str(path).casefold()
         if key in seen:
@@ -1079,8 +1115,12 @@ def _request(
 
 
 def mirror_score(speed: float, latency: float) -> float:
-    """吞吐为主，首字节延迟作为惩罚项；避免只看速度选到高延迟镜像。"""
-    return max(float(speed), 0.0) / (1.0 + max(float(latency), 0.0))
+    """吞吐为主，首字节延迟作为惩罚项；避免只看速度选到高延迟镜像。
+
+    0.15 秒基准阻尼既避免极小延迟把分母压到接近 0、放大偶发抖动，又能让
+    80ms 与 800ms 的节点产生足够的评分差异。
+    """
+    return max(float(speed), 0.0) / (max(float(latency), 0.02) + 0.15)
 
 
 _BINARY_MAGIC: dict[str, tuple[bytes, ...]] = {
@@ -1108,9 +1148,17 @@ _TEXT_CONTENT_TYPES = (
 
 
 def _probe_payload_problem(
-    url: str, data: bytes, content_type: str
+    url: str,
+    data: bytes,
+    content_type: str,
+    *,
+    check_min_length: bool = True,
 ) -> str | None:
-    """识别“HTTP 200 但正文是错误页/限流文本”的镜像响应。"""
+    """识别“HTTP 200 但正文是错误页/限流文本”的镜像响应。
+
+    ``check_min_length`` 仅供测速探测使用；正式下载的首个数据块可能因 TCP
+    分片小于 256 字节，不能据此判定响应异常。
+    """
     path = urlsplit(url).path.lower()
     binary_suffix = ""
     for suffix in _BINARY_MAGIC:
@@ -1140,7 +1188,7 @@ def _probe_payload_problem(
         ):
             if marker in lowered:
                 return f"镜像返回了错误文本：{marker.decode()}"
-    if len(data) < 256:
+    if check_min_length and len(data) < 256:
         return f"响应过短（{len(data)} 字节）"
     return None
 
@@ -1470,6 +1518,31 @@ class _InvalidDownload(OSError):
     """服务端返回了错误页/错误区间；对应 .part 不能继续续传。"""
 
 
+def _part_origin_path(temp: Path) -> Path:
+    """记录 .part 来自哪个镜像 URL，避免跨源拼接。"""
+    return temp.with_name(temp.name + ".origin")
+
+
+def _read_part_origin(temp: Path) -> str:
+    try:
+        return _part_origin_path(temp).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _write_part_origin(temp: Path, url: str) -> None:
+    try:
+        _part_origin_path(temp).write_text(url + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _discard_part(temp: Path) -> None:
+    """丢弃不完整文件及其来源标记。"""
+    temp.unlink(missing_ok=True)
+    _part_origin_path(temp).unlink(missing_ok=True)
+
+
 def _parse_content_range(value: str) -> tuple[int | None, int | None]:
     match = re.match(
         r"bytes\s+(?:(\d+)-(\d+)|\*)/(\d+|\*)",
@@ -1541,9 +1614,23 @@ def download(
                     and sha256_file(temp).lower() == expected_sha256.lower()
                 ):
                     temp.replace(destination)
+                    _part_origin_path(temp).unlink(missing_ok=True)
                     log(f"下载完成（复用已校验的临时文件）：{destination}")
                     return destination
                 existing = temp.stat().st_size if temp.is_file() else 0
+                part_origin = _read_part_origin(temp) if existing else ""
+                # 只有带 SHA256 的资产才允许续传，且来源必须一致；无哈希的
+                # 动态源码归档可能在上游变化，跨请求拼接会产生损坏包。
+                allow_resume = bool(expected_sha256) and (
+                    not part_origin or part_origin == target
+                )
+                if existing and not allow_resume:
+                    log(
+                        "临时文件缺少可校验来源，放弃续传并重新下载："
+                        f"{temp.name}"
+                    )
+                    _discard_part(temp)
+                    existing = 0
                 log(
                     f"下载 {target}"
                     + (f"（续传 {existing} 字节）" if existing else "")
@@ -1558,11 +1645,17 @@ def download(
                     )
                 except urllib.error.HTTPError as exc:
                     if exc.code == 416 and existing:
-                        temp.unlink(missing_ok=True)
-                        raise _InvalidDownload(
-                            "续传位置无效，已重新开始"
-                        ) from exc
-                    raise
+                        # 临时文件比服务端资产还长（或服务端不认可区间）：
+                        # 丢弃 .part 后在同一镜像从头下载，而不是白白换源。
+                        _discard_part(temp)
+                        existing = 0
+                        log("续传位置无效，已丢弃临时文件并从头下载")
+                        response = urllib.request.urlopen(
+                            _request(target),
+                            timeout=DOWNLOAD_TIMEOUT,
+                        )
+                    else:
+                        raise
                 with response:
                     status = getattr(response, "status", 200) or 200
                     content_range = str(
@@ -1581,8 +1674,13 @@ def download(
                     if not resume:
                         existing = 0
                         mode = "wb"
+                        _write_part_origin(temp, target)
                     else:
                         mode = "ab"
+                        if not part_origin:
+                            # 旧版遗留的 .part 没有来源标记；续传成功后补记，
+                            # 防止下一次切换镜像时误用。
+                            _write_part_origin(temp, target)
                     total = existing
                     expected_total = range_total
                     if expected_total is None:
@@ -1611,13 +1709,19 @@ def download(
                                 break
                             if first_chunk:
                                 first_chunk = False
-                                head = chunk[:512].lstrip().lower()
-                                if head.startswith(
-                                    (b"<!doctype", b"<html")
-                                ):
-                                    raise _InvalidDownload(
-                                        "镜像返回 HTML 错误页"
+                                if not resume:
+                                    content_type = str(
+                                        response.headers.get("Content-Type")
+                                        or ""
                                     )
+                                    problem = _probe_payload_problem(
+                                        target,
+                                        chunk,
+                                        content_type,
+                                        check_min_length=False,
+                                    )
+                                    if problem:
+                                        raise _InvalidDownload(problem)
                             handle.write(chunk)
                             total += len(chunk)
                             _emit_progress(total, expected_total)
@@ -1630,35 +1734,37 @@ def download(
                 if total <= 0:
                     raise _InvalidDownload("下载内容为空")
                 if expected_total is not None and total != expected_total:
-                    # 网络中途断开时保留 .part，换镜像可继续续传。
+                    # 网络中途断开时保留 .part；同一来源且可校验时才续传。
                     raise OSError(
                         f"下载不完整：{total} / {expected_total} 字节"
                     )
                 if expected_sha256:
                     actual = sha256_file(temp)
                     if actual.lower() != expected_sha256.lower():
-                        temp.unlink(missing_ok=True)
+                        _discard_part(temp)
                         errors.append(
                             f"{candidate.get('mirror', '?')}: SHA256 不匹配"
                         )
                         continue
                 temp.replace(destination)
+                _part_origin_path(temp).unlink(missing_ok=True)
                 log(
                     f"下载完成：{destination}"
                     f"（{destination.stat().st_size / 1024 / 1024:.1f} MB）"
                 )
                 return destination
             except InstallCancelled:
-                # 保留 .part：取消后重新安装可以从断点继续。
+                # 保留 .part 与来源：取消后同一镜像可继续断点续传。
                 raise
             except _InvalidDownload as exc:
-                temp.unlink(missing_ok=True)
+                _discard_part(temp)
                 errors.append(
                     f"{candidate.get('mirror', '?')}: "
                     f"{type(exc).__name__}: {exc}"
                 )
             except Exception as exc:  # noqa: BLE001
-                # 超时/连接重置等保留已下载部分，交给下一个镜像续传。
+                # 超时/连接重置等保留已下载部分；切换镜像时由来源校验
+                # 决定是否丢弃，避免不同镜像的字节被拼接。
                 errors.append(
                     f"{candidate.get('mirror', '?')}: {type(exc).__name__}: {exc}"
                 )
@@ -1707,6 +1813,104 @@ def download_from_sources(
             errors.append(f"{source}: {message}")
             log(f"  该来源失败，尝试下一个：{message.splitlines()[0]}")
     fail("所有下载来源都失败：\n" + "\n".join(errors))
+
+
+def _rank_direct_sources(
+    urls: Iterable[str],
+    *,
+    timeout: float = PROBE_TIMEOUT,
+    cancel_event: Any | None = None,
+) -> list[str]:
+    """并发探测多个直链源，按评分排序；失败源保留在末尾。
+
+    字体等资产来自 raw.githubusercontent.com / jsdelivr 等多个独立域名，
+    不是 GitHub 镜像前缀，因此单独探测而不走 rank_mirrors。
+    """
+    _check_cancel(cancel_event)
+    entries = list(
+        dict.fromkeys(str(url).strip() for url in urls if str(url).strip())
+    )
+    if not entries:
+        return []
+
+    def _probe(entry: tuple[int, str]) -> tuple[str, dict[str, Any]]:
+        _check_cancel(cancel_event)
+        index, url = entry
+        return url, probe_mirror(
+            url,
+            {"name": f"source-{index}", "kind": "direct", "enabled": True},
+            timeout=timeout,
+        )
+
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(DIRECT_SOURCE_PROBE_WORKERS, len(entries))
+    )
+    futures = {
+        pool.submit(_probe, entry): entry[1]
+        for entry in enumerate(entries)
+    }
+    pending = set(futures)
+    results_by_url: dict[str, dict[str, Any]] = {}
+    deadline = time.monotonic() + timeout
+    good_seen_at: float | None = None
+    try:
+        while pending:
+            _check_cancel(cancel_event)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=min(remaining, 0.25),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                url = futures[future]
+                try:
+                    _url, result = future.result()
+                except InstallCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    result = {
+                        "ok": False,
+                        "url": url,
+                        "score": 0.0,
+                        "error": str(exc),
+                    }
+                results_by_url[url] = result
+                if result.get("ok") and good_seen_at is None:
+                    good_seen_at = time.monotonic()
+            # 已有一个可用源后最多再等 0.5 秒，收集并发的快源；不再
+            # 为慢源/死源阻塞字体下载。
+            if (
+                good_seen_at is not None
+                and time.monotonic() - good_seen_at
+                >= DIRECT_SOURCE_GOOD_GRACE
+            ):
+                break
+    finally:
+        for future in pending:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+    _check_cancel(cancel_event)
+    good = [
+        (url, result)
+        for url, result in results_by_url.items()
+        if result.get("ok")
+    ]
+    good.sort(
+        key=lambda item: (
+            -float(item[1].get("score") or 0),
+            float(item[1].get("latency") or 999),
+        )
+    )
+    ordered = [url for url, _result in good]
+    seen = set(ordered)
+    for url in entries:
+        if url not in seen:
+            ordered.append(url)
+            seen.add(url)
+    return ordered
 
 
 def _safe_tar_extract(
@@ -2026,9 +2230,18 @@ def _validate_portable_gui(app_root: Path, python: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _validate_online_tag(value: str) -> str:
+_ONLINE_TAG_RE = re.compile(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}")
+
+
+def _valid_online_tag(value: str) -> str | None:
+    """无副作用的 tag 校验；解析候选 feed 时不能调用 fail()。"""
     tag = str(value or "").strip()
-    if not re.fullmatch(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}", tag):
+    return tag if _ONLINE_TAG_RE.fullmatch(tag) else None
+
+
+def _validate_online_tag(value: str) -> str:
+    tag = _valid_online_tag(value)
+    if tag is None:
         fail(f"无效的 Release tag：{value!r}")
     return tag
 
@@ -2037,24 +2250,240 @@ def _online_archive_url(repo: str, tag: str) -> str:
     return ONLINE_ARCHIVE_TEMPLATE.format(repo=repo, tag=tag)
 
 
+def _parse_release_feed(
+    data: bytes, repo: str | None = None
+) -> tuple[str | None, str]:
+    """解析 releases.atom；返回 (tag, 失败原因)。
+
+    跳过格式错误或无效 tag 的条目，继续扫描后续条目，避免第一条坏数据
+    把整个 feed 判死。
+    """
+    try:
+        root = ElementTree.fromstring(data)
+    except (ElementTree.ParseError, LookupError) as exc:
+        return None, f"GitHub Release feed 解析失败：{exc}"
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    last_error = ""
+    for entry in root.findall("atom:entry", ns):
+        link = entry.find("atom:link", ns)
+        href = str(link.attrib.get("href") or "") if link is not None else ""
+        if repo is not None and f"/{repo}/releases/tag/" not in href:
+            continue
+        match = re.search(r"/releases/tag/([0-9A-Za-z._-]+)", href)
+        if not match:
+            continue
+        raw_tag = unquote(match.group(1))
+        tag = _valid_online_tag(raw_tag)
+        if tag is None:
+            last_error = f"无效的 Release tag：{raw_tag!r}"
+            continue
+        return tag, ""
+    return None, last_error or "GitHub Release feed 中没有可用的版本"
+
+
+def _try_release_tag_from_atom(
+    data: bytes, repo: str | None = None
+) -> str | None:
+    return _parse_release_feed(data, repo)[0]
+
+
+def _release_tag_from_atom(
+    data: bytes, repo: str | None = None
+) -> str:
+    """从 GitHub releases.atom 的第一条有效记录取 tag。"""
+    tag, error = _parse_release_feed(data, repo)
+    if tag is None:
+        fail(error)
+    return tag
+
+
+def _latest_page_validator(
+    repo: str,
+) -> Callable[[bytes, str], str | None]:
+    pattern = re.compile(
+        rf"/{re.escape(repo)}/releases/tag/([0-9A-Za-z._-]+)"
+    )
+
+    def _valid(data: bytes, final_url: str) -> str | None:
+        haystack = final_url + "\n" + data.decode("utf-8", "ignore")
+        if pattern.search(haystack) is not None:
+            return None
+        return "响应不是有效的 Release 页面（缺少该仓库的 tag 链接）"
+
+    return _valid
+
+
+def _atom_page_validator(
+    repo: str,
+) -> Callable[[bytes, str], str | None]:
+    def _valid(data: bytes, _final_url: str) -> str | None:
+        tag, error = _parse_release_feed(data, repo)
+        return None if tag is not None else error
+
+    return _valid
+
+
 def _fetch_github_page(
-    repo: str, path: str, *, timeout: float = 20
+    repo: str,
+    path: str,
+    *,
+    timeout: float | None = None,
+    validator: Callable[[bytes, str], str | None] | None = None,
 ) -> tuple[bytes, str]:
-    """按 direct → 镜像顺序抓取 GitHub 页面，返回 (内容, 最终 URL)。"""
+    """并发竞速抓取 GitHub 页面，返回首个有效 (内容, 最终 URL)。
+
+    先请求列表中的第一个镜像（通常是 direct）；超过 stagger 仍无结果时
+    并发启动后续镜像。``validator`` 返回 None 表示有效，返回字符串表示
+    具体原因；首个有效响应立即胜出。其余请求放在 daemon 线程里，不会
+    阻塞安装器退出。
+    """
+    if timeout is None:
+        timeout = GITHUB_PAGE_TIMEOUT
     url = f"https://github.com/{repo}/{path}"
+    mirrors = available_mirrors()
+    if not mirrors:
+        fail("没有可用的 GitHub 镜像。")
+    results: queue.Queue = queue.Queue()
+    stop = threading.Event()
     errors: list[str] = []
-    for mirror in available_mirrors():
+
+    def _worker(mirror: dict[str, Any]) -> None:
+        name = str(mirror.get("name") or "?")
         target = mirrored_url(url, mirror)
         try:
             with urllib.request.urlopen(
                 _request(target), timeout=timeout
             ) as response:
-                data = response.read(2 * 1024 * 1024)
-                return data, response.geturl()
+                final_url = response.geturl()
+                chunks: list[bytes] = []
+                remaining = 2 * 1024 * 1024
+                while remaining > 0:
+                    if stop.is_set():
+                        return
+                    chunk = response.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                data = b"".join(chunks)
+            if stop.is_set():
+                return
+            if not data:
+                results.put(("error", name, b"", "响应为空"))
+                return
+            if validator is not None:
+                problem = validator(data, final_url)
+                if problem:
+                    results.put(("error", name, b"", problem))
+                    return
+            results.put(("ok", name, data, final_url))
+        except urllib.error.HTTPError as exc:
+            # 直连 404 是权威结论（仓库没有该 Release/稳定版），不需要再
+            # 让 15 个镜像逐个重试；交给调用方回退 releases.atom。
+            kind = "definitive" if (
+                path == "releases/latest"
+                and exc.code == 404
+                and mirror.get("kind", "direct") == "direct"
+            ) else "error"
+            if not stop.is_set():
+                results.put((kind, name, b"", f"HTTP {exc.code}"))
         except Exception as exc:  # noqa: BLE001
-            errors.append(
-                f"{mirror.get('name', '?')}: {type(exc).__name__}: {exc}"
+            if not stop.is_set():
+                results.put(
+                    ("error", name, b"", f"{type(exc).__name__}: {exc}")
+                )
+
+    started = 0
+    in_flight = 0
+
+    def _start_next() -> None:
+        nonlocal started, in_flight
+        mirror = mirrors[started]
+        started += 1
+        in_flight += 1
+        threading.Thread(
+            target=_worker,
+            args=(mirror,),
+            daemon=True,
+            name=f"github-page-{mirror.get('name', started)}",
+        ).start()
+
+    now = time.monotonic()
+    next_start = now + GITHUB_PAGE_STAGGER
+    deadline = now + GITHUB_PAGE_TOTAL_TIMEOUT
+    _start_next()
+    while True:
+        now = time.monotonic()
+        while (
+            started < len(mirrors)
+            and in_flight < GITHUB_PAGE_MAX_PARALLEL
+            and (in_flight == 0 or now >= next_start)
+        ):
+            _start_next()
+            next_start = time.monotonic() + GITHUB_PAGE_STAGGER
+            now = time.monotonic()
+        if in_flight == 0 and started >= len(mirrors):
+            break
+        if now >= deadline:
+            break
+        wait = deadline - now
+        if started < len(mirrors) and in_flight < GITHUB_PAGE_MAX_PARALLEL:
+            wait = min(wait, max(0.0, next_start - now))
+        # 轮询一小段时间，尽早发现快速失败并启动下一个镜像。
+        wait = min(max(wait, 0.05), 0.25)
+        try:
+            kind, name, data, detail = results.get(timeout=wait)
+        except queue.Empty:
+            continue
+        in_flight -= 1
+        if kind == "ok":
+            stop.set()
+            if errors:
+                log(
+                    f"GitHub 页面 {repo}/{path}：{len(errors)} 个镜像失败，"
+                    f"使用 {name}"
+                )
+            return data, detail
+        if kind == "definitive":
+            definitive_error = f"{name}: {detail}"
+            grace_deadline = (
+                time.monotonic() + GITHUB_PAGE_DEFINITIVE_GRACE
             )
+            while in_flight > 0 and time.monotonic() < grace_deadline:
+                try:
+                    pending = results.get(
+                        timeout=max(
+                            0.01,
+                            min(0.1, grace_deadline - time.monotonic()),
+                        )
+                    )
+                except queue.Empty:
+                    continue
+                if pending[0] == "ok":
+                    stop.set()
+                    return pending[2], pending[3]
+                in_flight -= 1
+                if pending[0] != "definitive":
+                    errors.append(f"{pending[1]}: {pending[3]}")
+            stop.set()
+            message = f"GitHub 没有可用的 Release：{definitive_error}"
+            if errors:
+                message += "\n" + "\n".join(errors)
+            fail(message)
+        errors.append(f"{name}: {detail}")
+    stop.set()
+    # 截止前可能已经收到成功响应；先排空队列，避免把它误报成超时。
+    while True:
+        try:
+            kind, name, data, detail = results.get_nowait()
+        except queue.Empty:
+            break
+        if kind == "ok":
+            return data, detail
+        if kind == "error":
+            errors.append(f"{name}: {detail}")
+    if not errors:
+        errors.append(f"总超时（{int(GITHUB_PAGE_TOTAL_TIMEOUT)} 秒）")
     fail(
         "无法访问 GitHub：\n"
         + "\n".join(errors)
@@ -2063,36 +2492,26 @@ def _fetch_github_page(
     )
 
 
-def _release_tag_from_atom(data: bytes) -> str:
-    """从 GitHub releases.atom 的第一条记录取 tag。"""
-    try:
-        root = ElementTree.fromstring(data)
-    except ElementTree.ParseError as exc:
-        fail(f"GitHub Release feed 解析失败：{exc}")
-    ns = {"atom": "http://www.w3.org/2005/Atom"}
-    for entry in root.findall("atom:entry", ns):
-        link = entry.find("atom:link", ns)
-        href = str(link.attrib.get("href") or "") if link is not None else ""
-        match = re.search(r"/releases/tag/([0-9A-Za-z._-]+)", href)
-        if match:
-            tag = unquote(match.group(1))
-            return _validate_online_tag(tag)
-    fail("GitHub Release feed 中没有可用的版本")
-
-
 def _latest_release_tag(
     repo: str, *, cancel_event: Any | None = None
 ) -> tuple[str, str]:
     """优先 GitHub 的 latest 稳定版，否则用 releases.atom 的最新版本。
 
-    不使用 GitHub API，避免未登录时的 60 次/小时限流；页面和 feed 都走
-    direct → 镜像回退。
+    不使用 GitHub API，避免未登录时的 60 次/小时限流；页面/feed 先直连，
+    超时后并发竞速镜像；直连 404 直接回退 atom。
     """
     _check_cancel(cancel_event)
     try:
-        data, final_url = _fetch_github_page(repo, "releases/latest")
+        data, final_url = _fetch_github_page(
+            repo,
+            "releases/latest",
+            validator=_latest_page_validator(repo),
+        )
         haystack = final_url + "\n" + data.decode("utf-8", "ignore")
-        match = re.search(r"/releases/tag/([0-9A-Za-z._-]+)", haystack)
+        match = re.search(
+            rf"/{re.escape(repo)}/releases/tag/([0-9A-Za-z._-]+)",
+            haystack,
+        )
         if match:
             tag = _validate_online_tag(unquote(match.group(1)))
             log(f"{repo} 选择版本：{tag}（稳定版）")
@@ -2101,8 +2520,12 @@ def _latest_release_tag(
         message = getattr(exc, "message", str(exc))
         log(f"{repo} 稳定版检查失败，改查 releases.atom：{message.splitlines()[0]}")
     _check_cancel(cancel_event)
-    data, _final_url = _fetch_github_page(repo, "releases.atom")
-    tag = _release_tag_from_atom(data)
+    data, _final_url = _fetch_github_page(
+        repo,
+        "releases.atom",
+        validator=_atom_page_validator(repo),
+    )
+    tag = _release_tag_from_atom(data, repo)
     log(f"{repo} 未找到稳定版，选择最新 Release：{tag}")
     return tag, "最新版"
 
@@ -2315,6 +2738,7 @@ def ensure_personas(
     *,
     cancel_event: Any | None = None,
     bundle_tag: str = "auto",
+    allow_unverified: bool = False,
 ) -> None:
     """补齐 personas/：优先安装器 Release 的小资产，失败再取主仓库源码包。
 
@@ -2324,6 +2748,7 @@ def ensure_personas(
     """
     if has_available_personas(app_root):
         return
+    unverified_allowed = bool(allow_unverified) or _unverified_allowed()
     stage("安装项目自带人格…")
     downloads = staging / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
@@ -2352,7 +2777,7 @@ def ensure_personas(
             expected = checksums.get(PERSONAS_ASSET_NAME, "")
             fallback_expected = _env_sha256("KAREN_PERSONAS_SHA256")
             asset_ok = False
-            force_direct = not expected and not _unverified_allowed()
+            force_direct = not expected and not unverified_allowed
             if checksums and not expected:
                 # 旧 Release 的 SHA256SUMS 里没有这个资产，直接走源码包，
                 # 不再对 15 个镜像逐个探测一个必然 404 的 URL。
@@ -2402,7 +2827,7 @@ def ensure_personas(
                     if (
                         force_direct
                         and not fallback_expected
-                        and not _unverified_allowed()
+                        and not unverified_allowed
                     )
                     else None
                 )
@@ -2434,8 +2859,10 @@ def _prepare_windows_gui_app(
     cancel_event: Any | None,
     bundle_tag: str = "auto",
     windows_gui_asset: str = "",
+    allow_unverified: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """下载安装器 Release 里的 Windows GTK4 便携包。"""
+    unverified_allowed = bool(allow_unverified) or _unverified_allowed()
     asset_name = windows_gui_asset_name()
     override = str(windows_gui_asset or "").strip()
     if not override:
@@ -2472,10 +2899,10 @@ def _prepare_windows_gui_app(
                 "请设置 KAREN_WINDOWS_GUI_SHA256，或从 GitHub 直连获取 "
                 "SHA256SUMS.txt 后重试。"
             )
-        elif _unverified_allowed():
+        elif unverified_allowed:
             log(
                 "警告：Release 未提供可信 SHA256，"
-                f"已按 {UNVERIFIED_ENV}=1 继续下载但无法校验"
+                f"已按 {UNVERIFIED_ENV}=1 或 GUI 确认继续下载但无法校验"
             )
         else:
             fail(
@@ -2578,6 +3005,7 @@ def _prepare_online_app(
     cancel_event: Any | None,
     bundle_tag: str = "auto",
     windows_gui_asset: str = "",
+    allow_unverified: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """下载并合并 backend 核心包与所选界面模块，返回 installer_kind/components。"""
     if frontend not in ONLINE_FRONTEND_REPOS:
@@ -2588,6 +3016,7 @@ def _prepare_online_app(
             cancel_event=cancel_event,
             bundle_tag=bundle_tag,
             windows_gui_asset=windows_gui_asset,
+            allow_unverified=allow_unverified,
         )
     backend_tag, frontend_tag = _resolve_online_tags(
         frontend,
@@ -2601,6 +3030,7 @@ def _prepare_online_app(
     downloads.mkdir(parents=True, exist_ok=True)
     backend_expected = _env_sha256("KAREN_BACKEND_SHA256")
     frontend_expected = _env_sha256(f"KAREN_{frontend.upper()}_SHA256")
+    unverified_allowed = bool(allow_unverified) or _unverified_allowed()
     if _require_verified() and (not backend_expected or not frontend_expected):
         fail(
             "KAREN_REQUIRE_VERIFIED=1：backend/frontend 源码归档缺少 SHA256。\n"
@@ -2610,10 +3040,10 @@ def _prepare_online_app(
     backend_ranked = None
     frontend_ranked = None
     if not backend_expected:
-        if _unverified_allowed():
+        if unverified_allowed:
             log(
                 "警告：backend 源码归档没有发布哈希，已按 "
-                f"{UNVERIFIED_ENV}=1 允许第三方镜像。"
+                f"{UNVERIFIED_ENV}=1 或 GUI 确认允许第三方镜像。"
             )
         else:
             backend_ranked = _direct_ranking(backend_url)
@@ -2623,10 +3053,10 @@ def _prepare_online_app(
                 "KAREN_BACKEND_SHA256。"
             )
     if not frontend_expected:
-        if _unverified_allowed():
+        if unverified_allowed:
             log(
                 f"警告：{frontend} 源码归档没有发布哈希，已按 "
-                f"{UNVERIFIED_ENV}=1 允许第三方镜像。"
+                f"{UNVERIFIED_ENV}=1 或 GUI 确认允许第三方镜像。"
             )
         else:
             frontend_ranked = _direct_ranking(frontend_url)
@@ -2893,8 +3323,13 @@ def install_fonts(
             log(f"字体校验失败，重新下载：{name}")
             target.unlink(missing_ok=True)
         try:
-            download_from_sources(
+            sources = _rank_direct_sources(
                 item["urls"],
+                timeout=FONT_PROBE_TIMEOUT,
+                cancel_event=cancel_event,
+            )
+            download_from_sources(
+                sources,
                 target,
                 expected_sha256=expected,
                 cancel_event=cancel_event,
@@ -3018,7 +3453,8 @@ def _linux_launcher(
     for key, value in env.items():
         if key == "PATH":
             lines.append(f'export PATH={shlex.quote(value)}:"$PATH"')
-        elif safe:
+        elif safe or key == DATA_ROOT_ENV:
+            # 数据根必须跟安装目录绑定，否则升级/卸载会找错位置。
             lines.append(f"export {key}={shlex.quote(value)}")
         else:
             lines.append(
@@ -3049,15 +3485,18 @@ def _windows_launcher(
     for key, value in env.items():
         if key == "PATH":
             lines.append(f'set "PATH={value};%PATH%"')
-        elif safe:
+        elif safe or key == DATA_ROOT_ENV:
+            # 数据根必须跟安装目录绑定，否则升级/卸载会找错位置。
             lines.append(f'set "{key}={value}"')
         else:
             lines.append(f'if not defined {key} set "{key}={value}"')
     if safe and IS_WINDOWS:
         lines.append('if not defined GDK_BACKEND set "GDK_BACKEND=win32"')
     if windowed:
-        # pythonw.exe 没有控制台；start /B 让 cmd 立即退出，避免黑框驻留。
-        lines.append(f'start "" /B {command} %*')
+        # pythonw.exe 没有控制台；start 启动后立即退出，避免双击 .cmd
+        # 时留下一个驻留的黑框。
+        lines.append(f'start "" {command} %*')
+        lines.append("exit /b 0")
     else:
         lines.append(command + " %*")
         if pause_on_error:
@@ -3113,9 +3552,13 @@ def _write_launchers(
     portable_python: Path | None = None,
     render_mode: str = "auto",
     fontconf: Path | None = None,
+    data_root: Path | None = None,
 ) -> None:
     env = _font_env(fontconf) | _render_env(render_mode)
     safe_env = _font_env(fontconf) | _render_env("cairo")
+    data_env = {DATA_ROOT_ENV: str(data_root)} if data_root else {}
+    env = data_env | env
+    safe_env = data_env | safe_env
     if portable_python is not None:
         env = _portable_env(portable_python) | env
         safe_env = _portable_env(portable_python) | safe_env
@@ -3129,6 +3572,7 @@ def _write_launchers(
             portable_python=portable_python,
             env=env,
             safe_env=safe_env,
+            data_env=data_env,
         )
         return
     if prebuilt_exe is not None:
@@ -3167,7 +3611,7 @@ def _write_launchers(
         encoding="utf-8",
     )
     webui.write_text(
-        _linux_launcher(app_root, webui_command, {}, safe=False),
+        _linux_launcher(app_root, webui_command, data_env, safe=False),
         encoding="utf-8",
     )
     for path in (gui, gui_safe, webui):
@@ -3184,14 +3628,18 @@ def _write_windows_launchers(
     portable_python: Path | None = None,
     env: dict[str, str] | None = None,
     safe_env: dict[str, str] | None = None,
+    data_env: dict[str, str] | None = None,
 ) -> None:
     env = env or {}
     safe_env = safe_env or {}
+    data_env = data_env or {}
     windowed = False
     if prebuilt_exe is not None:
         gui_command = f'"{prebuilt_exe}"'
         safe_gui_command = gui_command
         webui_command = f'"{prebuilt_exe}"'
+        # 预构建 GUI exe 通常是 windowed 子系统；start 后立即退出 cmd。
+        windowed = frontend == "gui"
     else:
         python = portable_python if portable_python is not None else _venv_python(venv)
         gui_command = f'"{python}" -m gui'
@@ -3226,7 +3674,7 @@ def _write_windows_launchers(
         newline="",
     )
     (install_dir / "launch-webui.cmd").write_text(
-        _windows_launcher(app_root, webui_command, {}, safe=False),
+        _windows_launcher(app_root, webui_command, data_env, safe=False),
         encoding="utf-8",
         newline="",
     )
@@ -3522,6 +3970,136 @@ def _write_install_marker(
     )
 
 
+def _windows_uninstall_root() -> Path:
+    base = Path(
+        os.environ.get("LOCALAPPDATA")
+        or (Path.home() / "AppData" / "Local")
+    )
+    return base / "KarenBot" / WINDOWS_UNINSTALL_DIRNAME
+
+
+def _prepare_windows_uninstall_launcher(
+    install_dir: Path,
+) -> tuple[list[str], Path] | None:
+    """准备安装目录之外的卸载入口，返回 (命令前缀, 图标候选)。
+
+    卸载进程不能运行在安装目录内，否则 Windows 无法删除正在使用的
+    `app/runtime/python.exe` 或 `venv/Scripts/python.exe`。冻结安装器复制
+    自身到 `%LOCALAPPDATA%\\KarenBot\\Uninstall`；源码运行则复制核心脚本
+    并用当前系统 Python（都在安装目录之外）。
+    """
+    if not IS_WINDOWS:
+        return None
+    root = _windows_uninstall_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log(f"跳过 Windows 卸载项：无法创建 {root}：{exc}")
+        return None
+    if getattr(sys, "frozen", False):
+        source = Path(sys.executable)
+        target = root / "KarenBot-Installer.exe"
+        command = [str(target)]
+    else:
+        python = Path(sys.executable).resolve()
+        try:
+            python.relative_to(install_dir.resolve())
+        except ValueError:
+            pass
+        else:
+            log("跳过 Windows 卸载项：运行安装器的 Python 位于安装目录内")
+            return None
+        source = _resource_path("karen_install.py")
+        target = root / UNINSTALLER_FILENAME
+        command = [sys.executable, str(target)]
+    same_path = os.path.normcase(
+        os.path.abspath(str(source))
+    ) == os.path.normcase(os.path.abspath(str(target)))
+    if source.is_file() and not same_path:
+        try:
+            if target.exists():
+                target.chmod(target.stat().st_mode | stat.S_IWRITE)
+            shutil.copy2(source, target)
+        except OSError as exc:
+            log(f"写入 Windows 卸载入口失败（可忽略）：{target}：{exc}")
+            return None
+    if not target.is_file():
+        return None
+    return command, target
+
+
+def _register_windows_uninstall(
+    install_dir: Path,
+    *,
+    command: list[str],
+    icon: Path | None,
+) -> None:
+    """写入 HKCU 卸载项；失败只记日志，不影响已完成的安装。"""
+    if not IS_WINDOWS:
+        return
+    try:
+        import winreg
+    except ImportError as exc:
+        log(f"跳过 Windows 卸载项：缺少 winreg（{exc}）")
+        return
+    command_text = (
+        " ".join(f'"{part}"' for part in command)
+        + f' --uninstall --dir "{install_dir}" --non-interactive'
+    )
+    icon_path = icon if icon is not None else Path(command[0])
+    string_values = {
+        "DisplayName": "KarenBot",
+        "DisplayVersion": INSTALLER_VERSION,
+        "Publisher": WINDOWS_PUBLISHER,
+        "InstallLocation": str(install_dir),
+        "DisplayIcon": str(icon_path),
+        "UninstallString": command_text,
+        "QuietUninstallString": command_text,
+        "InstallDate": time.strftime("%Y%m%d"),
+        "Comments": "KarenBot installer-managed uninstall entry",
+        "URLInfoAbout": "https://github.com/CN-BI5UNF/KarenBot-Installer",
+    }
+    try:
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            WINDOWS_UNINSTALL_KEY,
+            0,
+            winreg.KEY_WRITE,
+        ) as handle:
+            for name, value in string_values.items():
+                winreg.SetValueEx(
+                    handle, name, 0, winreg.REG_SZ, value
+                )
+            for name in ("NoModify", "NoRepair"):
+                winreg.SetValueEx(
+                    handle, name, 0, winreg.REG_DWORD, 1
+                )
+    except OSError as exc:
+        log(f"写入 Windows 卸载项失败（可手动卸载）：{exc}")
+        return
+    log(f"已注册 Windows 卸载项：{WINDOWS_UNINSTALL_KEY}")
+
+
+def _unregister_windows_uninstall() -> None:
+    """删除 HKCU 卸载项；不存在时静默跳过。"""
+    if not IS_WINDOWS:
+        return
+    try:
+        import winreg
+    except ImportError:
+        return
+    try:
+        winreg.DeleteKey(
+            winreg.HKEY_CURRENT_USER, WINDOWS_UNINSTALL_KEY
+        )
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        log(f"删除 Windows 卸载项失败（可在注册表编辑器中删除）：{exc}")
+        return
+    log("已删除 Windows 卸载项")
+
+
 def read_install_marker(install_dir: Path) -> dict[str, Any] | None:
     """读取安装标记；缺失/损坏时返回 None，供 GUI 恢复启动入口。"""
     try:
@@ -3664,20 +4242,13 @@ def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
         )
     ensure_app_not_running(install_dir)
     stage(f"卸载 KarenBot：{install_dir}")
-    for name in ("app", "app.old", "venv", PYTHON_RUNTIME_DIRNAME):
+    for name in ("app", "app.old", "venv", PYTHON_RUNTIME_DIRNAME, "data"):
         _check_cancel(cancel_event)
         target = install_dir / name
         if target.exists():
             stage(f"删除 {target} …")
             _remove_tree(target, strict=True)
-    for name in (
-        "launch-gui.cmd",
-        "launch-gui-safe.cmd",
-        "launch-webui.cmd",
-        "launch-gui.sh",
-        "launch-gui-safe.sh",
-        "launch-webui.sh",
-    ):
+    for name in LAUNCHER_FILENAMES:
         _check_cancel(cancel_event)
         try:
             (install_dir / name).unlink(missing_ok=True)
@@ -3692,12 +4263,275 @@ def uninstall(install_dir: Path, *, cancel_event: Any | None = None) -> Path:
     _remove_shortcuts()
     _clean_fonts(install_dir)
     _clean_skins()
+    _unregister_windows_uninstall()
+    if IS_WINDOWS:
+        uninstall_root = _windows_uninstall_root()
+        if uninstall_root.exists():
+            _remove_tree(uninstall_root, strict=False)
+            log(
+                f"Windows 卸载入口副本：{uninstall_root}"
+                "（若仍在运行可稍后手动删除）"
+            )
     try:
         install_dir.rmdir()
     except OSError:
         pass
     stage(f"卸载完成：{install_dir}")
     return install_dir
+
+
+def _app_supports_data_root(app_root: Path) -> bool:
+    """探测 backend 是否支持 KAREN_DATA_ROOT；旧版本继续使用 app/data。"""
+    paths_file = app_root / "app_config" / "paths.py"
+    try:
+        text = paths_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return "KAREN_DATA_ROOT" in text or "DATA_ROOT_ENV_VAR" in text
+
+
+def _external_data_dir(install_dir: Path) -> Path:
+    """KAREN_DATA_ROOT 下 backend 的默认实例数据目录。"""
+    return install_dir / "data" / "instances" / "default"
+
+
+def _merge_tree_missing(
+    source: Path, target: Path, *, strict: bool = False
+) -> int:
+    """把 source 中 target 不存在的文件复制过去；不覆盖现有数据。
+
+    ``strict=True`` 时任何复制失败都会抛出 ``OSError``，供升级迁移在删除
+    旧目录前中止；人格等可容忍缺失的场景使用默认的非严格模式。
+    """
+    if not source.is_dir() or source == target:
+        return 0
+    copied = 0
+    for current, dirnames, filenames in os.walk(source):
+        current_path = Path(current)
+        target_dir = target / current_path.relative_to(source)
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            if strict:
+                raise
+            log(f"创建数据目录失败（可手动复制）：{target_dir}：{exc}")
+            continue
+        for name in list(dirnames):
+            if (current_path / name).is_symlink():
+                dirnames.remove(name)
+        for name in filenames:
+            source_file = current_path / name
+            target_file = target_dir / name
+            if target_file.exists() or source_file.is_symlink():
+                continue
+            try:
+                shutil.copy2(source_file, target_file)
+            except OSError as exc:
+                if strict:
+                    raise
+                log(f"迁移数据文件失败（可手动复制）：{source_file}：{exc}")
+            else:
+                copied += 1
+    return copied
+
+
+def _migrate_custom_personas(
+    old_app: Path, target_app: Path, *, strict: bool = False
+) -> None:
+    """保留旧版新增/补充的人格文件，不覆盖新版本自带的人格定义。"""
+    source_root = old_app / "personas"
+    target_root = target_app / "personas"
+    if not source_root.is_dir():
+        return
+    try:
+        target_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        if strict:
+            fail(f"创建人格目录失败，已中止安装并保留旧版本：{target_root}：{exc}")
+        log(f"创建人格目录失败（可手动复制）：{target_root}：{exc}")
+        return
+    copied = 0
+    for child in source_root.iterdir():
+        if child.name == "__pycache__":
+            continue
+        target = target_root / child.name
+        if child.is_dir():
+            try:
+                copied += _merge_tree_missing(child, target, strict=strict)
+            except OSError as exc:
+                fail(
+                    "迁移人格文件失败，已中止安装并保留旧版本：\n"
+                    f"{child}\n原始错误：{exc}"
+                )
+        elif child.is_file() and not target.exists():
+            try:
+                shutil.copy2(child, target)
+            except OSError as exc:
+                if strict:
+                    fail(
+                        "迁移人格文件失败，已中止安装并保留旧版本：\n"
+                        f"{child}\n原始错误：{exc}"
+                    )
+                log(f"迁移人格文件失败（可手动复制）：{child}：{exc}")
+            else:
+                copied += 1
+    if copied:
+        stage(f"保留旧版自定义人格/资源：{copied} 个文件")
+
+
+def _move_legacy_data(source: Path, target: Path) -> None:
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+    except OSError as exc:
+        fail(
+            "迁移运行数据失败，已中止安装并保留旧版本：\n"
+            f"{source} -> {target}\n原始错误：{exc}"
+        )
+
+
+def _merge_legacy_data(source: Path, target: Path) -> int:
+    try:
+        return _merge_tree_missing(source, target, strict=True)
+    except OSError as exc:
+        fail(
+            "合并运行数据失败，已中止安装并保留旧版本：\n"
+            f"{source} -> {target}\n原始错误：{exc}"
+        )
+
+
+_LEGACY_CONFIG_FILES: tuple[str, ...] = (
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".karen-dev-data-root",
+    ".debata-dev-data-root",
+)
+
+
+def _copy_legacy_config_files(old_app: Path, target_app: Path) -> None:
+    for name in _LEGACY_CONFIG_FILES:
+        source = old_app / name
+        target = target_app / name
+        if source.is_file() and not target.exists():
+            try:
+                shutil.copy2(source, target)
+            except OSError as exc:
+                fail(
+                    "保留旧版配置文件失败，已中止安装并保留旧版本：\n"
+                    f"{source}\n原始错误：{exc}"
+                )
+
+
+def _migrate_legacy_install_data(
+    install_dir: Path,
+    old_app: Path,
+    target_app: Path,
+    *,
+    external_data_root: bool,
+) -> list[tuple[Path, Path]]:
+    """升级时迁移旧版运行数据，返回需要回滚的纯移动操作。
+
+    优先级：现有外部数据目录 > 旧版 app/data。目标已存在时只补充缺失
+    文件，绝不覆盖当前数据。迁移失败会中止安装并触发回滚，避免删掉旧
+    目录后才发现数据没有复制完整。
+    """
+    moved: list[tuple[Path, Path]] = []
+    external_dir = _external_data_dir(install_dir)
+    old_data = old_app / "data"
+    if external_data_root:
+        target_data = external_dir
+        if old_data.is_dir():
+            if target_data.exists():
+                copied = _merge_legacy_data(old_data, target_data)
+                if copied:
+                    stage(f"合并旧版运行数据：{copied} 个文件")
+            else:
+                moved.append((old_data, target_data))
+                _move_legacy_data(old_data, target_data)
+                stage(f"迁移旧版运行数据：{target_data}")
+    else:
+        target_data = target_app / "data"
+        sources: list[Path] = []
+        if external_dir.is_dir():
+            sources.append(external_dir)
+        if old_data.is_dir():
+            sources.append(old_data)
+        if sources:
+            primary = sources[0]
+            if target_data.exists():
+                for source in sources:
+                    copied = _merge_legacy_data(source, target_data)
+                    if copied:
+                        stage(f"合并旧版运行数据：{copied} 个文件")
+            else:
+                moved.append((primary, target_data))
+                _move_legacy_data(primary, target_data)
+                for source in sources[1:]:
+                    copied = _merge_legacy_data(source, target_data)
+                    if copied:
+                        stage(f"合并旧版运行数据：{copied} 个文件")
+            # 新 backend 不再使用外部 data 根；清掉迁移后留下的空目录。
+            for leftover in (
+                external_dir,
+                external_dir.parent,
+                install_dir / "data",
+            ):
+                try:
+                    leftover.rmdir()
+                except OSError:
+                    pass
+    _copy_legacy_config_files(old_app, target_app)
+    _migrate_custom_personas(old_app, target_app, strict=True)
+    return moved
+
+
+def _undo_data_moves(data_moves: list[tuple[Path, Path]]) -> None:
+    for source, target in reversed(data_moves):
+        try:
+            if target.exists() and not source.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                target.rename(source)
+                log(f"已回滚运行数据：{source}")
+        except OSError as exc:
+            log(f"回滚运行数据失败：{target} -> {source}：{exc}")
+
+
+def _restore_install_entrypoints(
+    install_dir: Path,
+    launcher_backup: Path,
+    existing_launchers: set[str],
+    marker_backup: Path | None,
+    marker_existed: bool,
+) -> None:
+    """回滚时恢复旧启动器/安装标记，避免旧 app 配新数据根。"""
+    for name in LAUNCHER_FILENAMES:
+        target = install_dir / name
+        if name in existing_launchers:
+            backup = launcher_backup / name
+            if not backup.is_file():
+                continue
+            try:
+                shutil.copy2(backup, target)
+            except OSError as exc:
+                log(f"回滚启动器失败（可手动恢复）：{target}：{exc}")
+        else:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as exc:
+                log(f"清理新启动器失败（可手动删除）：{target}：{exc}")
+    marker = install_dir / INSTALL_MARKER_NAME
+    if marker_existed:
+        if marker_backup is not None and marker_backup.is_file():
+            try:
+                shutil.copy2(marker_backup, marker)
+            except OSError as exc:
+                log(f"回滚安装标记失败（可手动恢复）：{marker}：{exc}")
+    else:
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError as exc:
+            log(f"清理新安装标记失败（可手动删除）：{marker}：{exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -3723,6 +4557,7 @@ def install(
     windows_gui_asset: str = "",
     windows_bundle_tag: str = "auto",
     pypi_mirror: str = "auto",
+    allow_unverified: bool = False,
 ) -> Path:
     if gui_skin not in GUI_SKINS:
         fail(f"未知主题包：{gui_skin}")
@@ -3745,6 +4580,11 @@ def install(
     target_app: Path | None = None
     old_app: Path | None = None
     swapped = False
+    data_moves: list[tuple[Path, Path]] = []
+    launcher_backup: Path | None = None
+    existing_launchers: set[str] = set()
+    marker_backup: Path | None = None
+    marker_existed = False
     try:
         installer_kind = "local-source"
         components: dict[str, Any] | None = None
@@ -3793,6 +4633,7 @@ def install(
                 cancel_event=cancel_event,
                 bundle_tag=windows_bundle_tag,
                 windows_gui_asset=windows_gui_asset,
+                allow_unverified=allow_unverified,
             )
         else:
             fail(
@@ -3837,6 +4678,7 @@ def install(
                 staging,
                 cancel_event=cancel_event,
                 bundle_tag=windows_bundle_tag,
+                allow_unverified=allow_unverified,
             )
         elif not has_available_personas(app_root):
             log(
@@ -3861,8 +4703,24 @@ def install(
         # 再检查一次，避免 rename 到一半才抛 WinError 5。
         ensure_app_not_running(install_dir)
         if old_app.exists():
-            stage("清理上次升级残留…")
-            _remove_tree(old_app, strict=True)
+            if not target_app.exists():
+                # 只有 app.old 的异常状态：先恢复成当前 app，避免直接删除
+                # 上一次升级留下的唯一一份用户数据。
+                stage("恢复上次升级的旧版本目录…")
+                try:
+                    old_app.rename(target_app)
+                except OSError as exc:
+                    fail(
+                        f"无法恢复上次升级残留：{old_app} -> {target_app}\n"
+                        f"请先备份该目录后重试。原始错误：{exc}"
+                    )
+            else:
+                stage("合并上次升级残留的数据…")
+                if (old_app / "data").is_dir():
+                    _merge_legacy_data(old_app / "data", target_app / "data")
+                _copy_legacy_config_files(old_app, target_app)
+                _migrate_custom_personas(old_app, target_app, strict=True)
+                _remove_tree(old_app, strict=True)
         if target_app.exists():
             try:
                 target_app.rename(old_app)
@@ -3944,6 +4802,37 @@ def install(
         _check_cancel(cancel_event)
         stage("写入启动入口…")
         fontconf = _fontconfig_path(install_dir)
+        data_root = (
+            install_dir / "data"
+            if _app_supports_data_root(target_app)
+            else None
+        )
+        if data_root is not None:
+            log(f"运行数据目录：{data_root}（升级 app/ 时不会删除）")
+        else:
+            log(
+                "当前 backend 不支持 KAREN_DATA_ROOT；运行数据仍保存在 "
+                "app/data，升级时会自动迁移到新版本。"
+            )
+        backup_dir = staging / ".launcher-backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        existing_launchers = {
+            name
+            for name in LAUNCHER_FILENAMES
+            if (install_dir / name).is_file()
+        }
+        marker_path = install_dir / INSTALL_MARKER_NAME
+        marker_existed = marker_path.is_file()
+        try:
+            for name in existing_launchers:
+                shutil.copy2(install_dir / name, backup_dir / name)
+            if marker_existed:
+                marker_backup = staging / ".install-marker-backup"
+                shutil.copy2(marker_path, marker_backup)
+        except OSError as exc:
+            fail(f"备份旧启动入口失败，已中止安装：{exc}")
+        # 备份成功后才启用回滚；否则旧启动器/标记尚未改动，不能去“恢复”。
+        launcher_backup = backup_dir
         _write_launchers(
             install_dir,
             target_app,
@@ -3953,6 +4842,7 @@ def install(
             portable_python=portable_target,
             render_mode=render_mode,
             fontconf=fontconf if fontconf.is_file() else None,
+            data_root=data_root,
         )
         if create_shortcut:
             stage("创建快捷方式…")
@@ -3967,8 +4857,34 @@ def install(
             installer=installer_kind,
             components=components,
         )
+        if old_app.exists() or (
+            data_root is None
+            and _external_data_dir(install_dir).is_dir()
+        ):
+            data_moves = _migrate_legacy_install_data(
+                install_dir,
+                old_app,
+                target_app,
+                external_data_root=data_root is not None,
+            )
         if old_app.exists():
             _remove_tree(old_app, strict=False)
+        if IS_WINDOWS:
+            prepared = _prepare_windows_uninstall_launcher(install_dir)
+            if prepared is None:
+                log("跳过 Windows 卸载项：无法准备安装目录外的卸载入口")
+            else:
+                command, launcher = prepared
+                try:
+                    _register_windows_uninstall(
+                        install_dir,
+                        command=command,
+                        icon=prebuilt_target
+                        or _shortcut_icon(install_dir)
+                        or launcher,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 不能因注册表失败毁掉安装
+                    log(f"写入 Windows 卸载项失败（可手动卸载）：{exc}")
         stage(f"安装完成：{install_dir}")
         log(f"启动：{launch_target(install_dir, frontend)}")
         if frontend == "gui":
@@ -3982,12 +4898,34 @@ def install(
             and old_app.exists()
         ):
             stage("安装失败，正在回滚到旧版本…")
+            _undo_data_moves(data_moves)
             _remove_tree(target_app, strict=False)
             try:
                 old_app.rename(target_app)
                 log("已回滚到升级前的 app/")
             except OSError as exc:
                 log(f"回滚失败：{exc}；旧版本仍保留在 {old_app}")
+            if launcher_backup is not None:
+                _restore_install_entrypoints(
+                    install_dir,
+                    launcher_backup,
+                    existing_launchers,
+                    marker_backup,
+                    marker_existed,
+                )
+        elif data_moves or launcher_backup is not None:
+            # 全新安装没有旧 app 可回滚，但迁移过的数据和新启动入口仍要
+            # 恢复到安装前状态，避免留下半套入口指向失败的应用。
+            stage("安装失败，正在清理本次改动…")
+            _undo_data_moves(data_moves)
+            if launcher_backup is not None:
+                _restore_install_entrypoints(
+                    install_dir,
+                    launcher_backup,
+                    existing_launchers,
+                    marker_backup,
+                    marker_existed,
+                )
         raise
     finally:
         _remove_tree(staging, strict=False)
@@ -4080,43 +5018,105 @@ def interactive_setup() -> dict[str, Any] | None:
     }
 
 
-def installer_path() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve()
-    return Path(__file__).resolve()
+def self_test() -> None:
+    """冻结版离线自检：覆盖解压、校验、数据根、启动器与安装标记。"""
+    with tempfile.TemporaryDirectory(prefix="karen-self-test-") as raw:
+        root = Path(raw)
+        payload = b"karen-self-test\n" * 32
+        digest = hashlib.sha256(payload).hexdigest()
+        source_file = root / "payload.txt"
+        source_file.write_bytes(payload)
+        if sha256_file(source_file) != digest:
+            fail("self-test: SHA256 计算异常")
 
+        tar_path = root / "sample.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tar:
+            info = tarfile.TarInfo("nested/payload.txt")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        tar_out = root / "tar-out"
+        extract_archive(tar_path, tar_out)
+        if (tar_out / "nested" / "payload.txt").read_bytes() != payload:
+            fail("self-test: tar.gz 解压异常")
 
-def _windows_self_delete_command(path: Path) -> str:
-    """等待 bootloader 清理完 _MEI 后再删；被占用时重试，而不是静默失败。"""
-    quoted = f'"{path}"'
-    return (
-        "for /L %i in (1,1,10) do @("
-        "timeout /t 2 /nobreak >nul & "
-        f"del /f /q {quoted} >nul 2>&1 & "
-        f"if not exist {quoted} exit 0)"
-    )
+        zip_path = root / "sample.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("nested/payload.txt", payload)
+        zip_out = root / "zip-out"
+        extract_archive(zip_path, zip_out)
+        if (zip_out / "nested" / "payload.txt").read_bytes() != payload:
+            fail("self-test: zip 解压异常")
 
-
-def self_delete_installer() -> None:
-    path = installer_path()
-    if IS_WINDOWS and getattr(sys, "frozen", False):
-        # Windows 不能删除正在运行的 exe，交给退出后的 cmd 延迟处理。
-        command = _windows_self_delete_command(path)
-        try:
-            subprocess.Popen(
-                ["cmd", "/c", command],
-                creationflags=_creation_flags(),
-                close_fds=True,
+        if (
+            _probe_payload_problem(
+                "https://example.test/backend.tar.gz",
+                b"\x1f\x8b" + b"x" * 300,
+                "application/octet-stream",
             )
-            log("安装器将在退出后自删除")
-        except OSError as exc:
-            log(f"安装器自删除安排失败（可手动删除）：{exc}")
-        return
-    try:
-        path.unlink()
-        log("安装器已自删除")
-    except OSError as exc:
-        log(f"安装器自删除失败（可手动删除）：{exc}")
+            is not None
+        ):
+            fail("self-test: gzip 魔数校验异常")
+        if not _probe_payload_problem(
+            "https://example.test/asset.bin",
+            b'{"code": 429, "msg": "rate limit"}',
+            "application/json",
+        ):
+            fail("self-test: JSON 错误页未被识别")
+
+        feed = (
+            b'<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+            b'<link rel="alternate" href="https://github.com/o/r/'
+            b'releases/tag/v1.2.3"/></entry></feed>'
+        )
+        if _try_release_tag_from_atom(feed) != "v1.2.3":
+            fail("self-test: releases.atom 解析异常")
+
+        if not (
+            mirror_score(100.0, 0.1) > mirror_score(100.0, 1.0)
+            and mirror_score(100.0, 0.1) > 0
+        ):
+            fail("self-test: mirror_score 异常")
+
+        old_tree = root / "old-tree"
+        merged_tree = root / "merged-tree"
+        old_tree.mkdir()
+        (old_tree / "kept.txt").write_text("kept", encoding="utf-8")
+        if _merge_tree_missing(old_tree, merged_tree, strict=True) != 1:
+            fail("self-test: 缺失文件合并异常")
+        if (merged_tree / "kept.txt").read_text(encoding="utf-8") != "kept":
+            fail("self-test: 合并结果异常")
+
+        app_root = root / "app"
+        (app_root / "app_config").mkdir(parents=True)
+        (app_root / "app_config" / "paths.py").write_text(
+            'DATA_ROOT_ENV_VAR = "KAREN_DATA_ROOT"\n', encoding="utf-8"
+        )
+        if not _app_supports_data_root(app_root):
+            fail("self-test: KAREN_DATA_ROOT 能力探测异常")
+        data_root = root / "data"
+        _write_launchers(
+            root,
+            app_root,
+            root / "venv",
+            "gui",
+            data_root=data_root,
+        )
+        launcher = launch_target(root, "gui")
+        if (
+            not launcher.is_file()
+            or DATA_ROOT_ENV
+            not in launcher.read_text(encoding="utf-8")
+        ):
+            fail("self-test: 启动器未写入数据根")
+        _write_install_marker(root, frontend="gui", installer="self-test")
+        marker = read_install_marker(root)
+        if (
+            not _looks_like_karenbot_install(root)
+            or not marker
+            or marker.get("installer") != "self-test"
+        ):
+            fail("self-test: 安装标记异常")
+    log("self-test 通过")
 
 
 def _print_mirrors() -> None:
@@ -4210,12 +5210,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="auto",
         help="Windows GUI 便携包所在的安装器 Release tag（默认 auto）",
     )
-    parser.add_argument(
-        "--self-delete", action="store_true", help="安装完成后删除安装器自身"
-    )
-    parser.add_argument(
-        "--keep-installer", action="store_true", help="安装后保留安装器自身"
-    )
     parser.add_argument("--non-interactive", action="store_true")
     parser.add_argument("--probe-url", default="", help="只测试镜像速度")
     parser.add_argument("--dry-run", action="store_true")
@@ -4233,8 +5227,6 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if args.allow_unverified:
-        os.environ[UNVERIFIED_ENV] = "1"
     if args.require_verified:
         os.environ["KAREN_REQUIRE_VERIFIED"] = "1"
     if args.uninstall:
@@ -4290,7 +5282,6 @@ def main(argv: list[str] | None = None) -> int:
                     "mirror": args.mirror,
                     "allow_unverified": args.allow_unverified,
                     "require_verified": args.require_verified,
-                    "self_delete": args.self_delete,
                     "online": not (args.source_dir or args.archive),
                     "tag": args.tag,
                     "bundle_tag": args.bundle_tag,
@@ -4318,11 +5309,9 @@ def main(argv: list[str] | None = None) -> int:
         windows_gui_asset=args.windows_gui_asset,
         windows_bundle_tag=args.bundle_tag,
         pypi_mirror=args.pypi_mirror,
+        allow_unverified=args.allow_unverified,
     )
-    # 默认保留安装器，避免自删除批处理触发杀软启发式拦截。
-    should_delete = args.self_delete
-    if should_delete:
-        self_delete_installer()
+    log("安装器已保留；需要修复或卸载时可再次运行它。")
     return 0
 
 

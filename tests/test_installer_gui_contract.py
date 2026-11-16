@@ -50,7 +50,7 @@ def test_gui_has_windows_compatibility_hooks():
     assert "SetProcessDpiAwareness" in source
     assert "Microsoft YaHei UI" in source
     assert "os.startfile" in source or "startfile" in source
-    assert "self_delete_installer" in source
+    assert "self_delete" not in source
     assert "不使用美化包" in source
     assert "兼容模式启动" in source
 
@@ -60,7 +60,8 @@ def test_pyinstaller_spec_bundles_resources_and_version():
     assert "mirrors.json" in spec
     assert "windows-gui-package.json" in spec
     assert "windows-version-info.txt" in spec
-    assert 'hiddenimports=["karen_install"]' in spec
+    assert "hiddenimports" in spec
+    assert '"karen_install"' in spec
     assert 'console=not sys.platform.startswith("win")' in spec
 
 

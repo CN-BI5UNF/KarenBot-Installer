@@ -118,6 +118,24 @@ jobs:
           if ($p.ExitCode -ne 0) {
             throw "--check failed with exit code $($p.ExitCode)"
           }
+          $t = Start-Process -FilePath "dist\KarenBot-Installer.exe" `
+            -ArgumentList "--self-test" -Wait -PassThru
+          if ($t.ExitCode -ne 0) {
+            throw "--self-test failed with exit code $($t.ExitCode)"
+          }
+          $dir = Join-Path $env:RUNNER_TEMP "kb-uninstall-smoke"
+          New-Item -ItemType Directory -Force -Path "$dir\app" | Out-Null
+          Set-Content -Path "$dir\app\modules.json" -Value '{"installer":"smoke"}'
+          Set-Content -Path "$dir\.karen-installer.json" -Value '{}'
+          $u = Start-Process -FilePath "dist\KarenBot-Installer.exe" `
+            -ArgumentList "--uninstall --dir `"$dir`" --non-interactive" `
+            -Wait -PassThru
+          if ($u.ExitCode -ne 0) {
+            throw "--uninstall failed with exit code $($u.ExitCode)"
+          }
+          if (Test-Path $dir) {
+            throw "uninstall left the install directory behind"
+          }
 
       - name: Capture Windows installer UI
         shell: pwsh
@@ -295,8 +313,14 @@ jobs:
           if ($normalText -notmatch "pythonw\.exe") {
             throw "launch-gui.cmd should use pythonw.exe"
           }
-          if ($normalText -notmatch 'start "" /B') {
-            throw "launch-gui.cmd should use start /B"
+          if ($normalText -notmatch 'start "" ') {
+            throw "launch-gui.cmd should use start without /B"
+          }
+          if ($normalText -match 'start "" /B') {
+            throw "launch-gui.cmd should not keep the console with /B"
+          }
+          if ($normalText -notmatch 'exit /b 0') {
+            throw "launch-gui.cmd should exit immediately after start"
           }
           $safeText = Get-Content $safe -Raw
           if ($safeText -notmatch "python\.exe") {
@@ -376,7 +400,9 @@ jobs:
             dist/KarenBot-Installer --max-mib 60
 
       - name: Smoke check frozen binary
-        run: xvfb-run -a dist/KarenBot-Installer --smoke-test
+        run: |
+          xvfb-run -a dist/KarenBot-Installer --self-test
+          xvfb-run -a dist/KarenBot-Installer --smoke-test
 
       - name: Rename and checksum Linux binary
         run: |
