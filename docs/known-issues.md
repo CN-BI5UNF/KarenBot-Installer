@@ -278,3 +278,21 @@ Publisher/DisplayIcon/InstallLocation/UninstallString/NoModify/NoRepair）。
 管理员权限，也不依赖原始安装器 exe。卸载结束后删除注册表项和卸载脚本。
 如果安装目录内没有可用的 Python（例如 `--skip-deps` 且使用外部 venv），
 则跳过注册表写入并记录日志，不影响安装本身。
+
+## 27. 小屏笔记本/高 DPI 下窗口占满首屏
+
+**现象**：默认 900×720、最小 820×620 的窗口在 1366×768 或 1080p 150%
+缩放下几乎占满垂直空间，镜像/字体/外观选项把“开始安装”挤出首屏。
+
+**处理**：镜像、字体、外观和渲染选项默认收进“高级设置（镜像 / 字体 /
+外观）”，点击展开；默认窗口高度改为 560~640（按屏幕高度 72%），最小
+800×540。配置页本身可滚动，展开高级设置后仍可滚动到“开始安装”。
+
+## 28. Windows 快捷方式仍指向 launch-gui.cmd
+
+**说明**：当前 `.lnk` 的目标是 `launch-gui.cmd`，由它设置 `KAREN_DATA_ROOT`、
+`FONTCONFIG_FILE` 和 GTK/GSettings 便携环境后启动 `pythonw.exe`。把快捷方式
+直接指向 `runtime\pythonw.exe -m gui` 可以消除 cmd 壳并支持固定到任务栏，
+但需要 GUI 自己在 `__main__` 里加载同样的便携环境；这属于 GUI 仓库改造，
+安装器本轮不做，避免缺少环境变量导致 GTK 启动失败。双击 `.cmd` 的黑框已由
+`start ""` + `exit /b 0` 消除。

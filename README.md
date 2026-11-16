@@ -165,6 +165,8 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\KarenBot`
     写入免管理员权限的卸载项。用户可以在 Windows“设置 → 应用”中直接
     卸载，即使原始安装器 exe 已删除；卸载流程会清理该注册表项。
+18. **小屏友好**：镜像/字体/外观等选项默认收进“高级设置”，默认窗口高度
+    降到 560~640；1366×768 或 1080p 150% 缩放下打开即可看到“开始安装”。
 
 ## 已知问题处理
 

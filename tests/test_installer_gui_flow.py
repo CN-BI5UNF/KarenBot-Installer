@@ -174,6 +174,23 @@ def test_gui_rejects_non_ascii_or_invalid_path(monkeypatch, tmp_path):
         root.destroy()
 
 
+def test_gui_advanced_options_start_collapsed_and_toggle(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    try:
+        assert app._advanced_open is False
+        assert app.advanced_body.winfo_manager() == ""
+        assert "高级设置" in str(app.advanced_button.cget("text"))
+        app._toggle_advanced()
+        assert app._advanced_open is True
+        assert app.advanced_body.winfo_manager() == "pack"
+        assert "收起" in str(app.advanced_button.cget("text"))
+        app._toggle_advanced()
+        assert app._advanced_open is False
+        assert app.advanced_body.winfo_manager() == ""
+    finally:
+        root.destroy()
+
+
 def test_gui_locks_all_config_widgets_while_running(monkeypatch, tmp_path):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
     try:

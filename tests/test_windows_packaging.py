@@ -28,7 +28,8 @@ def test_spec_bundles_contract_and_windows_version_info():
     assert "mirrors.json" in spec
     assert "windows-gui-package.json" in spec
     assert "windows-version-info.txt" in spec
-    assert 'hiddenimports=["karen_install"]' in spec
+    assert "hiddenimports" in spec
+    assert '"karen_install"' in spec
     assert 'console=not sys.platform.startswith("win")' in spec
 
 

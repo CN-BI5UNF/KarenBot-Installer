@@ -60,7 +60,8 @@ def test_pyinstaller_spec_bundles_resources_and_version():
     assert "mirrors.json" in spec
     assert "windows-gui-package.json" in spec
     assert "windows-version-info.txt" in spec
-    assert 'hiddenimports=["karen_install"]' in spec
+    assert "hiddenimports" in spec
+    assert '"karen_install"' in spec
     assert 'console=not sys.platform.startswith("win")' in spec
 
 

@@ -133,11 +133,13 @@ class InstallerApp:
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         width = 900
-        height = min(720, max(620, screen_height - 80))
+        # 高级选项默认收起，默认高度可以降到 560~640，避免 1366×768 /
+        # 150% DPI 笔记本上窗口占满整个垂直屏幕。
+        height = min(640, max(560, int(screen_height * 0.72)))
         x = max(0, (screen_width - width) // 2)
         y = max(0, min(20, screen_height - height - 60))
         self.root.geometry(f"{width}x{height}+{x}+{y}")
-        self.root.minsize(820, 620)
+        self.root.minsize(800, 540)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.font_family = _configure_fonts(root)
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -289,8 +291,7 @@ class InstallerApp:
         self._build_source_section(self.config_inner)
         self._build_frontend_section(self.config_inner)
         self._build_install_section(self.config_inner)
-        self._build_options_section(self.config_inner)
-        self._build_appearance_section(self.config_inner)
+        self._build_advanced_section(self.config_inner)
 
         log_tools = ttk.Frame(log_tab)
         log_tools.pack(fill="x", pady=(0, 4))
@@ -483,6 +484,42 @@ class InstallerApp:
         )
         install_hint.grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
         self._wrap_label(install_hint)
+
+    def _build_advanced_section(self, body: ttk.Frame) -> None:
+        """镜像/字体/外观默认收起，小屏打开即可看到“开始安装”。"""
+        frame = ttk.Frame(body)
+        frame.pack(fill="x", pady=(0, 3))
+        self.advanced_button = ttk.Button(
+            frame,
+            text="高级设置（镜像 / 字体 / 外观）",
+            command=self._toggle_advanced,
+        )
+        self.advanced_button.pack(fill="x")
+        self._track(self.advanced_button)
+        self.advanced_body = ttk.Frame(frame)
+        self._advanced_open = False
+        self._build_options_section(self.advanced_body)
+        self._build_appearance_section(self.advanced_body)
+
+    def _toggle_advanced(self) -> None:
+        if self._running:
+            return
+        self._advanced_open = not self._advanced_open
+        if self._advanced_open:
+            self.advanced_body.pack(fill="x")
+            self.advanced_button.configure(text="收起高级设置")
+        else:
+            self.advanced_body.pack_forget()
+            self.advanced_button.configure(
+                text="高级设置（镜像 / 字体 / 外观）"
+            )
+        try:
+            self.config_inner.update_idletasks()
+            self.config_canvas.configure(
+                scrollregion=self.config_canvas.bbox("all")
+            )
+        except tk.TclError:
+            pass
 
     def _build_options_section(self, body: ttk.Frame) -> None:
         frame = ttk.LabelFrame(body, text="4. 选项", padding=5)
