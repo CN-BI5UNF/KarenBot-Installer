@@ -260,6 +260,9 @@ def test_urlopen_bypasses_proxy_for_mirrors(monkeypatch):
 
     monkeypatch.setattr(installer, "_NO_PROXY_OPENER", _Opener())
     monkeypatch.setattr(
+        installer, "_system_proxy_configured", lambda: True
+    )
+    monkeypatch.setattr(
         installer.urllib.request,
         "urlopen",
         lambda *_args, **_kwargs: calls.append(("proxy", None)),

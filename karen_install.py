@@ -1169,10 +1169,10 @@ def _urlopen(
     timeout: float,
     bypass_proxy: bool = False,
 ):
-    """镜像请求绕过系统代理；GitHub 直连继续使用系统代理。"""
+    """检测到系统代理时让镜像请求绕过代理；GitHub 直连仍走代理。"""
     global _PROXY_WARNING_SHOWN
-    if bypass_proxy:
-        if not _PROXY_WARNING_SHOWN and _system_proxy_configured():
+    if bypass_proxy and _system_proxy_configured():
+        if not _PROXY_WARNING_SHOWN:
             log(
                 "检测到系统代理：镜像请求将绕过代理直连，"
                 "GitHub 直连仍使用系统代理。"
@@ -2071,7 +2071,9 @@ def _safe_tar_extract(
 def _win_long_path(path: Path | str) -> str:
     """Windows 下返回 ``\\\\?\\`` 扩展长路径，绕过 MAX_PATH 限制。"""
     absolute = os.path.abspath(os.fspath(path))
-    if not IS_WINDOWS or absolute.startswith("\\\\?\\"):
+    # 这里用真实 os.name：测试会把 IS_WINDOWS 伪装成 True，但文件系统仍是
+    # POSIX；扩展路径前缀只在真实 Windows 上生效。
+    if os.name != "nt" or absolute.startswith("\\\\?\\"):
         return absolute
     if absolute.startswith("\\\\"):
         return "\\\\?\\UNC\\" + absolute[2:]
