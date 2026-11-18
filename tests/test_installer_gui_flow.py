@@ -402,7 +402,8 @@ def test_gui_existing_install_enables_launch_buttons(monkeypatch, tmp_path):
         app._update_uninstall_state()
         assert str(app.open_button.cget("state")) == "normal"
         assert str(app.launch_button.cget("state")) == "normal"
-        assert str(app.launch_safe_button.cget("state")) == "normal"
+        # WebUI 没有兼容模式启动器，只保留普通启动按钮。
+        assert str(app.launch_safe_button.cget("state")) == "disabled"
         assert app._installed_dir == install_dir
         assert app._installed_frontend == "webui"
     finally:
