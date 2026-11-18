@@ -219,7 +219,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `--renderer auto\|cairo\|gl` | 渲染模式；`cairo` 强制软件渲染，黑屏/崩溃时使用 |
 | `--mirror <名称>` | 固定使用某个镜像；`--list-mirrors` 查看名称 |
 | `--allow-unverified` | 允许无发布哈希的源码包走第三方镜像（有篡改风险） |
-| `--require-verified` | 严格模式：任何未校验的可执行/源码资产都中止 |
+| `--require-verified` | 严格模式：只接受直连 `SHA256SUMS.txt` 或显式 `*_SHA256`，镜像清单不用于校验 |
 | `--windows-gui-asset URL` | 覆盖 Windows GUI 预构建包 URL（本地路径或测试镜像） |
 | `--bundle-tag <tag>` | Windows GUI 便携包所在的安装器 Release tag；默认 `auto` |
 | `--uninstall` | 卸载 `--dir` 指向的 KarenBot，并清理快捷方式/字体/主题偏好/运行数据 |
@@ -237,11 +237,13 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 
 第三方镜像能看到下载请求，也可能篡改内容。安装器对可执行资产执行以下策略：
 
-- `SHA256SUMS.txt` 优先从 GitHub 直连读取；来自第三方镜像的清单标记为不可信，
-  不能用于可执行资产校验；
-- Windows GUI 便携包必须拿到 GitHub 直连的 SHA256 清单，否则报错中止；
-  确认风险时可设置 `KAREN_ALLOW_UNVERIFIED=1`；
-- 人格资产缺少可信哈希时，回退下载主仓库源码包；回退包在无哈希时强制直连；
+- `SHA256SUMS.txt` 优先从 GitHub 直连读取；直连失败时允许从镜像读取，并明确
+  提示“镜像清单只能证明下载内容与清单一致，不能证明发布者身份”；
+  设置 `KAREN_REQUIRE_VERIFIED=1` 时仍只接受直连清单或显式 `*_SHA256`；
+- Windows GUI 便携包从直连或镜像清单取得 SHA256 后校验下载内容；两者都拿不到
+  清单时中止，确认风险时可设置 `KAREN_ALLOW_UNVERIFIED=1`；
+- 人格资产同样可使用镜像清单；清单缺失或没有该资产时，回退下载主仓库源码包，
+  回退包在无哈希时强制直连；
 - backend/frontend 的 GitHub 自动源码归档没有发布方哈希，安装器默认**仅使用
   GitHub 直连**；需要第三方镜像加速时必须显式设置 `KAREN_ALLOW_UNVERIFIED=1`
   或提供下面的哈希（GUI 会弹窗确认）：
@@ -337,8 +339,9 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
 
 - 解压拒绝 `..`、绝对路径、符号链接和设备文件；Python 3.12+ 使用 PEP 706
   的 `filter="data"`，旧版本回退到手工校验；
-- 下载支持 SHA256 校验，失败自动换镜像；校验清单优先直连读取，第三方镜像
-  提供的清单不用于可执行资产；
+- 下载支持 SHA256 校验，失败自动换镜像；校验清单优先直连，直连失败时允许
+  从镜像读取并提示其仅能做一致性校验；`KAREN_REQUIRE_VERIFIED=1` 仍只接受
+  直连清单或显式 `*_SHA256`；
 - Windows GUI 便携包缺少可信 SHA256 时中止，除非显式设置
   `KAREN_ALLOW_UNVERIFIED=1`；
 - Windows 默认 per-user 安装，不触发 UAC；卸载项写入 HKCU

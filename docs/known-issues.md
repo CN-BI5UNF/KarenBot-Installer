@@ -324,3 +324,19 @@ exe 的 GUI 入口也支持
 但需要 GUI 自己在 `__main__` 里加载同样的便携环境；这属于 GUI 仓库改造，
 安装器本轮不做，避免缺少环境变量导致 GTK 启动失败。双击 `.cmd` 的黑框已由
 `start ""` + `exit /b 0` 消除。
+
+## 30. GitHub 直连失败时 SHA256SUMS.txt 无法用于校验
+
+**现象**：部分用户本机无法验证 GitHub 证书（`CERTIFICATE_VERIFY_FAILED:
+unable to get local issuer certificate`）。安装器虽然能通过 `gh-proxy.com`
+等镜像读到 `SHA256SUMS.txt`，但旧逻辑把镜像清单标记为不可信并拒绝用于
+可执行资产，最终报“Release 未提供可信的 Windows GUI 便携包 SHA256”，
+安装无法继续。
+
+**处理**：校验清单仍优先直连 GitHub；直连失败时允许使用镜像清单，并记录
+“镜像清单只能校验下载内容与清单一致、不能证明发布者身份”的警告。Windows
+GUI 便携包和人格资产都按此规则校验；镜像清单缺失时才回退源码包或报错。
+需要严格安全边界时设置 `KAREN_REQUIRE_VERIFIED=1`，此时只接受 GitHub
+直连清单或显式 `KAREN_WINDOWS_GUI_SHA256` / `KAREN_PERSONAS_SHA256`。
+镜像仍然可以同时篡改清单和资产，因此镜像清单只能防截断/串包，不能防
+有目的的投毒；对安全要求高的网络应修复直连证书后使用严格模式。

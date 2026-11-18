@@ -1539,6 +1539,29 @@ def test_fetch_checksums_rejects_third_party_manifest(monkeypatch):
     )
 
 
+def test_fetch_checksums_accepts_third_party_manifest_by_default(monkeypatch):
+    _checksum_fixture(
+        monkeypatch,
+        {
+            "name": "proxy",
+            "kind": "prefix",
+            "prefix": "https://proxy.test/https://github.com",
+        },
+    )
+    checksums = installer.fetch_release_checksums("owner/repo", "v1")
+    assert checksums["KarenBot-Windows-x64.zip"] == "a" * 64
+    # 默认允许复用镜像清单缓存；严格模式仍会拒绝它。
+    assert installer.fetch_release_checksums(
+        "owner/repo", "v1"
+    )["KarenBot-Windows-x64.zip"] == "a" * 64
+    assert (
+        installer.fetch_release_checksums(
+            "owner/repo", "v1", require_trusted=True
+        )
+        == {}
+    )
+
+
 def test_extract_archive_honours_preexisting_cancel(tmp_path):
     archive = tmp_path / "asset.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
@@ -2067,6 +2090,108 @@ def test_prepare_windows_gui_allows_explicit_unverified_opt_in(
     with pytest.raises(SystemExit) as error:
         installer._prepare_windows_gui_app(tmp_path, cancel_event=None)
     assert "simulated-download-failure" in error.value.message
+
+
+def test_prepare_windows_gui_checksum_trust_follows_require_verified(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        installer,
+        "_windows_bundle_tag",
+        lambda *_args, **_kwargs: ("v1.0.0", "稳定版"),
+    )
+    seen: list[bool] = []
+
+    def fake_fetch(*_args, **kwargs):
+        seen.append(bool(kwargs.get("require_trusted")))
+        return {}
+
+    monkeypatch.setattr(installer, "fetch_release_checksums", fake_fetch)
+    for name in (
+        installer.UNVERIFIED_ENV,
+        "KAREN_REQUIRE_VERIFIED",
+        "KAREN_WINDOWS_GUI_SHA256",
+        installer.WINDOWS_GUI_ASSET_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(SystemExit):
+        installer._prepare_windows_gui_app(tmp_path, cancel_event=None)
+    monkeypatch.setenv("KAREN_REQUIRE_VERIFIED", "1")
+    with pytest.raises(SystemExit):
+        installer._prepare_windows_gui_app(tmp_path, cancel_event=None)
+    assert seen == [False, True]
+
+
+def test_prepare_windows_gui_uses_mirror_checksum(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        installer,
+        "_windows_bundle_tag",
+        lambda *_args, **_kwargs: ("v1.0.0", "稳定版"),
+    )
+    digest = "a" * 64
+    monkeypatch.setattr(
+        installer,
+        "fetch_release_checksums",
+        lambda *_args, **_kwargs: {installer.windows_gui_asset_name(): digest},
+    )
+    captured: dict[str, str] = {}
+
+    def fake_download(_url, _path, **kwargs):
+        captured["expected"] = str(kwargs.get("expected_sha256") or "")
+        raise installer.InstallFailure("simulated-download-stop")
+
+    monkeypatch.setattr(installer, "download", fake_download)
+    for name in (
+        installer.UNVERIFIED_ENV,
+        "KAREN_REQUIRE_VERIFIED",
+        "KAREN_WINDOWS_GUI_SHA256",
+        installer.WINDOWS_GUI_ASSET_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(SystemExit):
+        installer._prepare_windows_gui_app(tmp_path, cancel_event=None)
+    assert captured["expected"] == digest
+
+
+def test_ensure_personas_checksum_trust_follows_require_verified(
+    tmp_path, monkeypatch
+):
+    app_root = tmp_path / "app"
+    app_root.mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    seen: list[bool] = []
+
+    def fake_fetch(*_args, **kwargs):
+        seen.append(bool(kwargs.get("require_trusted")))
+        return {}
+
+    monkeypatch.setattr(installer, "_windows_bundle_tag", lambda *_a, **_k: ("v1.0.0", "稳定版"))
+    monkeypatch.setattr(installer, "fetch_release_checksums", fake_fetch)
+    monkeypatch.setattr(installer, "_direct_ranking", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        installer,
+        "download",
+        lambda *_a, **_k: installer.fail("simulated-download-stop"),
+    )
+    for name in (
+        installer.UNVERIFIED_ENV,
+        "KAREN_REQUIRE_VERIFIED",
+        "KAREN_PERSONAS_SHA256",
+        installer.PERSONAS_ASSET_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(SystemExit):
+        installer.ensure_personas(app_root, staging)
+    monkeypatch.setenv("KAREN_REQUIRE_VERIFIED", "1")
+    with pytest.raises(SystemExit):
+        installer.ensure_personas(app_root, staging)
+    assert seen == [False, True]
 
 
 def test_prioritize_direct_moves_working_direct_first():

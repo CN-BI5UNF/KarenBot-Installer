@@ -2594,10 +2594,11 @@ def parse_sha256sums(text: str) -> dict[str, str]:
 
 
 def _checksum_mirrors() -> list[dict[str, Any]]:
-    """校验文件优先直连 GitHub；即使用户固定了镜像也先试一次直连。
+    """校验文件优先直连 GitHub；直连失败后回退到镜像。
 
-    第三方反代能同时篡改校验文件和资产，单独从镜像拿到 SHA256SUMS 时
-    只能标记为不可信，供调用方决定是否接受。
+    第三方反代能同时篡改校验文件和资产；镜像清单默认只用于“下载内容与
+    清单一致”的完整性校验，不能证明发布者身份。设置
+    ``KAREN_REQUIRE_VERIFIED=1`` 时仍只接受直连清单。
     """
     direct = [
         item for item in load_mirrors() if item.get("kind") == "direct"
@@ -2621,8 +2622,9 @@ def fetch_release_checksums(
 ) -> dict[str, str]:
     """读取 Release 的 SHA256SUMS.txt；失败返回空字典并记录原因。
 
-    ``require_trusted=True`` 时，只有 GitHub 直连取得的校验文件才算数；
-    从第三方镜像取得的清单会返回空字典并记录警告。
+    默认允许第三方镜像清单：它仍能发现下载截断/串包，但无法证明发布者
+    身份。``require_trusted=True`` 时只有 GitHub 直连取得的校验文件才算数，
+    镜像清单会返回空字典并记录警告。
     """
     key = (repo, tag)
     cached = _CHECKSUM_CACHE.get(key)
@@ -2659,12 +2661,18 @@ def fetch_release_checksums(
                 _CHECKSUM_CACHE[key] = (parsed, trusted)
                 source = "GitHub 直连" if trusted else "第三方镜像"
                 log(f"已读取 Release 校验文件（{source}）：{target}")
-                if require_trusted and not trusted:
+                if not trusted:
+                    if require_trusted:
+                        log(
+                            "警告：校验文件本身来自第三方镜像，"
+                            "无法证明其未被篡改，拒绝用于可执行资产校验。"
+                        )
+                        return {}
                     log(
-                        "警告：校验文件本身来自第三方镜像，"
-                        "无法证明其未被篡改，拒绝用于可执行资产校验。"
+                        "警告：校验文件来自第三方镜像；"
+                        "只能校验下载内容与镜像清单一致，"
+                        "不能证明发布者身份。"
                     )
-                    return {}
                 return parsed
             errors.append(f"{mirror.get('name', '?')}: 文件为空")
         except Exception as exc:  # noqa: BLE001
@@ -2784,7 +2792,9 @@ def ensure_personas(
                 f"{tag}/{PERSONAS_ASSET_NAME}"
             )
             checksums = fetch_release_checksums(
-                WINDOWS_BUNDLE_REPO, tag, require_trusted=True
+                WINDOWS_BUNDLE_REPO,
+                tag,
+                require_trusted=_require_verified(),
             )
             expected = checksums.get(PERSONAS_ASSET_NAME, "")
             fallback_expected = _env_sha256("KAREN_PERSONAS_SHA256")
@@ -2796,8 +2806,8 @@ def ensure_personas(
                 log("安装器 Release 清单中没有人格资产，直接使用主仓库源码包")
             elif force_direct:
                 log(
-                    "安装器 Release 未提供可信的人格资产 SHA256；"
-                    "为避免第三方镜像篡改，改从 GitHub 直连主仓库源码包提取。"
+                    "安装器 Release 未提供可用的人格资产 SHA256；"
+                    "改从 GitHub 直连主仓库源码包提取。"
                 )
             else:
                 try:
@@ -2900,7 +2910,7 @@ def _prepare_windows_gui_app(
         checksums = fetch_release_checksums(
             WINDOWS_BUNDLE_REPO,
             bundle_version,
-            require_trusted=True,
+            require_trusted=_require_verified(),
         )
         expected_sha256 = expected_sha256 or checksums.get(asset_name, "")
         if expected_sha256:
@@ -2913,15 +2923,15 @@ def _prepare_windows_gui_app(
             )
         elif unverified_allowed:
             log(
-                "警告：Release 未提供可信 SHA256，"
+                "警告：Release 未提供 SHA256，"
                 f"已按 {UNVERIFIED_ENV}=1 或 GUI 确认继续下载但无法校验"
             )
         else:
             fail(
-                "无法验证 Windows GUI 预构建包：Release 未提供可信的 "
-                f"{asset_name} SHA256。\n"
-                "第三方镜像可能篡改下载内容，因此安装器拒绝继续。\n"
-                "请检查网络（需要直连 GitHub 获取 SHA256SUMS.txt）后重试；"
+                "无法验证 Windows GUI 预构建包：直连和镜像均未提供 "
+                f"{asset_name} 的 SHA256。\n"
+                "请检查网络或 Release 资产是否完整；也可以从可信渠道取得 "
+                "SHA256SUMS.txt，设置 KAREN_WINDOWS_GUI_SHA256 后重试。\n"
                 "如确认风险，可设置 "
                 f"{UNVERIFIED_ENV}=1 强制安装。\n"
                 "打包契约见 docs/windows-gui-package.md。"
