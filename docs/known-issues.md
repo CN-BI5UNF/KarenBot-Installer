@@ -35,9 +35,11 @@
 
 **处理**：
 
-- 默认 per-user 安装到 `%LOCALAPPDATA%\Programs\KarenBot`，不触发 UAC。
+- 默认安装到系统盘短路径 `C:\KarenBot`（系统盘不是 C: 时使用对应盘符），
+  比 `%LOCALAPPDATA%\Programs\KarenBot` 短约 35 个字符，降低 Windows
+  `MAX_PATH` 风险。
 - 安装前用临时探针文件验证目录可写；不可写时立即提示改用
-  `%LOCALAPPDATA%\Programs\KarenBot` 或 `%PUBLIC%\KarenBot`。
+  `C:\KarenBot`、`%PUBLIC%\KarenBot` 或其他可写目录。
 - Windows 原生 GUI 改为安装 GTK4 便携预构建包，不再需要在本机创建 venv，
   从根源上避开了大部分权限问题。
 
@@ -340,3 +342,73 @@ GUI 便携包和人格资产都按此规则校验；镜像清单缺失时才回�
 直连清单或显式 `KAREN_WINDOWS_GUI_SHA256` / `KAREN_PERSONAS_SHA256`。
 镜像仍然可以同时篡改清单和资产，因此镜像清单只能防截断/串包，不能防
 有目的的投毒；对安全要求高的网络应修复直连证书后使用严格模式。
+
+## 31. Windows 解压超过 MAX_PATH 导致 FileNotFoundError
+
+**现象**：Windows 未开启 `LongPathsEnabled` 时，`KarenBot-Windows-x64.zip`
+内部较深的 `runtime/Lib/site-packages/.../__pycache__/*.cpython-314.pyc`
+在解压时报 `FileNotFoundError`，安装中止。
+
+**处理**：
+
+- Windows 下解压统一使用 `\\?\` 扩展长路径前缀；
+- 解压阶段直接跳过 `__pycache__`、`*.pyc`、`*.pyo`，不再先写盘后删除；
+- Windows 默认安装目录改为系统盘根目录短路径 `C:\KarenBot`；
+- 安装工作目录前缀缩短为 `.tmp-`，Windows 便携包解压子目录缩短为 `x`；
+- 预构建包流水线在打 zip 前递归清理字节码缓存。
+
+## 32. 失败重试仍需重新下载 130 MB 便携包
+
+**现象**：下载完成后在解压/安装阶段失败，`finally` 删除随机 `.karen-install-*`
+目录，连同 `KarenBot-Windows-x64.zip` 和 `.part` 一起删除；重试无法复用。
+
+**处理**：下载缓存改到安装目录下持久的 `.karen-download-cache/`：
+
+- 失败或取消时保留已校验归档和 `.part`；
+- `download()` 发现目标文件 SHA256 与预期一致时直接复用；
+- 成功安装后才清理缓存；
+- 卸载时一并删除缓存。
+
+## 33. `_prune_ignored` 误删 site-packages 内的 data/build
+
+**现象**：递归清理时把 `runtime/Lib/site-packages/.../data`、`build` 等
+合法依赖目录当成开发产物删除，运行时缺包或资源缺失。
+
+**处理**：忽略规则拆成两类：
+
+- `data`、`build`、`dist`、`release`、`module_backups`、`backups` 只在应用
+  根目录删除；
+- `__pycache__`、`*.pyc`/`*.pyo`、测试/运行时缓存才允许递归删除；
+- 源码复制（`copytree`）与 Windows 打包脚本使用同样的作用域规则。
+
+## 34. 系统代理下并发测速国内反代镜像造成双重代理
+
+**现象**：Clash 等系统代理开启时，发往 `ghproxy.*` 的测速和下载请求先绕道
+海外代理节点，再回源国内反代站，造成高延迟、测速失真或触发 WAF。
+
+**处理**：检测到系统代理时，**镜像请求绕过系统代理直连**（`ProxyHandler({})`），
+GitHub 直连仍使用系统代理。该规则覆盖镜像测速、资产下载、Release 页面/
+atom feed 和 `SHA256SUMS.txt` 获取；日志会明确提示一次。
+
+## 35. Windows 卸载器删除正在运行的自身 exe 残留
+
+**现象**：从系统“设置 → 应用”卸载时，卸载器副本
+`%LOCALAPPDATA%\KarenBot\Uninstall\KarenBot-Installer.exe` 正在运行，删除
+必定失败并重试约 1.8 秒，留下约 12 MB 残留。
+
+**处理**：检测到当前冻结进程运行在卸载入口目录内时，不再立即删除；改为
+启动一个隐藏的 PowerShell 清理进程，等待当前 PID 退出后删除 exe 和目录。
+删除失败只记录日志，不影响卸载结果。
+
+## 36. 非预期异常直接弹 Python Traceback / 生成多余启动器
+
+**现象**：GUI 只把 `InstallFailure` 转成友好文本；`FileNotFoundError`、
+`PermissionError`、`BadZipFile` 等直接弹出完整堆栈。只装 GUI 时仍生成
+无法运行的 `launch-webui.cmd`/`launch-webui.sh`。
+
+**处理**：
+
+- GUI 把常见 IO/路径/压缩异常转成可操作提示，完整堆栈只写入日志；
+- 启动器按所选 frontend 生成：GUI 只生成 `launch-gui` 与
+  `launch-gui-safe`，WebUI 只生成 `launch-webui`；
+- GUI 的“兼容模式启动”按钮在 WebUI 安装时保持禁用。

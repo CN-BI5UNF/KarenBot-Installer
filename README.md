@@ -183,18 +183,19 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 更详细的“现象 → 处理”记录见 [`docs/known-issues.md`](docs/known-issues.md)。
 针对实际用户反馈，安装器内置了以下保护：
 
-1. **Windows 中文路径**：安装目录、源码目录、安装包路径会检查非 ASCII
-   字符；发现中文时直接提示修改，并给出 `C:\Users\Public\KarenBot` 示例。
-   Windows 默认目录如果因为用户名是中文而带中文，会自动改用
-   `%PUBLIC%\KarenBot`，避免 venv/pip/cmd 在中文路径下失败。
+1. **Windows 中文路径与 MAX_PATH**：安装目录、源码目录、安装包路径会检查
+   非 ASCII 字符；发现中文时直接提示修改。Windows 默认安装到系统盘短路径
+   `C:\KarenBot`（系统盘不是 C: 时使用对应盘符），比
+   `%LOCALAPPDATA%\Programs\KarenBot` 短约 35 个字符，显著降低解压阶段触发
+   260 字符限制的概率。
 2. **自动测速与步骤提示**：安装开始时自动测速并选择镜像，不需要用户先点
    “镜像测速”。GUI 会弹出“正在安装”进度窗口，实时显示“自动测速 / 下载
    backend / 下载界面模块 / 创建 venv / 下载字体 / 应用主题 / 写入启动入口”
    等阶段；所有镜像都失败时会明确提示检查网络、代理、DNS 或防火墙。
-3. **权限预检**：安装前先验证安装目录可写。默认 per-user 目录不需要管理员；
-   如果用户选了 `C:\Program Files` 等不可写目录，会立即提示改用
-   `%LOCALAPPDATA%\Programs\KarenBot` 或 `%PUBLIC%\KarenBot`，不会等到
-   venv 阶段才报错。
+3. **权限预检**：安装前先验证安装目录可写。默认短目录 `C:\KarenBot` 通常
+   不需要管理员；如果用户选了 `C:\Program Files` 等不可写目录，会立即提示
+   改用 `C:\KarenBot`、`%PUBLIC%\KarenBot` 或其他可写目录，不会等到 venv
+   阶段才报错。
 4. **Python 环境自举**：安装前检测 Python 3.10+ 是否含 `venv`/`ensurepip`/
    `ssl`/`sqlite3`；不完整时自动下载 python-build-standalone 的便携 Python
    3.12.16 到 `<安装目录>/python-runtime`，只用于本安装，不改动用户全局
@@ -208,7 +209,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `--frontend gui\|webui` | 选择原生 GUI 或 WebUI |
 | `--online` | 从 GitHub Release 在线安装；未指定源码/安装包时默认开启 |
 | `--tag` | 指定 Online Release tag；默认 `auto`（每个仓库优先稳定版，否则最新版） |
-| `--dir` | 安装目录，Linux 默认 `~/.local/opt/karenbot`，Windows 默认 `%LOCALAPPDATA%\Programs\KarenBot` |
+| `--dir` | 安装目录，Linux 默认 `~/.local/opt/karenbot`，Windows 默认系统盘短路径 `C:\KarenBot` |
 | `--source-dir` | 从本地源码安装（测试/离线；Windows 原生 GUI 不支持源码安装） |
 | `--archive` | 从本地 tar/zip 安装包安装（可安装 Windows GTK4 便携包） |
 | `--venv` | 复用已有 venv（测试用） |
@@ -344,7 +345,7 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
   直连清单或显式 `*_SHA256`；
 - Windows GUI 便携包缺少可信 SHA256 时中止，除非显式设置
   `KAREN_ALLOW_UNVERIFIED=1`；
-- Windows 默认 per-user 安装，不触发 UAC；卸载项写入 HKCU
+- Windows 默认安装到系统盘短路径 `C:\KarenBot`；卸载项写入 HKCU
   `...\Uninstall\KarenBot`，卸载完成后删除；
 - 安装器只替换 `<install>/app`；新版 backend 的运行数据固定在
   `<install>/data/instances/default`，升级不会删除；旧版 `app/data` 会在

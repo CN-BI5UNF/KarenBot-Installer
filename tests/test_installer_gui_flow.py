@@ -117,6 +117,27 @@ def test_gui_reports_failure(monkeypatch, tmp_path):
         root.destroy()
 
 
+def test_gui_wraps_unexpected_install_error(monkeypatch, tmp_path):
+    root, app, messages = _make_app(tmp_path, monkeypatch)
+
+    def fake_install(**_kwargs):
+        raise FileNotFoundError(
+            2, "No such file or directory", r"C:\very\long\path"
+        )
+
+    monkeypatch.setattr(karen_install, "install", fake_install)
+    try:
+        app._start_install()
+        assert _pump(root, lambda: app.status.get() == "安装失败")
+        assert messages and messages[-1][0] == "error"
+        text = messages[-1][1][1]
+        assert "路径过长" in text
+        assert "较短路径" in text
+        assert "Traceback" not in text
+    finally:
+        root.destroy()
+
+
 def test_mirror_dialog_renders_results(monkeypatch, tmp_path):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
     try:

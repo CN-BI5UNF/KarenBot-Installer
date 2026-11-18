@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.server
 import io
 import json
 import os
+import shutil
 import socketserver
 import sys
 import tarfile
@@ -42,6 +44,18 @@ def local_server(tmp_path):
             server.shutdown()
 
 
+def test_windows_default_install_dir_is_short(monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setenv("SystemDrive", "D:")
+    assert installer._default_install_dir() == Path("D:\\KarenBot")
+    monkeypatch.setenv("SystemDrive", "C:")
+    assert installer._default_install_dir() == Path("C:\\KarenBot")
+    monkeypatch.setattr(installer, "IS_WINDOWS", False)
+    assert installer._default_install_dir() == (
+        Path.home() / ".local" / "opt" / "karenbot"
+    )
+
+
 def test_mirrored_url_direct_and_prefix():
     direct = {"name": "direct", "kind": "direct"}
     prefix = {"name": "p", "kind": "prefix", "prefix": "https://mirror.test/https://github.com"}
@@ -70,6 +84,29 @@ def test_download_verifies_sha256(local_server, tmp_path, monkeypatch):
     destination = tmp_path / "bad.bin"
     with pytest.raises(SystemExit):
         installer.download(url, destination, expected_sha256="0" * 64)
+
+
+def test_download_reuses_verified_cache(tmp_path, monkeypatch):
+    destination = tmp_path / "cache" / "asset.zip"
+    destination.parent.mkdir()
+    payload = b"cached-bytes"
+    destination.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    called: list[bool] = []
+    monkeypatch.setattr(
+        installer.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: called.append(True),
+    )
+
+    result = installer.download(
+        "https://example.test/asset.zip",
+        destination,
+        expected_sha256=digest,
+    )
+
+    assert result == destination
+    assert called == []
 
 
 def test_safe_tar_extract_rejects_traversal(tmp_path):
@@ -213,6 +250,37 @@ def test_rank_direct_sources_empty_and_all_failed(monkeypatch):
     assert installer._rank_direct_sources(urls) == urls
 
 
+def test_urlopen_bypasses_proxy_for_mirrors(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class _Opener:
+        def open(self, _request, *, timeout):
+            calls.append(("bypass", timeout))
+            return "response"
+
+    monkeypatch.setattr(installer, "_NO_PROXY_OPENER", _Opener())
+    monkeypatch.setattr(
+        installer.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: calls.append(("proxy", None)),
+    )
+    request = installer._request("https://proxy.test/asset")
+    assert (
+        installer._urlopen(request, timeout=3, bypass_proxy=True)
+        == "response"
+    )
+    installer._urlopen(request, timeout=4, bypass_proxy=False)
+    assert calls == [("bypass", 3), ("proxy", None)]
+
+
+def test_proxy_bypass_classification():
+    assert installer._mirror_bypasses_proxy({"kind": "direct"}) is False
+    assert installer._mirror_bypasses_proxy({"kind": "prefix"}) is True
+    assert installer._candidate_bypasses_proxy({"mirror": "direct"}) is False
+    assert installer._candidate_bypasses_proxy({"mirror": "gh-proxy"}) is True
+    assert installer._candidate_bypasses_proxy({}) is False
+
+
 def test_probe_mirrors_returns_failures(local_server):
     url, _payload = local_server
     mirrors = [
@@ -282,6 +350,38 @@ def test_windows_shortcut_script_quotes_paths():
     assert "$s.WindowStyle = 7" in script
 
 
+def test_install_uses_persistent_download_cache(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    captured: dict[str, object] = {}
+
+    def fake_prepare(staging, **kwargs):
+        captured["staging"] = staging
+        captured["download_dir"] = kwargs.get("download_dir")
+        raise installer.InstallFailure("stop-after-capture")
+
+    monkeypatch.setattr(installer, "_prepare_online_app", fake_prepare)
+    with pytest.raises(SystemExit):
+        installer.install(
+            frontend="webui",
+            install_dir=install_dir,
+            source_dir=None,
+            archive=None,
+            venv=None,
+            skip_deps=True,
+            create_shortcut=False,
+            download_fonts=False,
+            online=True,
+        )
+
+    staging = captured["staging"]
+    assert isinstance(staging, Path)
+    assert staging.name.startswith(installer.STAGING_PREFIX)
+    assert captured["download_dir"] == (
+        install_dir / installer.DOWNLOAD_CACHE_DIRNAME
+    )
+    assert not staging.exists()
+
+
 def test_install_local_source_writes_manifest(tmp_path):
     source = tmp_path / "source"
     (source / "backend").mkdir(parents=True)
@@ -312,6 +412,22 @@ def test_windows_launchers_use_scripts_python(monkeypatch, tmp_path):
     assert "python.exe" in text
     assert "-m gui" in text
     assert b"\r\n" in raw
+
+
+def test_launchers_only_cover_selected_frontend(tmp_path, monkeypatch):
+    app = tmp_path / "app"
+    app.mkdir()
+    venv = tmp_path / "venv"
+    installer._write_launchers(tmp_path, app, venv, "webui")
+    assert (tmp_path / "launch-webui.sh").is_file()
+    assert not (tmp_path / "launch-gui.sh").exists()
+    assert not (tmp_path / "launch-gui-safe.sh").exists()
+
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    installer._write_launchers(tmp_path, app, venv, "webui")
+    assert (tmp_path / "launch-webui.cmd").is_file()
+    assert not (tmp_path / "launch-gui.cmd").exists()
+    assert not (tmp_path / "launch-gui-safe.cmd").exists()
 
 
 def test_install_rejects_source_inside_install_dir(tmp_path):
@@ -1289,8 +1405,8 @@ def test_upgrade_migrates_legacy_app_data_to_external_root(tmp_path):
     launcher = _upgrade_launcher(install_dir).read_text(encoding="utf-8")
     assert installer.DATA_ROOT_ENV in launcher
     assert str(install_dir / "data") in launcher
-    webui = (install_dir / "launch-webui.sh").read_text(encoding="utf-8")
-    assert installer.DATA_ROOT_ENV in webui
+    # GUI 安装不再生成 WebUI 启动器；兼容模式启动器仍然生成。
+    assert not (install_dir / "launch-webui.sh").exists()
     safe = (install_dir / "launch-gui-safe.sh").read_text(encoding="utf-8")
     assert installer.DATA_ROOT_ENV in safe
 
@@ -1577,6 +1693,89 @@ def test_extract_archive_honours_preexisting_cancel(tmp_path):
         )
 
 
+def test_prune_ignored_keeps_nested_site_packages_data(tmp_path):
+    root = tmp_path / "app"
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "dev.db").write_text("dev", encoding="utf-8")
+    (root / "build").mkdir()
+    site = root / "runtime" / "Lib" / "site-packages" / "pkg"
+    (site / "data").mkdir(parents=True)
+    (site / "data" / "resource.txt").write_text("keep", encoding="utf-8")
+    (site / "build").mkdir()
+    (site / "build" / "module.py").write_text("keep", encoding="utf-8")
+    (site / "__pycache__").mkdir()
+    (site / "__pycache__" / "module.pyc").write_bytes(b"drop")
+
+    installer._prune_ignored(root)
+
+    assert not (root / "data").exists()
+    assert not (root / "build").exists()
+    assert (site / "data" / "resource.txt").is_file()
+    assert (site / "build" / "module.py").is_file()
+    assert not (site / "__pycache__").exists()
+
+
+def test_copy_ignore_only_skips_top_level_products(tmp_path):
+    source = tmp_path / "source"
+    (source / "data").mkdir(parents=True)
+    (source / "data" / "dev.db").write_text("dev", encoding="utf-8")
+    package_data = source / "backend" / "data"
+    package_data.mkdir(parents=True)
+    (package_data / "keep.txt").write_text("keep", encoding="utf-8")
+    (source / "backend" / "__pycache__").mkdir()
+    (source / "backend" / "__pycache__" / "x.pyc").write_bytes(b"drop")
+    destination = tmp_path / "destination"
+
+    installer.shutil.copytree(
+        source, destination, ignore=installer._copy_ignore(source)
+    )
+
+    assert not (destination / "data").exists()
+    assert (destination / "backend" / "data" / "keep.txt").is_file()
+    assert not (destination / "backend" / "__pycache__").exists()
+
+
+def test_safe_zip_extract_skips_bytecode(tmp_path):
+    archive = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("pkg/__pycache__/mod.cpython-314.pyc", b"drop")
+        zf.writestr("pkg/module.py", "print('keep')\n")
+        zf.writestr("pkg/extra.pyc", b"drop")
+    destination = tmp_path / "out"
+
+    installer.extract_archive(
+        archive, destination, skip_bytecode=True
+    )
+
+    assert (destination / "pkg" / "module.py").is_file()
+    assert not (destination / "pkg" / "__pycache__").exists()
+    assert not (destination / "pkg" / "extra.pyc").exists()
+
+
+def test_safe_zip_extract_rejects_traversal(tmp_path):
+    archive = tmp_path / "evil.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("../evil.txt", b"x")
+    with pytest.raises(SystemExit) as error:
+        installer.extract_archive(archive, tmp_path / "out")
+    assert "越界路径" in error.value.message
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH regression")
+def test_safe_zip_extract_handles_long_windows_path(tmp_path):
+    deep = "/".join(["segment" * 8] * 4) + "/file.txt"
+    archive = tmp_path / "deep.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(deep, b"deep")
+    destination = tmp_path / "deep-out"
+    target = destination / Path(deep)
+    try:
+        installer.extract_archive(archive, destination)
+        assert os.path.isfile(installer._win_long_path(target))
+    finally:
+        shutil.rmtree(installer._win_long_path(destination), ignore_errors=True)
+
+
 def test_run_streams_child_output():
     lines: list[str] = []
     installer.set_log_sink(lines.append)
@@ -1627,14 +1826,14 @@ def test_windows_launcher_prefers_pythonw(tmp_path, monkeypatch):
     )
     normal = (tmp_path / "launch-gui.cmd").read_text(encoding="utf-8")
     safe = (tmp_path / "launch-gui-safe.cmd").read_text(encoding="utf-8")
-    webui = (tmp_path / "launch-webui.cmd").read_text(encoding="utf-8")
     assert "pythonw.exe" in normal
     assert 'start "" ' in normal
     assert "/B" not in normal
     assert "exit /b 0" in normal
     assert "python.exe" in safe
     assert "pause" in safe
-    assert "python.exe" in webui
+    # 只安装 GUI 时不再生成无法运行的 WebUI 启动器。
+    assert not (tmp_path / "launch-webui.cmd").exists()
 
 
 def test_windows_prebuilt_gui_launcher_is_windowed(tmp_path, monkeypatch):
@@ -1651,10 +1850,9 @@ def test_windows_prebuilt_gui_launcher_is_windowed(tmp_path, monkeypatch):
         prebuilt_exe=exe,
     )
     normal = (tmp_path / "launch-gui.cmd").read_text(encoding="utf-8")
-    webui = (tmp_path / "launch-webui.cmd").read_text(encoding="utf-8")
     assert 'start "" ' in normal
     assert "exit /b 0" in normal
-    assert 'start "" ' not in webui
+    assert not (tmp_path / "launch-webui.cmd").exists()
 
 
 def test_windows_shortcut_uses_packaged_icon(tmp_path, monkeypatch):
@@ -1748,6 +1946,45 @@ def test_prepare_windows_uninstall_launcher_frozen_mode(tmp_path, monkeypatch):
     assert launcher.name == "KarenBot-Installer.exe"
     assert launcher.read_bytes() == b"exe"
     assert command == [str(launcher)]
+
+
+def test_running_from_path_detects_frozen_uninstaller(tmp_path, monkeypatch):
+    root = tmp_path / "Uninstall"
+    root.mkdir()
+    exe = root / "KarenBot-Installer.exe"
+    exe.write_bytes(b"exe")
+    monkeypatch.setattr(installer.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(installer.sys, "executable", str(exe))
+    assert installer._running_from_path(root) is True
+    assert installer._running_from_path(tmp_path / "other") is False
+    monkeypatch.setattr(installer.sys, "frozen", False, raising=False)
+    assert installer._running_from_path(root) is False
+
+
+def test_schedule_windows_uninstaller_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    root = tmp_path / "Uninstall"
+    root.mkdir()
+    captured: dict[str, object] = {}
+
+    class _Proc:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return _Proc()
+
+    monkeypatch.setattr(installer.subprocess, "Popen", fake_popen)
+    assert installer._schedule_windows_uninstaller_cleanup(root) is True
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[0] == "powershell.exe"
+    assert "-EncodedCommand" in command
+    encoded = command[command.index("-EncodedCommand") + 1]
+    script = base64.b64decode(encoded).decode("utf-16le")
+    assert str(root) in script
+    assert "Get-Process -Id" in script
 
 
 def test_register_windows_uninstall_writes_hkcu(tmp_path, monkeypatch):

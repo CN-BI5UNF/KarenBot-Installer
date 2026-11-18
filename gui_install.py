@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import traceback
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +158,41 @@ def _show_dialog(
             messagebox.showinfo(title, message, parent=parent)
     except Exception:  # noqa: BLE001 - 窗口已销毁/无图形环境
         pass
+
+
+def _friendly_operation_error(exc: BaseException, *, action: str) -> str:
+    """把常见底层异常转成用户能照着处理的提示，完整堆栈只写日志。"""
+    if isinstance(exc, FileNotFoundError):
+        return (
+            f"{action}过程中找不到文件或路径。\n"
+            "常见原因：Windows 路径过长（260 字符限制）、目录被移动，"
+            "或解压文件被杀毒软件拦截。\n"
+            "建议把安装目录改为较短路径（如 C:\\KarenBot）后重试。\n\n"
+            f"原始错误：{exc}"
+        )
+    if isinstance(exc, PermissionError):
+        return (
+            f"{action}时没有权限访问目标文件，或文件正被占用。\n"
+            "请关闭 KarenBot、临时关闭杀毒软件，或换一个可写目录后重试。\n\n"
+            f"原始错误：{exc}"
+        )
+    if isinstance(exc, zipfile.BadZipFile):
+        return (
+            "安装包损坏或不完整，无法解压。\n"
+            "请删除安装目录下的下载缓存后重新下载。\n\n"
+            f"原始错误：{exc}"
+        )
+    if isinstance(exc, OSError):
+        return (
+            f"{action}过程中发生磁盘/路径/网络 I/O 错误。\n"
+            "请检查磁盘空间、安装目录权限和杀毒软件拦截；"
+            "路径过长时可改用 C:\\KarenBot。\n\n"
+            f"原始错误：{exc}"
+        )
+    return (
+        f"{action}失败：{type(exc).__name__}: {exc}\n"
+        "详细信息已写入安装日志。"
+    )
 
 
 def _open_path(path: Path) -> None:
@@ -905,7 +941,9 @@ class InstallerApp:
         self._installed_frontend = frontend
         self.open_button.configure(state="normal")
         self.launch_button.configure(state="normal")
-        self.launch_safe_button.configure(state="normal")
+        self.launch_safe_button.configure(
+            state="normal" if frontend == "gui" else "disabled"
+        )
 
     def _queue_log(self, line: str) -> None:
         self._queue.put(("log", line))
@@ -1096,8 +1134,11 @@ class InstallerApp:
             self._queue.put(("cancelled", None))
         except core.InstallFailure as exc:
             self._queue.put(("error", exc.message))
-        except Exception:  # noqa: BLE001
-            self._queue.put(("error", traceback.format_exc()))
+        except Exception as exc:  # noqa: BLE001
+            self._queue.put(("log", traceback.format_exc()))
+            self._queue.put(
+                ("error", _friendly_operation_error(exc, action="安装"))
+            )
         else:
             self._queue.put(("done", str(result)))
         finally:
@@ -1216,7 +1257,9 @@ class InstallerApp:
         self._installed_dir = path
         self.open_button.configure(state="normal")
         self.launch_button.configure(state="normal")
-        self.launch_safe_button.configure(state="normal")
+        self.launch_safe_button.configure(
+            state="normal" if self._installed_frontend == "gui" else "disabled"
+        )
         self.uninstall_button.configure(state="normal")
         self._log_line(f"安装完成：{path}")
         self._log_line("安装器已保留；需要修复或卸载时可再次运行它。")
@@ -1339,8 +1382,11 @@ class InstallerApp:
             self._queue.put(("cancelled", None))
         except core.InstallFailure as exc:
             self._queue.put(("error", exc.message))
-        except Exception:  # noqa: BLE001
-            self._queue.put(("error", traceback.format_exc()))
+        except Exception as exc:  # noqa: BLE001
+            self._queue.put(("log", traceback.format_exc()))
+            self._queue.put(
+                ("error", _friendly_operation_error(exc, action="卸载"))
+            )
         else:
             self._queue.put(("uninstalled", str(result)))
         finally:

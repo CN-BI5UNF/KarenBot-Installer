@@ -184,6 +184,16 @@ def test_spec_trims_tcl_data_and_embeds_icon():
     assert '"winreg"' in spec
 
 
+def test_windows_bundle_prunes_bytecode_and_scopes_ignores():
+    script = (INSTALLER / "scripts" / "build_windows_bundle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def prune_bytecode" in script
+    assert "prune_bytecode(bundle)" in script
+    assert "def copy_ignore" in script
+    assert "top_level=False" in script
+
+
 def test_windows_bundle_ships_shortcut_icon():
     script = (INSTALLER / "scripts" / "build_windows_bundle.py").read_text(
         encoding="utf-8"

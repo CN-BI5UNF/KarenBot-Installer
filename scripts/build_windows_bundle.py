@@ -8,6 +8,7 @@ backend/ + gui/ + runtime/，由安装器 Release 提供下载。
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -19,24 +20,63 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-IGNORE = shutil.ignore_patterns(
+TOP_LEVEL_IGNORE = (
     ".git",
     ".venv",
     "data",
-    "__pycache__",
-    "*.pyc",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".mypy_cache",
     "build",
     "dist",
     "release",
     "module_backups",
     "backups",
+)
+RECURSIVE_IGNORE = (
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
     "*.log",
     ".karen-run",
     ".debata-run",
 )
+
+
+def _matches(name: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def copy_ignore(root: Path, *, top_level: bool = True):
+    """顶层开发产物与递归缓存分开忽略，避免误删 site-packages/data。"""
+    root_norm = os.path.normcase(os.path.abspath(str(root)))
+
+    def _ignore(current: str, names: list[str]) -> set[str]:
+        is_root = os.path.normcase(os.path.abspath(current)) == root_norm
+        ignored: set[str] = set()
+        for name in names:
+            if top_level and is_root and _matches(name, TOP_LEVEL_IGNORE):
+                ignored.add(name)
+            elif _matches(name, RECURSIVE_IGNORE):
+                ignored.add(name)
+        return ignored
+
+    return _ignore
+
+
+def prune_bytecode(root: Path) -> None:
+    """打包前删除 __pycache__/.pyc，避免长路径与无意义的包体膨胀。"""
+    for current, dirnames, filenames in os.walk(root, topdown=True):
+        for name in list(dirnames):
+            if name == "__pycache__":
+                shutil.rmtree(Path(current) / name, ignore_errors=True)
+                dirnames.remove(name)
+        for name in filenames:
+            if name.casefold().endswith((".pyc", ".pyo")):
+                try:
+                    (Path(current) / name).unlink()
+                except OSError:
+                    pass
 
 
 def sha256_file(path: Path) -> str:
@@ -64,7 +104,7 @@ def copy_tree(source: Path, destination: Path, *, pattern: str = "*") -> None:
     for item in source.glob(pattern):
         target = destination / item.name
         if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=True, ignore=IGNORE)
+            shutil.copytree(item, target, dirs_exist_ok=True)
         else:
             shutil.copy2(item, target)
 
@@ -149,11 +189,15 @@ def main() -> int:
             raise SystemExit(f"backend directory invalid: {backend}")
         if not (gui / "gui").is_dir():
             raise SystemExit(f"GUI directory invalid: {gui}")
-        shutil.copytree(backend, bundle, dirs_exist_ok=True, ignore=IGNORE)
+        shutil.copytree(
+            backend, bundle, dirs_exist_ok=True, ignore=copy_ignore(backend)
+        )
         gui_target = bundle / "gui"
         if gui_target.exists():
             shutil.rmtree(gui_target)
-        shutil.copytree(gui / "gui", gui_target, ignore=IGNORE)
+        shutil.copytree(
+            gui / "gui", gui_target, ignore=copy_ignore(gui / "gui")
+        )
         icon = ROOT / "packaging" / "karenbot.ico"
         if icon.is_file():
             assets = gui_target / "assets"
@@ -175,7 +219,11 @@ def main() -> int:
         personas_target = bundle / "personas"
         if personas_target.exists():
             shutil.rmtree(personas_target)
-        shutil.copytree(personas, personas_target, ignore=IGNORE)
+        shutil.copytree(
+            personas,
+            personas_target,
+            ignore=copy_ignore(personas, top_level=False),
+        )
         names = ", ".join(sorted(item.name for item in persona_dirs))
         # GitHub Actions 的 Windows 控制台默认 cp1252；中文人格名直接
         # print 会抛 UnicodeEncodeError，这里转成 ASCII 转义只用于日志。
@@ -365,6 +413,8 @@ def main() -> int:
             env=smoke_env,
         )
 
+        print("prune bytecode caches")
+        prune_bytecode(bundle)
         print("create archive")
         args.out.parent.mkdir(parents=True, exist_ok=True)
         archive_base = args.out.with_suffix("")

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import fnmatch
 import hashlib
@@ -44,20 +45,19 @@ from xml.sax.saxutils import escape as xml_escape
 
 APP_NAME = "KarenBot"
 IS_WINDOWS = os.name == "nt"
-if IS_WINDOWS:
-    _LOCALAPPDATA = Path(
-        os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
-    )
-    DEFAULT_INSTALL_DIR = _LOCALAPPDATA / "Programs" / "KarenBot"
-    # 中文用户名会让 %LOCALAPPDATA% 带中文字符，venv/pip/cmd 都可能失败。
-    if not str(DEFAULT_INSTALL_DIR).isascii():
-        DEFAULT_INSTALL_DIR = Path(
-            os.environ.get("PUBLIC") or r"C:\Users\Public"
-        ) / "KarenBot"
-    if not str(DEFAULT_INSTALL_DIR).isascii():
-        DEFAULT_INSTALL_DIR = Path(r"C:\KarenBot")
-else:
-    DEFAULT_INSTALL_DIR = Path.home() / ".local" / "opt" / "karenbot"
+# Windows 默认放到系统盘根目录：比 %LOCALAPPDATA%\Programs 短约 35 个字符，
+# 给解压阶段的 MAX_PATH 留出余量；中文用户名也不会污染路径。
+DEFAULT_WINDOWS_INSTALL_DIRNAME = "KarenBot"
+
+
+def _default_install_dir() -> Path:
+    if IS_WINDOWS:
+        drive = (os.environ.get("SystemDrive") or "C:").rstrip("\\/")
+        return Path(f"{drive}\\{DEFAULT_WINDOWS_INSTALL_DIRNAME}")
+    return Path.home() / ".local" / "opt" / "karenbot"
+
+
+DEFAULT_INSTALL_DIR = _default_install_dir()
 
 
 def _resource_path(name: str) -> Path:
@@ -302,26 +302,39 @@ DEFAULT_WINDOWS_PACKAGE: dict[str, Any] = {
     "launcher_hint": "runtime/pythonw.exe -m gui（无控制台；兼容模式用 python.exe）",
 }
 
-IGNORE_PATTERNS: tuple[str, ...] = (
+# 这些名字只应删除应用根目录下的开发产物；第三方包里可能有合法的
+# site-packages/.../data、build 等目录，不能递归误删。
+TOP_LEVEL_IGNORE_PATTERNS: tuple[str, ...] = (
     ".git",
     ".venv",
     "data",
-    "__pycache__",
-    "*.pyc",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".mypy_cache",
-    ".karen-run",
-    ".debata-run",
     "build",
     "dist",
     "release",
     "module_backups",
     "backups",
+)
+# 这些缓存/日志在任何深度都可以安全清理。
+RECURSIVE_IGNORE_PATTERNS: tuple[str, ...] = (
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".karen-run",
+    ".debata-run",
     "*.log",
 )
-_IGNORE = shutil.ignore_patterns(*IGNORE_PATTERNS)
+# 保留组合常量，供文档/兼容旧代码引用。
+IGNORE_PATTERNS: tuple[str, ...] = (
+    TOP_LEVEL_IGNORE_PATTERNS + RECURSIVE_IGNORE_PATTERNS
+)
 INSTALL_MARKER_NAME = ".karen-installer.json"
+# 下载缓存放在安装目录下，跨重试保留 .part 和已校验归档；成功安装后清理。
+DOWNLOAD_CACHE_DIRNAME = ".karen-download-cache"
+# 每次安装的工作目录；短前缀给 Windows 解压路径留出 MAX_PATH 余量。
+STAGING_PREFIX = ".tmp-"
 
 _MIRROR_CACHE: list[dict[str, Any]] | None = None
 _PACKAGE_CONTRACT_CACHE: dict[str, Any] | None = None
@@ -334,6 +347,10 @@ _STATUS_SINK: Callable[[str], None] | None = None
 _RANK_CACHE: dict[tuple[str, ...], tuple[float, list[tuple[dict[str, Any], dict[str, Any]]]]] = {}
 # key -> (checksums, trusted)
 _CHECKSUM_CACHE: dict[tuple[str, str], tuple[dict[str, str], bool]] = {}
+# 系统代理检测结果；镜像请求绕过代理，GitHub 直连仍走系统代理。
+_PROXY_CHECKED = False
+_PROXY_CONFIGURED = False
+_PROXY_WARNING_SHOWN = False
 
 
 class InstallFailure(SystemExit):
@@ -380,10 +397,14 @@ def stage(message: str) -> None:
 def reset_runtime_caches() -> None:
     """测试/切换镜像后清空进程内缓存。"""
     global _MIRROR_CACHE, _PACKAGE_CONTRACT_CACHE, _MIRROR_OVERRIDE, _PYPI_OVERRIDE
+    global _PROXY_CHECKED, _PROXY_CONFIGURED, _PROXY_WARNING_SHOWN
     _MIRROR_CACHE = None
     _PACKAGE_CONTRACT_CACHE = None
     _MIRROR_OVERRIDE = None
     _PYPI_OVERRIDE = None
+    _PROXY_CHECKED = False
+    _PROXY_CONFIGURED = False
+    _PROXY_WARNING_SHOWN = False
     _RANK_CACHE.clear()
     _CHECKSUM_CACHE.clear()
 
@@ -1126,6 +1147,52 @@ def _request(
     return urllib.request.Request(url, headers=values)
 
 
+_NO_PROXY_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({})
+)
+
+
+def _system_proxy_configured() -> bool:
+    global _PROXY_CHECKED, _PROXY_CONFIGURED
+    if not _PROXY_CHECKED:
+        try:
+            _PROXY_CONFIGURED = bool(urllib.request.getproxies())
+        except Exception:  # noqa: BLE001 - 注册表不可读时按无代理处理
+            _PROXY_CONFIGURED = False
+        _PROXY_CHECKED = True
+    return _PROXY_CONFIGURED
+
+
+def _urlopen(
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    bypass_proxy: bool = False,
+):
+    """镜像请求绕过系统代理；GitHub 直连继续使用系统代理。"""
+    global _PROXY_WARNING_SHOWN
+    if bypass_proxy:
+        if not _PROXY_WARNING_SHOWN and _system_proxy_configured():
+            log(
+                "检测到系统代理：镜像请求将绕过代理直连，"
+                "GitHub 直连仍使用系统代理。"
+            )
+            _PROXY_WARNING_SHOWN = True
+        return _NO_PROXY_OPENER.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _mirror_bypasses_proxy(mirror: dict[str, Any]) -> bool:
+    return str(mirror.get("kind") or "prefix").casefold() != "direct"
+
+
+def _candidate_bypasses_proxy(candidate: dict[str, Any]) -> bool:
+    name = str(
+        candidate.get("mirror") or candidate.get("name") or ""
+    ).casefold()
+    return bool(name) and name != "direct"
+
+
 def mirror_score(speed: float, latency: float) -> float:
     """吞吐为主，首字节延迟作为惩罚项；避免只看速度选到高延迟镜像。
 
@@ -1216,7 +1283,11 @@ def probe_mirror(
             headers={"Range": f"bytes=0-{PROBE_BYTES - 1}"},
             timeout=timeout,
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _urlopen(
+            request,
+            timeout=timeout,
+            bypass_proxy=_mirror_bypasses_proxy(mirror),
+        ) as response:
             status = getattr(response, "status", 200) or 200
             if status not in (200, 206):
                 raise OSError(f"HTTP {status}")
@@ -1595,6 +1666,25 @@ def download(
     prefer_direct: bool = False,
 ) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        if expected_sha256:
+            try:
+                cached_ok = (
+                    sha256_file(destination).lower()
+                    == expected_sha256.lower()
+                )
+            except OSError:
+                cached_ok = False
+            if cached_ok:
+                log(f"复用已校验的下载缓存：{destination}")
+                return destination
+            log(f"下载缓存 SHA256 不匹配，重新下载：{destination}")
+        else:
+            log(f"忽略无哈希的旧下载缓存：{destination}")
+        try:
+            destination.unlink()
+        except OSError:
+            pass
     explicit_ranking = ranked is not None
     attempt = 0
     while True:
@@ -1650,10 +1740,12 @@ def download(
                 headers = (
                     {"Range": f"bytes={existing}-"} if existing > 0 else None
                 )
+                bypass_proxy = _candidate_bypasses_proxy(candidate)
                 try:
-                    response = urllib.request.urlopen(
+                    response = _urlopen(
                         _request(target, headers=headers),
                         timeout=DOWNLOAD_TIMEOUT,
+                        bypass_proxy=bypass_proxy,
                     )
                 except urllib.error.HTTPError as exc:
                     if exc.code == 416 and existing:
@@ -1662,9 +1754,10 @@ def download(
                         _discard_part(temp)
                         existing = 0
                         log("续传位置无效，已丢弃临时文件并从头下载")
-                        response = urllib.request.urlopen(
+                        response = _urlopen(
                             _request(target),
                             timeout=DOWNLOAD_TIMEOUT,
+                            bypass_proxy=bypass_proxy,
                         )
                     else:
                         raise
@@ -1975,35 +2068,82 @@ def _safe_tar_extract(
                 tar.extract(member, destination)
 
 
+def _win_long_path(path: Path | str) -> str:
+    """Windows 下返回 ``\\\\?\\`` 扩展长路径，绕过 MAX_PATH 限制。"""
+    absolute = os.path.abspath(os.fspath(path))
+    if not IS_WINDOWS or absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute[2:]
+    return "\\\\?\\" + absolute
+
+
+def _is_ignored_member(member_path: str) -> bool:
+    """解压阶段可安全跳过的字节码缓存文件。"""
+    parts = member_path.replace("\\", "/").split("/")
+    return "__pycache__" in parts or member_path.casefold().endswith(
+        (".pyc", ".pyo")
+    )
+
+
 def _safe_zip_extract(
     archive: Path,
     destination: Path,
     *,
     cancel_event: Any | None = None,
+    skip_bytecode: bool = False,
 ) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
-    root = destination.resolve()
+    destination_abs = os.path.abspath(os.fspath(destination))
+    # 目标目录本身也可能接近 MAX_PATH；直接用扩展路径创建。
+    os.makedirs(_win_long_path(destination), exist_ok=True)
+    root_norm = os.path.normcase(destination_abs)
+    root_prefix = root_norm.rstrip("\\/") + os.sep
+    extract_base = _win_long_path(destination)
     with zipfile.ZipFile(archive) as zf:
         members = zf.infolist()
         _check_cancel(cancel_event)
+        filtered: list[zipfile.ZipInfo] = []
         for index, info in enumerate(members, 1):
             if index % 512 == 0:
                 _check_cancel(cancel_event)
-            target = (destination / info.filename).resolve()
-            if target != root and root not in target.parents:
+            try:
+                target_norm = os.path.normcase(
+                    os.path.abspath(
+                        os.path.join(destination_abs, info.filename)
+                    )
+                )
+            except (OSError, ValueError) as exc:
+                fail(
+                    f"压缩包包含非法路径：{info.filename}\n"
+                    f"原始错误：{exc}"
+                )
+            if target_norm != root_norm and not target_norm.startswith(
+                root_prefix
+            ):
                 fail(f"压缩包包含越界路径：{info.filename}")
             if (info.external_attr >> 16) & 0o170000 == 0o120000:
                 fail(f"压缩包包含符号链接，拒绝解压：{info.filename}")
-        total = len(members)
+            if skip_bytecode and _is_ignored_member(info.filename):
+                continue
+            filtered.append(info)
+        total = len(filtered)
         report_step = max(total // 10, 1)
         last_report = 0
-        for index, info in enumerate(members, 1):
+        for index, info in enumerate(filtered, 1):
             if index % 256 == 0:
                 _check_cancel(cancel_event)
                 if total >= 512 and index - last_report >= report_step:
                     stage(f"解压中 {index}/{total} …")
                     last_report = index
-            zf.extract(info, destination)
+            try:
+                zf.extract(info, extract_base)
+            except (OSError, ValueError) as exc:
+                fail(
+                    f"解压文件失败：{info.filename}\n"
+                    "可能是路径过长、磁盘空间不足或被杀毒软件拦截。\n"
+                    "建议将安装目录改为较短路径（如 C:\\KarenBot）后重试。\n"
+                    f"原始错误：{exc}"
+                )
 
 
 def extract_archive(
@@ -2012,9 +2152,15 @@ def extract_archive(
     *,
     allow_symlinks: bool = False,
     cancel_event: Any | None = None,
+    skip_bytecode: bool = False,
 ) -> None:
     if archive.suffix.lower() in {".zip"}:
-        _safe_zip_extract(archive, destination, cancel_event=cancel_event)
+        _safe_zip_extract(
+            archive,
+            destination,
+            cancel_event=cancel_event,
+            skip_bytecode=skip_bytecode,
+        )
     else:
         _safe_tar_extract(
             archive,
@@ -2024,23 +2170,55 @@ def extract_archive(
         )
 
 
+def _matches_ignore(name: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def _copy_ignore(
+    root: Path, *, top_level: bool = True
+) -> Callable[[str, list[str]], set[str]]:
+    """生成 copytree 的 ignore 回调：顶层产物与递归缓存分开处理。"""
+    root_norm = os.path.normcase(os.path.abspath(os.fspath(root)))
+
+    def _ignore(current: str, names: list[str]) -> set[str]:
+        is_root = os.path.normcase(os.path.abspath(current)) == root_norm
+        ignored: set[str] = set()
+        for name in names:
+            if (
+                top_level
+                and is_root
+                and _matches_ignore(name, TOP_LEVEL_IGNORE_PATTERNS)
+            ):
+                ignored.add(name)
+            elif _matches_ignore(name, RECURSIVE_IGNORE_PATTERNS):
+                ignored.add(name)
+        return ignored
+
+    return _ignore
+
+
 def _prune_ignored(root: Path) -> None:
-    """原地删除被 ``_IGNORE`` 排除的目录/文件，替代一次全量 copytree。"""
+    """原地删除开发产物与缓存，但只对应用根目录删除 data/build 等名字。"""
     if not root.is_dir():
         return
 
-    def _ignored(name: str) -> bool:
-        return any(
-            fnmatch.fnmatchcase(name, pattern) for pattern in IGNORE_PATTERNS
-        )
+    for name in TOP_LEVEL_IGNORE_PATTERNS:
+        candidate = root / name
+        if candidate.is_symlink() or candidate.is_file():
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+        elif candidate.is_dir():
+            shutil.rmtree(candidate, ignore_errors=True)
 
     for current, dirnames, filenames in os.walk(root, topdown=True):
         for name in list(dirnames):
-            if _ignored(name):
+            if _matches_ignore(name, RECURSIVE_IGNORE_PATTERNS):
                 shutil.rmtree(Path(current) / name, ignore_errors=True)
                 dirnames.remove(name)
         for name in filenames:
-            if _ignored(name):
+            if _matches_ignore(name, RECURSIVE_IGNORE_PATTERNS):
                 try:
                     (Path(current) / name).unlink()
                 except OSError:
@@ -2363,8 +2541,10 @@ def _fetch_github_page(
         name = str(mirror.get("name") or "?")
         target = mirrored_url(url, mirror)
         try:
-            with urllib.request.urlopen(
-                _request(target), timeout=timeout
+            with _urlopen(
+                _request(target),
+                timeout=timeout,
+                bypass_proxy=_mirror_bypasses_proxy(mirror),
             ) as response:
                 final_url = response.geturl()
                 chunks: list[bytes] = []
@@ -2651,9 +2831,10 @@ def fetch_release_checksums(
         target = mirrored_url(url, mirror)
         trusted = mirror.get("kind") == "direct"
         try:
-            with urllib.request.urlopen(
+            with _urlopen(
                 _request(target),
                 timeout=min(timeout, remaining),
+                bypass_proxy=_mirror_bypasses_proxy(mirror),
             ) as response:
                 data = response.read(1024 * 1024)
             parsed = parse_sha256sums(data.decode("utf-8", "replace"))
@@ -2748,7 +2929,9 @@ def _install_personas_from(directory: Path, app_root: Path) -> bool:
     target = app_root / "personas"
     if target.exists():
         _remove_tree(target)
-    shutil.copytree(source, target, ignore=_IGNORE)
+    shutil.copytree(
+        source, target, ignore=_copy_ignore(source, top_level=False)
+    )
     return has_available_personas(app_root)
 
 
@@ -2759,6 +2942,7 @@ def ensure_personas(
     cancel_event: Any | None = None,
     bundle_tag: str = "auto",
     allow_unverified: bool = False,
+    download_dir: Path | None = None,
 ) -> None:
     """补齐 personas/：优先安装器 Release 的小资产，失败再取主仓库源码包。
 
@@ -2770,7 +2954,7 @@ def ensure_personas(
         return
     unverified_allowed = bool(allow_unverified) or _unverified_allowed()
     stage("安装项目自带人格…")
-    downloads = staging / "downloads"
+    downloads = download_dir or (staging / "downloads")
     downloads.mkdir(parents=True, exist_ok=True)
     extract_root = staging / "extract-personas"
     try:
@@ -2882,6 +3066,7 @@ def _prepare_windows_gui_app(
     bundle_tag: str = "auto",
     windows_gui_asset: str = "",
     allow_unverified: bool = False,
+    download_dir: Path | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """下载安装器 Release 里的 Windows GTK4 便携包。"""
     unverified_allowed = bool(allow_unverified) or _unverified_allowed()
@@ -2936,7 +3121,7 @@ def _prepare_windows_gui_app(
                 f"{UNVERIFIED_ENV}=1 强制安装。\n"
                 "打包契约见 docs/windows-gui-package.md。"
             )
-    downloads = staging / "downloads"
+    downloads = download_dir or (staging / "downloads")
     downloads.mkdir(parents=True, exist_ok=True)
     stage(f"自动测速并下载 Windows GUI 便携包：{asset_name}")
     local_asset = Path(asset_url).expanduser()
@@ -2967,8 +3152,14 @@ def _prepare_windows_gui_app(
                 f"原始错误：{message}"
             )
     _check_cancel(cancel_event)
-    extract_root = staging / "extract-windows-gui"
-    extract_archive(archive, extract_root, cancel_event=cancel_event)
+    # 短目录名 + 过滤 __pycache__：给 Windows MAX_PATH 留出余量。
+    extract_root = staging / "x"
+    extract_archive(
+        archive,
+        extract_root,
+        cancel_event=cancel_event,
+        skip_bytecode=True,
+    )
     app_root = _find_app_root(extract_root)
     # 解压目录与 staging 在同一分区：直接原子改名，避免把数千个
     # GTK4/运行时小文件整盘复制一份，峰值空间和耗时都能减半。
@@ -3028,6 +3219,7 @@ def _prepare_online_app(
     bundle_tag: str = "auto",
     windows_gui_asset: str = "",
     allow_unverified: bool = False,
+    download_dir: Path | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """下载并合并 backend 核心包与所选界面模块，返回 installer_kind/components。"""
     if frontend not in ONLINE_FRONTEND_REPOS:
@@ -3039,6 +3231,7 @@ def _prepare_online_app(
             bundle_tag=bundle_tag,
             windows_gui_asset=windows_gui_asset,
             allow_unverified=allow_unverified,
+            download_dir=download_dir,
         )
     backend_tag, frontend_tag = _resolve_online_tags(
         frontend,
@@ -3048,7 +3241,7 @@ def _prepare_online_app(
     backend_url = _online_archive_url(ONLINE_BACKEND_REPO, backend_tag)
     frontend_repo = ONLINE_FRONTEND_REPOS[frontend]
     frontend_url = _online_archive_url(frontend_repo, frontend_tag)
-    downloads = staging / "downloads"
+    downloads = download_dir or (staging / "downloads")
     downloads.mkdir(parents=True, exist_ok=True)
     backend_expected = _env_sha256("KAREN_BACKEND_SHA256")
     frontend_expected = _env_sha256(f"KAREN_{frontend.upper()}_SHA256")
@@ -3129,7 +3322,7 @@ def _prepare_online_app(
     shutil.copytree(
         frontend_root / frontend,
         frontend_target,
-        ignore=_IGNORE,
+        ignore=_copy_ignore(frontend_root / frontend),
     )
     components = {
         "backend": {
@@ -3621,23 +3814,26 @@ def _write_launchers(
             "--port",
             "8000",
         ]
-    gui = install_dir / "launch-gui.sh"
-    gui_safe = install_dir / "launch-gui-safe.sh"
+    if frontend == "gui":
+        gui = install_dir / "launch-gui.sh"
+        gui_safe = install_dir / "launch-gui-safe.sh"
+        gui.write_text(
+            _linux_launcher(app_root, gui_command, env, safe=False),
+            encoding="utf-8",
+        )
+        gui_safe.write_text(
+            _linux_launcher(app_root, gui_command, safe_env, safe=True),
+            encoding="utf-8",
+        )
+        for path in (gui, gui_safe):
+            path.chmod(0o755)
+        return
     webui = install_dir / "launch-webui.sh"
-    gui.write_text(
-        _linux_launcher(app_root, gui_command, env, safe=False),
-        encoding="utf-8",
-    )
-    gui_safe.write_text(
-        _linux_launcher(app_root, gui_command, safe_env, safe=True),
-        encoding="utf-8",
-    )
     webui.write_text(
         _linux_launcher(app_root, webui_command, data_env, safe=False),
         encoding="utf-8",
     )
-    for path in (gui, gui_safe, webui):
-        path.chmod(0o755)
+    webui.chmod(0o755)
 
 
 def _write_windows_launchers(
@@ -3673,28 +3869,30 @@ def _write_windows_launchers(
             # 和 pause，崩溃时用户能看到真实报错。
             gui_command = f'"{pythonw}" -m gui'
             windowed = True
-    (install_dir / "launch-gui.cmd").write_text(
-        _windows_launcher(
-            app_root,
-            gui_command,
-            env,
-            safe=False,
-            windowed=windowed,
-        ),
-        encoding="utf-8",
-        newline="",
-    )
-    (install_dir / "launch-gui-safe.cmd").write_text(
-        _windows_launcher(
-            app_root,
-            safe_gui_command,
-            safe_env,
-            safe=True,
-            pause_on_error=True,
-        ),
-        encoding="utf-8",
-        newline="",
-    )
+    if frontend == "gui":
+        (install_dir / "launch-gui.cmd").write_text(
+            _windows_launcher(
+                app_root,
+                gui_command,
+                env,
+                safe=False,
+                windowed=windowed,
+            ),
+            encoding="utf-8",
+            newline="",
+        )
+        (install_dir / "launch-gui-safe.cmd").write_text(
+            _windows_launcher(
+                app_root,
+                safe_gui_command,
+                safe_env,
+                safe=True,
+                pause_on_error=True,
+            ),
+            encoding="utf-8",
+            newline="",
+        )
+        return
     (install_dir / "launch-webui.cmd").write_text(
         _windows_launcher(app_root, webui_command, data_env, safe=False),
         encoding="utf-8",
@@ -3999,6 +4197,59 @@ def _windows_uninstall_root() -> Path:
         or (Path.home() / "AppData" / "Local")
     )
     return base / "KarenBot" / WINDOWS_UNINSTALL_DIRNAME
+
+
+def _running_from_path(root: Path) -> bool:
+    """当前冻结进程是否正运行在 root 目录内。"""
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        Path(sys.executable).resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _schedule_windows_uninstaller_cleanup(root: Path) -> bool:
+    """进程退出后删除正在运行的卸载器副本，避免 12 MB 残留。"""
+    if not IS_WINDOWS:
+        return False
+    exe = Path(sys.executable)
+    script = f"""
+$pidToWait = {os.getpid()}
+$deadline = (Get-Date).AddSeconds(30)
+while ((Get-Date) -lt $deadline) {{
+  if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) {{ break }}
+  Start-Sleep -Milliseconds 500
+}}
+Remove-Item -LiteralPath '{str(exe).replace("'", "''")}' -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath '{str(root).replace("'", "''")}' -Force -Recurse -ErrorAction SilentlyContinue
+"""
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    try:
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-EncodedCommand",
+                encoded,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "DETACHED_PROCESS", 0)
+            ),
+        )
+    except OSError as exc:
+        log(f"安排删除 Windows 卸载入口失败：{exc}")
+        return False
+    return True
 
 
 def _prepare_windows_uninstall_launcher(
@@ -4395,8 +4646,12 @@ def uninstall(
             (install_dir / name).unlink(missing_ok=True)
         except OSError as exc:
             log(f"删除启动器失败（可手动删除）：{name}：{exc}")
-    for leftover in install_dir.glob(".karen-install-*"):
-        _remove_tree(leftover, strict=False)
+    cache = install_dir / DOWNLOAD_CACHE_DIRNAME
+    if cache.exists():
+        _remove_tree(cache, strict=False)
+    for pattern in (".karen-install-*", f"{STAGING_PREFIX}*"):
+        for leftover in install_dir.glob(pattern):
+            _remove_tree(leftover, strict=False)
     try:
         (install_dir / INSTALL_MARKER_NAME).unlink(missing_ok=True)
     except OSError as exc:
@@ -4409,11 +4664,21 @@ def uninstall(
     if IS_WINDOWS:
         uninstall_root = _windows_uninstall_root()
         if uninstall_root.exists():
-            _remove_tree(uninstall_root, strict=False)
-            log(
-                f"Windows 卸载入口副本：{uninstall_root}"
-                "（若仍在运行可稍后手动删除）"
-            )
+            if _running_from_path(uninstall_root):
+                if _schedule_windows_uninstaller_cleanup(uninstall_root):
+                    log("Windows 卸载入口副本将在卸载进程退出后删除")
+                else:
+                    log(
+                        "Windows 卸载入口副本需稍后手动删除："
+                        f"{uninstall_root}"
+                    )
+            else:
+                _remove_tree(uninstall_root, strict=False)
+                if uninstall_root.exists():
+                    log(
+                        f"Windows 卸载入口副本：{uninstall_root}"
+                        "（若仍在运行可稍后手动删除）"
+                    )
     preserved_data = install_dir / "data"
     if not keep_data or not preserved_data.exists():
         try:
@@ -4538,6 +4803,16 @@ def _restore_preserved_personas(
         stage(f"已恢复保留的自定义人格：{copied} 个文件")
     else:
         log("保留的自定义人格已包含在当前版本中")
+
+
+def _discard_download_cache(install_dir: Path) -> None:
+    """安装成功后清理下载缓存；失败/取消时保留，供断点续传复用。"""
+    cache = install_dir / DOWNLOAD_CACHE_DIRNAME
+    if not cache.exists():
+        return
+    _remove_tree(cache, strict=False)
+    if cache.exists():
+        log(f"下载缓存暂未删除（可稍后手动删除）：{cache}")
 
 
 def _discard_preserved_personas(install_dir: Path) -> None:
@@ -4842,7 +5117,10 @@ def install(
         DISK_REQUIREMENTS.get(frontend, DISK_REQUIREMENTS["webui"]),
         "安装目录",
     )
-    staging = Path(tempfile.mkdtemp(prefix=".karen-install-", dir=str(install_dir)))
+    download_cache = install_dir / DOWNLOAD_CACHE_DIRNAME
+    staging = Path(
+        tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=str(install_dir))
+    )
     target_app: Path | None = None
     old_app: Path | None = None
     swapped = False
@@ -4871,7 +5149,11 @@ def install(
                     "请选择在线安装（下载预构建包），或使用本地预构建 zip。"
                 )
             stage(f"复制源码：{source}")
-            shutil.copytree(source, staging / "app", ignore=_IGNORE)
+            shutil.copytree(
+                source,
+                staging / "app",
+                ignore=_copy_ignore(source),
+            )
         elif archive is not None:
             installer_kind = "local-archive"
             archive = archive.expanduser().resolve()
@@ -4900,6 +5182,7 @@ def install(
                 bundle_tag=windows_bundle_tag,
                 windows_gui_asset=windows_gui_asset,
                 allow_unverified=allow_unverified,
+                download_dir=download_cache,
             )
         else:
             fail(
@@ -4945,6 +5228,7 @@ def install(
                 cancel_event=cancel_event,
                 bundle_tag=windows_bundle_tag,
                 allow_unverified=allow_unverified,
+                download_dir=download_cache,
             )
         elif not has_available_personas(app_root):
             log(
@@ -5157,6 +5441,7 @@ def install(
                 except Exception as exc:  # noqa: BLE001 - 不能因注册表失败毁掉安装
                     log(f"写入 Windows 卸载项失败（可手动卸载）：{exc}")
         _discard_preserved_personas(install_dir)
+        _discard_download_cache(install_dir)
         stage(f"安装完成：{install_dir}")
         log(f"启动：{launch_target(install_dir, frontend)}")
         if frontend == "gui":

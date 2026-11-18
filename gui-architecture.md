@@ -81,8 +81,9 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
 
 ## Windows 兼容性
 
-- **Per-user 安装**：默认 `%LOCALAPPDATA%\Programs\KarenBot`，快捷方式写入
-  当前用户的开始菜单/桌面，不触发 UAC。
+- **短路径安装**：Windows 默认安装到系统盘 `C:\KarenBot`（系统盘不是 C:
+  时使用对应盘符），比 `%LOCALAPPDATA%\Programs\KarenBot` 短约 35 个字符，
+  降低解压阶段触发 `MAX_PATH` 的概率；快捷方式写入当前用户的开始菜单/桌面。
 - **高 DPI**：启动 Tk 前调用 `SetProcessDpiAwareness(1)`，避免系统位图拉伸；
   优先使用 Microsoft YaHei UI。
 - **主题包**：GUI 的 `gui/theme.py` 读取 `%APPDATA%\karen-gui\skin` 或
@@ -100,9 +101,11 @@ Linux 继续以 CLI 安装脚本为主，Windows 使用 PyInstaller 打包的 GU
   写入卸载项；卸载进程在安装目录之外，能删除安装目录内的 Python 运行时，
   不依赖原始安装器 exe，也不需要管理员权限。
 - **中文路径**：安装目录/源码/安装包路径含非 ASCII 字符时提前报错，并提示
-  `%PUBLIC%\KarenBot`；默认目录若因用户名带中文，会自动改用 `%PUBLIC%`。
+  `%PUBLIC%\KarenBot`；Windows 默认目录固定为系统盘短路径 `C:\KarenBot`，
+  不受中文用户名影响。
 - **权限预检**：安装前写一个探针文件验证目录可写；不可写时提示改用
-  per-user 目录，而不是等到 venv 阶段才报 `PermissionError`。
+  `C:\KarenBot` 或其他可写目录，而不是等到 venv 阶段才报
+  `PermissionError`。
 - **Python 自举**：系统 Python 缺失或不含 venv/ensurepip 时，下载
   python-build-standalone 便携 Python 3.12.16 到 `<install>/python-runtime`；
   全局 Python 完全不动。Linux 原生 GUI 仍要求系统 PyGObject/GTK4。
