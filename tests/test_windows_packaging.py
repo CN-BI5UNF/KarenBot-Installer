@@ -174,6 +174,7 @@ def test_spec_trims_tcl_data_and_embeds_icon():
     # concurrent.futures 需要 multiprocessing，不能排除。
     assert "不能排除 multiprocessing" in spec
     assert "karenbot.ico" in spec
+    assert "karenbot.svg" in spec
     assert "icon=" in spec
     assert "sqlite3" in spec
     assert "pydoc" in spec

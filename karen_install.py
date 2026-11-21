@@ -80,9 +80,21 @@ def installer_icon_path() -> Path | None:
     return None
 
 
+def installer_icon_svg_path() -> Path | None:
+    """返回安装器自带的 SVG 图标，用于 Linux 图标主题。"""
+    candidates = (
+        _resource_path("karenbot.svg"),
+        Path(__file__).resolve().parent / "packaging" / "karenbot.svg",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
 MIRRORS_FILE = _resource_path("mirrors.json")
 WINDOWS_PACKAGE_FILE = _resource_path("windows-gui-package.json")
-INSTALLER_VERSION = "1.1.0"
+INSTALLER_VERSION = "1.1.1"
 USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 # 仅探测 256KB：既够区分镜像吞吐，又能缩短公共镜像的流量/长尾耗时。
 PROBE_BYTES = 256 * 1024
@@ -4132,6 +4144,29 @@ def _windows_shortcuts_script(
     )
 
 
+def _linux_icon_path() -> Path | None:
+    """把打包的 SVG 图标安装到 hicolor 主题。"""
+    source = installer_icon_svg_path()
+    if source is None:
+        return None
+    target_dir = (
+        Path.home()
+        / ".local"
+        / "share"
+        / "icons"
+        / "hicolor"
+        / "scalable"
+        / "apps"
+    )
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target_dir / "karenbot.svg")
+    except OSError as exc:
+        log(f"安装桌面图标失败，将使用系统默认图标：{exc}")
+        return None
+    return target_dir / "karenbot.svg"
+
+
 def _install_linux_shortcut(
     install_dir: Path,
     frontend: str,
@@ -4140,6 +4175,7 @@ def _install_linux_shortcut(
 ) -> list[Path]:
     applications = Path.home() / ".local" / "share" / "applications"
     applications.mkdir(parents=True, exist_ok=True)
+    icon_name = "karenbot" if _linux_icon_path() else "applications-system"
     written: list[Path] = []
     if frontend == "gui":
         entries = (
@@ -4176,7 +4212,7 @@ def _install_linux_shortcut(
             f"Comment={comment}\n"
             f"Exec={_desktop_quote(str(exec_target))}\n"
             f"Path={install_dir}\n"
-            "Icon=applications-system\n"
+            f"Icon={icon_name}\n"
             f"Terminal={'true' if terminal else 'false'}\n"
             "Categories=Utility;Chat;\n"
             "StartupNotify=true\n"
@@ -4640,6 +4676,20 @@ def _remove_shortcuts() -> None:
                 log(f"已删除快捷方式：{path}")
         except OSError as exc:
             log(f"删除快捷方式失败（可手动删除）：{path}：{exc}")
+    icon = (
+        Path.home()
+        / ".local"
+        / "share"
+        / "icons"
+        / "hicolor"
+        / "scalable"
+        / "apps"
+        / "karenbot.svg"
+    )
+    try:
+        icon.unlink(missing_ok=True)
+    except OSError as exc:
+        log(f"删除桌面图标失败（可手动删除）：{icon}：{exc}")
 
 
 def _clean_fonts(install_dir: Path | None = None) -> None:

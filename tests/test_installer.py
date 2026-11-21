@@ -2119,6 +2119,51 @@ def test_installer_icon_path_falls_back_to_packaging(tmp_path, monkeypatch):
     assert installer.installer_icon_path() == expected
 
 
+def test_installer_icon_svg_path_falls_back_to_packaging(tmp_path, monkeypatch):
+    missing = tmp_path / "missing.svg"
+    monkeypatch.setattr(installer, "_resource_path", lambda _name: missing)
+    expected = (
+        Path(installer.__file__).resolve().parent
+        / "packaging"
+        / "karenbot.svg"
+    )
+    assert installer.installer_icon_svg_path() == expected
+
+
+def test_linux_shortcut_installs_karenbot_icon(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    source = tmp_path / "karenbot.svg"
+    source.write_text("<svg/>", encoding="utf-8")
+    monkeypatch.setattr(
+        installer, "installer_icon_svg_path", lambda: source
+    )
+    install_dir = tmp_path / "install"
+    installer._install_linux_shortcut(install_dir, "webui")
+    icon = (
+        home
+        / ".local"
+        / "share"
+        / "icons"
+        / "hicolor"
+        / "scalable"
+        / "apps"
+        / "karenbot.svg"
+    )
+    assert icon.read_text(encoding="utf-8") == "<svg/>"
+    desktop = (
+        home
+        / ".local"
+        / "share"
+        / "applications"
+        / "karenbot-webui.desktop"
+    )
+    assert "Icon=karenbot" in desktop.read_text(encoding="utf-8")
+    installer._remove_shortcuts()
+    assert not icon.exists()
+
+
 def test_unregister_windows_uninstall_deletes_key(monkeypatch):
     monkeypatch.setattr(installer, "IS_WINDOWS", True)
     fake = _FakeWinreg()

@@ -29,6 +29,7 @@ INSTALLER_DIR = Path(SPECPATH).resolve()
 VERSION_FILE = INSTALLER_DIR / "packaging" / "windows-version-info.txt"
 MANIFEST_FILE = INSTALLER_DIR / "packaging" / "windows-manifest.xml"
 ICON_FILE = INSTALLER_DIR / "packaging" / "karenbot.ico"
+ICON_SVG = INSTALLER_DIR / "packaging" / "karenbot.svg"
 
 DATAS = [
     (str(INSTALLER_DIR / "mirrors.json"), "."),
@@ -36,6 +37,8 @@ DATAS = [
 ]
 if ICON_FILE.is_file():
     DATAS.append((str(ICON_FILE), "."))
+if ICON_SVG.is_file():
+    DATAS.append((str(ICON_SVG), "."))
 
 a = Analysis(
     [str(INSTALLER_DIR / "gui_install.py")],
