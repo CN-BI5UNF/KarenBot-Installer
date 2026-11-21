@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "KarenBot 主仓库统一发行版 tag"
         required: false
-        default: "v2.0.0-alpha"
+        default: "v2.0.0-alpha.1"
   push:
     tags:
       - "v*"
@@ -34,7 +34,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KARENBOT_TAG: ${{ github.event.inputs.release_tag || 'v2.0.0-alpha' }}
+  KARENBOT_TAG: ${{ github.event.inputs.release_tag || 'v2.0.0-alpha.1' }}
 
 jobs:
   verify:
