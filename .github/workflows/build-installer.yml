@@ -100,6 +100,9 @@ jobs:
           assert (root / "backend" / "__init__.py").is_file()
           assert (root / "webui" / "__init__.py").is_file()
           assert not (root / "gui").exists()
+          favicon = (root / "webui" / "static" / "favicon.svg").read_text(encoding="utf-8")
+          assert "#6FA39A" in favicon
+          assert ">K</text>" in favicon
           manifest = json.loads((root / "modules.json").read_text(encoding="utf-8"))
           assert manifest["installer"] == "online-release"
           assert manifest["distribution"]["repo"] == "CN-BI5UNF/KarenBot"
