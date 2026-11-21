@@ -10,7 +10,7 @@ Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自
 Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装。
 
 仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
-`v1.1.2`，安装器版本 `1.1.2`）
+`v1.1.3`，安装器版本 `1.1.3`）
 
 ## 快速开始
 
@@ -21,9 +21,9 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 `install.sh` 后再执行：
 
 ```bash
-sha=v1.1.2
+sha=v1.1.3
 want=e42a4f02ccbc473283ae0bc9af31be74ec42789eb96a09b4a0c76459c5aaf8c8
-core=32bf42dcf6db96772cb0629c17cccdbc2f70aed7e56301617b0431c0b3bbb50b
+core=fb7fa3c7883be4f45747f7fca6e00b6ac756fadaa1660a9536c36eaeb36702cb
 KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
   ok=0
   for u in \
@@ -51,7 +51,7 @@ KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
 )
 ```
 
-上面的命令把 bootstrap 和安装核心都固定在 tag `v1.1.2`，并分别用
+上面的命令把 bootstrap 和安装核心都固定在 tag `v1.1.3`，并分别用
 SHA256 校验脚本和 `karen_install.py`；这样即使使用第三方镜像，也不会执行
 被替换的旧脚本。想跟随 `main` 最新代码时，去掉 `KAREN_INSTALLER_REF` 和
 `KAREN_INSTALLER_SHA256` 即可。
