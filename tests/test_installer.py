@@ -2133,7 +2133,9 @@ def test_installer_icon_svg_path_falls_back_to_packaging(tmp_path, monkeypatch):
 def test_linux_shortcut_installs_karenbot_icon(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
+    monkeypatch.setattr(installer, "IS_WINDOWS", False)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     source = tmp_path / "karenbot.svg"
     source.write_text("<svg/>", encoding="utf-8")
     monkeypatch.setattr(
