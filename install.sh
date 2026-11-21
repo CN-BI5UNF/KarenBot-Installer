@@ -104,9 +104,10 @@ if [ -n "${KAREN_INSTALLER_SHA256:-}" ]; then
 fi
 
 # 资源文件缺失时 Python 核心有内置默认值；能拿到就一起放在临时目录。
-for resource in mirrors.json windows-gui-package.json; do
+for resource in mirrors.json windows-gui-package.json packaging/karenbot.svg; do
+    name="${resource##*/}"
     curl -fsSL --retry 1 --connect-timeout 8 --max-time 60 \
-        "$BASE/$resource" -o "$TMP_DIR/$resource" 2>/dev/null || true
+        "$BASE/$resource" -o "$TMP_DIR/$name" 2>/dev/null || true
 done
 
 set +e
