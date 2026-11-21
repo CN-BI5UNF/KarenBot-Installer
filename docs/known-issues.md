@@ -190,12 +190,9 @@ Runtime 退出的是缺少 `personas/*/persona_prompt.py`，已按第 8 节处�
 
 ## 18. 无哈希源码包静默走第三方镜像
 
-**处理**：backend/frontend 源码归档没有发布哈希时默认仅 GitHub 直连；
-GUI 首次在线安装会弹窗让用户选择“允许镜像加速 / 仅直连 / 取消”，CLI 可用
-`--allow-unverified` 或 `KAREN_ALLOW_UNVERIFIED=1` 放行，也可用
-`KAREN_BACKEND_SHA256` / `KAREN_GUI_SHA256` / `KAREN_WEBUI_SHA256` 提供哈希。
-GUI 在“GitHub 镜像”已固定为 `direct` 时不再弹窗；选择结果通过显式参数
-传给核心，不再改写 `os.environ`，避免同进程后续安装被上一次选择污染。
+**处理**：v1.1.0 起在线安装只读 KarenBot 统一 Release 的 `modules.json`，
+backend/GUI/WebUI 资产都有发布方 SHA256，因此不再存在“无哈希源码包”路径；
+旧版安装器的弹窗/环境变量逻辑仅保留用于离线包兼容。
 
 ## 19. 安装完成前关闭窗口导致旧版本不回滚
 

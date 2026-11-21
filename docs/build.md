@@ -69,6 +69,7 @@ atom 解析、缺失文件合并、数据根探测、启动器和安装标记；
 
 ## 版本
 
-- `VERSION` / `INSTALLER_VERSION`：`1.0.0-rc`
-- Windows 文件版本：`packaging/windows-version-info.txt`（FileVersion `1.0.0`）
-- 发布 tag：`v1.0.0-rc`（Pre-release）
+- `VERSION` / `INSTALLER_VERSION`：`1.1.0`
+- Windows 文件版本：`packaging/windows-version-info.txt`（FileVersion `1.1.0`）
+- 发布 tag：`v1.1.0`
+- 在线安装目标：`CN-BI5UNF/KarenBot` 统一发行版 `v2.0.0-alpha`

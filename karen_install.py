@@ -82,7 +82,7 @@ def installer_icon_path() -> Path | None:
 
 MIRRORS_FILE = _resource_path("mirrors.json")
 WINDOWS_PACKAGE_FILE = _resource_path("windows-gui-package.json")
-INSTALLER_VERSION = "1.0.0-rc"
+INSTALLER_VERSION = "1.1.0"
 USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 # 仅探测 256KB：既够区分镜像吞吐，又能缩短公共镜像的流量/长尾耗时。
 PROBE_BYTES = 256 * 1024
@@ -129,27 +129,33 @@ DISK_REQUIREMENTS = {
     "webui": 400 * 1024 * 1024,
 }
 
-# 在线安装默认从 GitHub 查询：优先最新稳定版，没有稳定版时选择最新 Release。
-# backend 提供核心程序 + 后端；GUI/WebUI 仍从各自仓库下载界面模块。
+# v2 起在线安装只读 KarenBot 主仓库的统一发行版（modules.json + 三个组件资产）。
 ONLINE_TAG = "auto"
+KARENBOT_REPO = "CN-BI5UNF/KarenBot"
+KARENBOT_MANIFEST = "modules.json"
+KARENBOT_COMPONENT_ASSETS = {
+    "backend": "KarenBot-backend-{tag}.tar.gz",
+    "gui": "KarenBot-GUI-{tag}.tar.gz",
+    "webui": "KarenBot-WebUI-{tag}.tar.gz",
+}
+# 仅用于旧安装记录/兼容测试；在线安装不再直接查询这些仓库。
 ONLINE_BACKEND_REPO = "CN-BI5UNF/KarenBot-backend"
 ONLINE_FRONTEND_REPOS = {
     "gui": "CN-BI5UNF/KarenBot-GUI",
     "webui": "CN-BI5UNF/KarenBot-WebUI",
 }
-ONLINE_ARCHIVE_TEMPLATE = "https://github.com/{repo}/archive/refs/tags/{tag}.tar.gz"
 WINDOWS_BUNDLE_REPO = "CN-BI5UNF/KarenBot-Installer"
 WINDOWS_GUI_ASSET_NAME = "KarenBot-Windows-x64.zip"
 WINDOWS_GUI_ASSET_ENV = "KAREN_GUI_WINDOWS_ASSET"
 PERSONAS_ASSET_NAME = "KarenBot-Personas.zip"
 PERSONAS_ASSET_ENV = "KAREN_PERSONAS_ASSET"
-PERSONAS_REPO = "CN-BI5UNF/KarenBot"
+PERSONAS_REPO = KARENBOT_REPO
 PERSONAS_BRANCH_ARCHIVE = (
-    "https://github.com/CN-BI5UNF/KarenBot/archive/refs/heads/main.tar.gz"
+    f"https://github.com/{KARENBOT_REPO}/archive/refs/heads/main.tar.gz"
 )
 # 手动测速默认用稳定存在的主分支归档，避免 alpha tag 被清理后全部报错。
 DEFAULT_PROBE_URL = (
-    f"https://github.com/{ONLINE_BACKEND_REPO}/archive/refs/heads/main.tar.gz"
+    f"https://github.com/{KARENBOT_REPO}/archive/refs/heads/main.tar.gz"
 )
 
 
@@ -2438,10 +2444,6 @@ def _validate_online_tag(value: str) -> str:
     return tag
 
 
-def _online_archive_url(repo: str, tag: str) -> str:
-    return ONLINE_ARCHIVE_TEMPLATE.format(repo=repo, tag=tag)
-
-
 def _parse_release_feed(
     data: bytes, repo: str | None = None
 ) -> tuple[str | None, str]:
@@ -2487,6 +2489,202 @@ def _release_tag_from_atom(
     if tag is None:
         fail(error)
     return tag
+
+
+def _release_tags_from_atom(
+    data: bytes, repo: str | None = None, *, limit: int = 10
+) -> list[str]:
+    """按 feed 顺序返回多个合法 Release tag（去重）。"""
+    try:
+        root = ElementTree.fromstring(data)
+    except (ElementTree.ParseError, LookupError):
+        return []
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    tags: list[str] = []
+    seen: set[str] = set()
+    for entry in root.findall("atom:entry", ns):
+        link = entry.find("atom:link", ns)
+        href = str(link.attrib.get("href") or "") if link is not None else ""
+        if repo is not None and f"/{repo}/releases/tag/" not in href:
+            continue
+        match = re.search(r"/releases/tag/([0-9A-Za-z._-]+)", href)
+        if not match:
+            continue
+        tag = _valid_online_tag(unquote(match.group(1)))
+        if tag is None or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+        if len(tags) >= max(1, int(limit)):
+            break
+    return tags
+
+
+def _distribution_manifest_url(tag: str) -> str:
+    return (
+        f"https://github.com/{KARENBOT_REPO}/releases/download/"
+        f"{tag}/{KARENBOT_MANIFEST}"
+    )
+
+
+def _distribution_asset_url(tag: str, asset: str) -> str:
+    return (
+        f"https://github.com/{KARENBOT_REPO}/releases/download/"
+        f"{tag}/{asset}"
+    )
+
+
+def _manifest_components(
+    tag: str, payload: Any, frontend: str
+) -> tuple[dict[str, Any] | None, str]:
+    """校验 modules.json，返回 backend + 当前前端组件或错误原因。"""
+    if not isinstance(payload, dict):
+        return None, "modules.json 不是对象"
+    if payload.get("schema") != 1:
+        return None, f"modules.json schema 不受支持：{payload.get('schema')!r}"
+    if str(payload.get("release") or "").strip() != tag:
+        return None, "modules.json 的 release 与 tag 不一致"
+    raw_components = payload.get("components")
+    if not isinstance(raw_components, dict):
+        return None, "modules.json 缺少 components"
+    wanted = ("backend", frontend)
+    components: dict[str, Any] = {}
+    for component in wanted:
+        entry = raw_components.get(component)
+        if not isinstance(entry, dict):
+            return None, f"modules.json 缺少 {component}"
+        component_tag = str(entry.get("tag") or "").strip()
+        version = str(entry.get("version") or "").strip()
+        asset = str(entry.get("asset") or "").strip()
+        digest = str(entry.get("sha256") or "").strip().lower()
+        size = entry.get("size")
+        expected_asset = KARENBOT_COMPONENT_ASSETS[component].format(tag=tag)
+        if not _valid_online_tag(component_tag):
+            return None, f"{component} 的 tag 不合法"
+        if version != component_tag.lstrip("vV"):
+            return None, f"{component} 的 version 与 tag 不一致"
+        if asset != expected_asset or "/" in asset or "\\" in asset:
+            return None, f"{component} 的资产名不符合契约：{asset!r}"
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return None, f"{component} 的 SHA256 不合法"
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            return None, f"{component} 的 size 不合法"
+        components[component] = {
+            "repo": {
+                "backend": ONLINE_BACKEND_REPO,
+                "gui": ONLINE_FRONTEND_REPOS["gui"],
+                "webui": ONLINE_FRONTEND_REPOS["webui"],
+            }[component],
+            "tag": component_tag,
+            "version": version,
+            "asset": asset,
+            "sha256": digest,
+            "size": size,
+        }
+    return components, ""
+
+
+def _fetch_distribution_manifest(
+    tag: str,
+    *,
+    cancel_event: Any | None = None,
+    quiet: bool = False,
+    frontend: str = "webui",
+) -> dict[str, Any] | None:
+    """下载并校验 KarenBot 统一发行版 manifest。
+
+    ``quiet`` 用于按 atom 顺序探测旧 Release：失败返回 None，不中止安装。
+    """
+    url = _distribution_manifest_url(tag)
+    errors: list[str] = []
+    for mirror in available_mirrors():
+        _check_cancel(cancel_event)
+        target = mirrored_url(url, mirror)
+        try:
+            with _urlopen(
+                _request(target),
+                timeout=GITHUB_PAGE_TIMEOUT,
+                bypass_proxy=_mirror_bypasses_proxy(mirror),
+            ) as response:
+                chunks: list[bytes] = []
+                remaining = 1024 * 1024 + 1
+                while remaining > 0:
+                    chunk = response.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                data = b"".join(chunks)
+            if len(data) > 1024 * 1024:
+                raise ValueError("modules.json 超过 1 MiB")
+            payload = json.loads(data.decode("utf-8"))
+            components, problem = _manifest_components(
+                tag, payload, frontend
+            )
+            if components is None:
+                raise ValueError(problem)
+            if not quiet:
+                log(
+                    f"已读取 KarenBot 发行版清单：{KARENBOT_REPO}@{tag}"
+                    f"（{mirror.get('name', '?')}）"
+                )
+            return components
+        except InstallCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                f"{mirror.get('name', '?')}: {type(exc).__name__}: {exc}"
+            )
+    if quiet:
+        return None
+    fail(
+        f"无法读取 KarenBot 统一发行版 {tag} 的 {KARENBOT_MANIFEST}：\n"
+        + "\n".join(errors)
+    )
+    return None
+
+
+def _resolve_distribution_release(
+    frontend: str,
+    requested_tag: str,
+    *,
+    cancel_event: Any | None = None,
+) -> tuple[str, dict[str, Any], str]:
+    """返回 (release_tag, components, kind)。"""
+    if frontend not in ONLINE_FRONTEND_REPOS:
+        fail(f"不支持的界面：{frontend}")
+    requested = str(requested_tag or "").strip()
+    if requested and requested.lower() not in {"", "auto", "latest"}:
+        tag = _validate_online_tag(requested)
+        log(f"使用指定 KarenBot 发行版：{tag}")
+        components = _fetch_distribution_manifest(
+            tag, cancel_event=cancel_event, frontend=frontend
+        )
+        if components is None:  # pragma: no cover - quiet=False always fails
+            fail(f"KarenBot 发行版 {tag} 没有可用的 {KARENBOT_MANIFEST}")
+        return tag, components, "指定版本"
+
+    data, _final_url = _fetch_github_page(
+        KARENBOT_REPO,
+        "releases.atom",
+        validator=_atom_page_validator(KARENBOT_REPO),
+    )
+    tags = _release_tags_from_atom(data, KARENBOT_REPO, limit=10)
+    if not tags:
+        fail("KarenBot 没有可用的 Release tag")
+    for tag in tags:
+        _check_cancel(cancel_event)
+        components = _fetch_distribution_manifest(
+            tag, cancel_event=cancel_event, quiet=True, frontend=frontend
+        )
+        if components is not None:
+            log(f"{KARENBOT_REPO} 选择统一发行版：{tag}")
+            return tag, components, "统一发行版"
+    fail(
+        "KarenBot 没有可用的统一发行版（modules.json + 组件资产）。\n"
+        "请确认安装器已更新到 v1.1.0+，并检查 KarenBot Release 是否完整。"
+    )
+    raise AssertionError("unreachable")
 
 
 def _latest_page_validator(
@@ -2722,38 +2920,6 @@ def _latest_release_tag(
     tag = _release_tag_from_atom(data, repo)
     log(f"{repo} 未找到稳定版，选择最新 Release：{tag}")
     return tag, "最新版"
-
-
-def _resolve_online_tags(
-    frontend: str,
-    requested_tag: str,
-    *,
-    cancel_event: Any | None = None,
-) -> tuple[str, str]:
-    """返回 (backend_tag, frontend_tag)。
-
-    默认每个仓库优先最新稳定版；没有稳定版时选择最新 Release。
-    显式 --tag 时两个仓库使用同一个 tag。
-    """
-    requested = str(requested_tag or "").strip()
-    if requested and requested.lower() not in {"auto", "latest"}:
-        tag = _validate_online_tag(requested)
-        log(f"使用指定 Release 版本：{tag}")
-        return tag, tag
-
-    frontend_repo = ONLINE_FRONTEND_REPOS[frontend]
-    backend_tag, backend_kind = _latest_release_tag(
-        ONLINE_BACKEND_REPO, cancel_event=cancel_event
-    )
-    _check_cancel(cancel_event)
-    frontend_tag, frontend_kind = _latest_release_tag(
-        frontend_repo, cancel_event=cancel_event
-    )
-    log(
-        f"在线版本：backend={backend_tag}（{backend_kind}），"
-        f"{frontend}={frontend_tag}（{frontend_kind}）"
-    )
-    return backend_tag, frontend_tag
 
 
 def _windows_gui_asset_url(tag: str) -> str:
@@ -3209,6 +3375,12 @@ def _prepare_windows_gui_app(
             "asset_url": asset_url,
         },
     }
+    distribution = bundle_manifest.get("distribution")
+    if isinstance(distribution, dict) and distribution.get("tag"):
+        components["_distribution"] = {
+            "repo": str(distribution.get("repo") or KARENBOT_REPO),
+            "tag": str(distribution["tag"]),
+        }
     return "windows-portable-release", components
 
 
@@ -3235,69 +3407,29 @@ def _prepare_online_app(
             allow_unverified=allow_unverified,
             download_dir=download_dir,
         )
-    backend_tag, frontend_tag = _resolve_online_tags(
+    tag, manifest_components, _kind = _resolve_distribution_release(
         frontend,
         release_tag,
         cancel_event=cancel_event,
     )
-    backend_url = _online_archive_url(ONLINE_BACKEND_REPO, backend_tag)
-    frontend_repo = ONLINE_FRONTEND_REPOS[frontend]
-    frontend_url = _online_archive_url(frontend_repo, frontend_tag)
+    backend_meta = manifest_components["backend"]
+    frontend_meta = manifest_components[frontend]
     downloads = download_dir or (staging / "downloads")
     downloads.mkdir(parents=True, exist_ok=True)
-    backend_expected = _env_sha256("KAREN_BACKEND_SHA256")
-    frontend_expected = _env_sha256(f"KAREN_{frontend.upper()}_SHA256")
-    unverified_allowed = bool(allow_unverified) or _unverified_allowed()
-    if _require_verified() and (not backend_expected or not frontend_expected):
-        fail(
-            "KAREN_REQUIRE_VERIFIED=1：backend/frontend 源码归档缺少 SHA256。\n"
-            "请设置 KAREN_BACKEND_SHA256 和 "
-            f"KAREN_{frontend.upper()}_SHA256 后重试。"
-        )
-    backend_ranked = None
-    frontend_ranked = None
-    if not backend_expected:
-        if unverified_allowed:
-            log(
-                "警告：backend 源码归档没有发布哈希，已按 "
-                f"{UNVERIFIED_ENV}=1 或 GUI 确认允许第三方镜像。"
-            )
-        else:
-            backend_ranked = _direct_ranking(backend_url)
-            log(
-                "backend 源码归档没有发布哈希；默认仅 GitHub 直连。"
-                f"如需镜像加速，请显式设置 {UNVERIFIED_ENV}=1 或提供 "
-                "KAREN_BACKEND_SHA256。"
-            )
-    if not frontend_expected:
-        if unverified_allowed:
-            log(
-                f"警告：{frontend} 源码归档没有发布哈希，已按 "
-                f"{UNVERIFIED_ENV}=1 或 GUI 确认允许第三方镜像。"
-            )
-        else:
-            frontend_ranked = _direct_ranking(frontend_url)
-            log(
-                f"{frontend} 源码归档没有发布哈希；默认仅 GitHub 直连。"
-                f"如需镜像加速，请显式设置 {UNVERIFIED_ENV}=1 或提供 "
-                f"KAREN_{frontend.upper()}_SHA256。"
-            )
-    stage("自动测速并下载 backend 核心包…")
+    stage("自动测速并下载 backend 组件包…")
     backend_archive = download(
-        backend_url,
-        downloads / "backend.tar.gz",
-        expected_sha256=backend_expected,
+        _distribution_asset_url(tag, backend_meta["asset"]),
+        downloads / backend_meta["asset"],
+        expected_sha256=backend_meta["sha256"],
         cancel_event=cancel_event,
-        ranked=backend_ranked,
     )
     _check_cancel(cancel_event)
-    stage(f"自动测速并下载 {frontend.upper()} 界面模块…")
+    stage(f"自动测速并下载 {frontend.upper()} 组件包…")
     frontend_archive = download(
-        frontend_url,
-        downloads / "frontend.tar.gz",
-        expected_sha256=frontend_expected,
+        _distribution_asset_url(tag, frontend_meta["asset"]),
+        downloads / frontend_meta["asset"],
+        expected_sha256=frontend_meta["sha256"],
         cancel_event=cancel_event,
-        ranked=frontend_ranked,
     )
     _check_cancel(cancel_event)
 
@@ -3328,16 +3460,20 @@ def _prepare_online_app(
     )
     components = {
         "backend": {
-            "repo": ONLINE_BACKEND_REPO,
+            "repo": backend_meta["repo"],
             "dir": "backend",
-            "tag": backend_tag,
-            "version": backend_tag.lstrip("v"),
+            "tag": backend_meta["tag"],
+            "version": backend_meta["version"],
         },
         frontend: {
-            "repo": frontend_repo,
+            "repo": frontend_meta["repo"],
             "dir": frontend,
-            "tag": frontend_tag,
-            "version": frontend_tag.lstrip("v"),
+            "tag": frontend_meta["tag"],
+            "version": frontend_meta["version"],
+        },
+        "_distribution": {
+            "repo": KARENBOT_REPO,
+            "tag": tag,
         },
     }
     return "online-release", components
@@ -5238,15 +5374,21 @@ def install(
                 "Runtime 需要项目自带的 大肥鱼/ 或 deepseek/；"
                 "请从主仓库复制 personas/ 到安装目录后重启。"
             )
+        distribution = None
+        if components:
+            distribution = components.pop("_distribution", None)
+        manifest_extra: dict[str, Any] = {
+            "gui_skin": gui_skin if frontend == "gui" else "none",
+            "render_mode": render_mode if frontend == "gui" else "auto",
+        }
+        if distribution:
+            manifest_extra["distribution"] = distribution
         _write_modules_manifest(
             app_root,
             frontend,
             installer=installer_kind,
             components=components,
-            extra={
-                "gui_skin": gui_skin if frontend == "gui" else "none",
-                "render_mode": render_mode if frontend == "gui" else "auto",
-            },
+            extra=manifest_extra,
         )
         # 先把卸载时保留的人格合并进暂存目录：失败时旧安装完全没动，
         # 成功后再整体替换 app/，避免恢复失败留下半套安装。

@@ -473,10 +473,45 @@ def test_find_core_and_frontend_roots(tmp_path):
     assert installer._find_frontend_root(front.parent, "webui") == front
 
 
+def _distribution_components(
+    tag: str = "v2.0.0-alpha", frontend: str = "webui"
+) -> dict:
+    version = tag.lstrip("v")
+    label = {"gui": "GUI", "webui": "WebUI"}[frontend]
+    return {
+        "backend": {
+            "repo": "CN-BI5UNF/KarenBot-backend",
+            "tag": tag,
+            "version": version,
+            "asset": f"KarenBot-backend-{tag}.tar.gz",
+            "sha256": "b" * 64,
+            "size": 100,
+        },
+        frontend: {
+            "repo": f"CN-BI5UNF/KarenBot-{label}",
+            "tag": tag,
+            "version": version,
+            "asset": f"KarenBot-{label}-{tag}.tar.gz",
+            "sha256": "c" * 64,
+            "size": 100,
+        },
+    }
+
+
+def _manifest_payload(
+    tag: str = "v2.0.0-alpha", frontend: str = "webui"
+) -> dict:
+    return {
+        "schema": 1,
+        "release": tag,
+        "components": _distribution_components(tag, frontend),
+    }
+
+
 def test_install_online_composes_backend_and_frontend(tmp_path, monkeypatch):
-    backend_archive = tmp_path / "backend.tar.gz"
+    tag = "v2.0.0-alpha"
     backend_bytes = _tar_gz(
-        backend_archive,
+        tmp_path / "backend.tar.gz",
         {
             "KarenBot-backend-test/main.py": b"",
             "KarenBot-backend-test/backend/__init__.py": b"",
@@ -485,13 +520,22 @@ def test_install_online_composes_backend_and_frontend(tmp_path, monkeypatch):
             "KarenBot-backend-test/pyproject.toml": b"[project]\nname='demo'\n",
         },
     )
-    frontend_archive = tmp_path / "frontend.tar.gz"
     frontend_bytes = _tar_gz(
-        frontend_archive,
+        tmp_path / "frontend.tar.gz",
         {
             "KarenBot-WebUI-test/webui/plugin.json": b"{}",
             "KarenBot-WebUI-test/webui/__init__.py": b"",
         },
+    )
+
+    monkeypatch.setattr(
+        installer,
+        "_resolve_distribution_release",
+        lambda *_args, **_kwargs: (
+            tag,
+            _distribution_components(tag),
+            "测试发行版",
+        ),
     )
 
     def fake_download(url, destination, **_kwargs):
@@ -514,7 +558,7 @@ def test_install_online_composes_backend_and_frontend(tmp_path, monkeypatch):
         create_shortcut=False,
         download_fonts=False,
         online=True,
-        release_tag="v0.1.1-alpha.1",
+        release_tag=tag,
     )
     app = install_dir / "app"
     assert (app / "main.py").is_file()
@@ -523,7 +567,11 @@ def test_install_online_composes_backend_and_frontend(tmp_path, monkeypatch):
     assert (app / "webui" / "plugin.json").is_file()
     manifest = json.loads((app / "modules.json").read_text(encoding="utf-8"))
     assert manifest["installer"] == "online-release"
-    assert manifest["components"]["backend"]["tag"] == "v0.1.1-alpha.1"
+    assert manifest["distribution"] == {
+        "repo": "CN-BI5UNF/KarenBot",
+        "tag": tag,
+    }
+    assert manifest["components"]["backend"]["tag"] == tag
     assert manifest["components"]["webui"]["repo"] == installer.ONLINE_FRONTEND_REPOS["webui"]
 
 
@@ -535,31 +583,55 @@ def test_release_tag_from_atom():
       </entry>
     </feed>"""
     assert installer._release_tag_from_atom(data) == "v1.2.3"
+    assert installer._release_tags_from_atom(
+        data, "demo/repo"
+    ) == ["v1.2.3"]
 
 
-def test_resolve_online_tags_uses_release_policy(monkeypatch):
-    def fake_latest(repo, **_kwargs):
-        if repo == installer.ONLINE_BACKEND_REPO:
-            return "v1.2.0", "稳定版"
-        return "v1.1.0", "最新版"
+def test_resolve_distribution_release_prefers_manifest_release(monkeypatch):
+    atom = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry><link rel="alternate"
+        href="https://github.com/CN-BI5UNF/KarenBot/releases/tag/v3.0.0-alpha"/></entry>
+      <entry><link rel="alternate"
+        href="https://github.com/CN-BI5UNF/KarenBot/releases/tag/v2.0.0-alpha"/></entry>
+    </feed>"""
+    monkeypatch.setattr(
+        installer, "_fetch_github_page", lambda *_args, **_kwargs: (atom, "")
+    )
 
-    monkeypatch.setattr(installer, "_latest_release_tag", fake_latest)
-    backend_tag, frontend_tag = installer._resolve_online_tags(
+    def fake_manifest(tag, **_kwargs):
+        if tag == "v2.0.0-alpha":
+            return _distribution_components(tag)
+        return None
+
+    monkeypatch.setattr(
+        installer, "_fetch_distribution_manifest", fake_manifest
+    )
+    tag, components, kind = installer._resolve_distribution_release(
         "webui", "auto"
     )
-    assert backend_tag == "v1.2.0"
-    assert frontend_tag == "v1.1.0"
+    assert tag == "v2.0.0-alpha"
+    assert components["webui"]["version"] == "2.0.0-alpha"
+    assert kind == "统一发行版"
 
 
 def test_online_explicit_tag_bypasses_release_queries(monkeypatch):
     def fail_lookup(*_args, **_kwargs):
-        raise AssertionError("explicit tag must not query GitHub")
+        raise AssertionError("explicit tag must not query releases.atom")
 
-    monkeypatch.setattr(installer, "_latest_release_tag", fail_lookup)
-    assert installer._resolve_online_tags("gui", "v9.9.9") == (
-        "v9.9.9",
-        "v9.9.9",
+    monkeypatch.setattr(installer, "_fetch_github_page", fail_lookup)
+    monkeypatch.setattr(
+        installer,
+        "_fetch_distribution_manifest",
+        lambda tag, **_kwargs: _distribution_components(tag, "gui"),
     )
+    tag, components, kind = installer._resolve_distribution_release(
+        "gui", "v9.9.9"
+    )
+    assert tag == "v9.9.9"
+    assert components["gui"]["tag"] == "v9.9.9"
+    assert kind == "指定版本"
 
 
 def test_mirror_score_prefers_throughput_and_low_latency():
@@ -680,8 +752,12 @@ def _make_portable_app(root: Path) -> Path:
     (app / "windows-bundle.json").write_text(
         json.dumps(
             {
-                "backend": {"tag": "v0.1.1-alpha.1"},
-                "gui": {"tag": "v0.1.1-alpha.1"},
+                "distribution": {
+                    "repo": "CN-BI5UNF/KarenBot",
+                    "tag": "v2.0.0-alpha",
+                },
+                "backend": {"tag": "v2.0.0-alpha"},
+                "gui": {"tag": "v2.0.0-alpha"},
                 "runtime": {"kind": "windows-gtk4-portable"},
             }
         ),
@@ -717,11 +793,6 @@ def test_windows_gui_online_install_from_local_asset(tmp_path, monkeypatch):
             if path.is_file():
                 zf.write(path, path.relative_to(tmp_path / "bundle"))
 
-    monkeypatch.setattr(
-        installer,
-        "_resolve_online_tags",
-        lambda *_args, **_kwargs: ("v0.1.1-alpha.1", "v0.1.1-alpha.1"),
-    )
     install_dir = tmp_path / "install"
     installer.install(
         frontend="gui",
@@ -746,8 +817,12 @@ def test_windows_gui_online_install_from_local_asset(tmp_path, monkeypatch):
         (install_dir / "app" / "modules.json").read_text(encoding="utf-8")
     )
     assert manifest["installer"] == "windows-portable-release"
-    assert manifest["components"]["gui"]["tag"] == "v0.1.1-alpha.1"
+    assert manifest["components"]["gui"]["tag"] == "v2.0.0-alpha"
     assert manifest["components"]["bundle"]["tag"] == "custom"
+    assert manifest["distribution"] == {
+        "repo": "CN-BI5UNF/KarenBot",
+        "tag": "v2.0.0-alpha",
+    }
 
 
 def test_windows_gui_asset_missing_has_actionable_message(tmp_path, monkeypatch):
@@ -2507,35 +2582,53 @@ def test_env_sha256_accepts_lowercase_hash(monkeypatch):
     assert installer._env_sha256("KAREN_BACKEND_SHA256") == digest
 
 
-def test_require_verified_blocks_unhashed_online_sources(monkeypatch, tmp_path):
+def test_fetch_distribution_manifest_parses_release(monkeypatch):
+    payload = json.dumps(_manifest_payload()).encode("utf-8")
     monkeypatch.setattr(
         installer,
-        "_resolve_online_tags",
-        lambda *_args, **_kwargs: ("v1.0.0", "v1.0.0"),
+        "_MIRROR_CACHE",
+        [{"name": "direct", "kind": "direct", "enabled": True}],
     )
-    monkeypatch.setenv("KAREN_REQUIRE_VERIFIED", "1")
-    monkeypatch.delenv("KAREN_BACKEND_SHA256", raising=False)
-    monkeypatch.delenv("KAREN_WEBUI_SHA256", raising=False)
-    with pytest.raises(SystemExit) as error:
-        installer._prepare_online_app(
-            tmp_path,
-            frontend="webui",
-            release_tag="auto",
-            cancel_event=None,
-        )
-    assert "KAREN_REQUIRE_VERIFIED" in error.value.message
-
-
-def test_online_sources_use_explicit_hashes(monkeypatch, tmp_path):
     monkeypatch.setattr(
         installer,
-        "_resolve_online_tags",
-        lambda *_args, **_kwargs: ("v1.0.0", "v1.0.0"),
+        "_urlopen",
+        lambda *_args, **_kwargs: _DownloadResponse(payload),
     )
-    backend_hash = "b" * 64
-    frontend_hash = "c" * 64
-    monkeypatch.setenv("KAREN_BACKEND_SHA256", backend_hash)
-    monkeypatch.setenv("KAREN_WEBUI_SHA256", frontend_hash)
+    components = installer._fetch_distribution_manifest(
+        "v2.0.0-alpha", frontend="webui"
+    )
+    assert components["backend"]["asset"] == (
+        "KarenBot-backend-v2.0.0-alpha.tar.gz"
+    )
+    assert components["webui"]["sha256"] == "c" * 64
+
+
+def test_manifest_rejects_bad_hash_and_asset_name():
+    payload = _manifest_payload()
+    payload["components"]["backend"]["sha256"] = "not-a-hash"
+    components, problem = installer._manifest_components(
+        "v2.0.0-alpha", payload, "webui"
+    )
+    assert components is None
+    assert "SHA256" in problem
+
+    payload = _manifest_payload()
+    payload["components"]["webui"]["asset"] = "../evil.tar.gz"
+    components, problem = installer._manifest_components(
+        "v2.0.0-alpha", payload, "webui"
+    )
+    assert components is None
+    assert "资产名" in problem
+
+
+def test_online_sources_use_manifest_hashes(monkeypatch, tmp_path):
+    tag = "v2.0.0-alpha"
+    components = _distribution_components(tag)
+    monkeypatch.setattr(
+        installer,
+        "_resolve_distribution_release",
+        lambda *_args, **_kwargs: (tag, components, "测试发行版"),
+    )
     captured: list[dict] = []
 
     def fake_download(url, destination, **kwargs):
@@ -2553,13 +2646,19 @@ def test_online_sources_use_explicit_hashes(monkeypatch, tmp_path):
         installer._prepare_online_app(
             tmp_path,
             frontend="webui",
-            release_tag="auto",
+            release_tag=tag,
             cancel_event=None,
         )
-    assert captured[0]["expected_sha256"] == backend_hash
-    assert captured[0]["ranked"] is None
-    assert captured[1]["expected_sha256"] == frontend_hash
-    assert captured[1]["ranked"] is None
+    assert captured[0]["url"].endswith(
+        "KarenBot-backend-v2.0.0-alpha.tar.gz"
+    )
+    assert captured[0]["expected_sha256"] == "b" * 64
+    assert captured[0].get("ranked") is None
+    assert captured[1]["url"].endswith(
+        "KarenBot-WebUI-v2.0.0-alpha.tar.gz"
+    )
+    assert captured[1]["expected_sha256"] == "c" * 64
+    assert captured[1].get("ranked") is None
 
 
 # ---------------------------------------------------------------------------
@@ -2654,56 +2753,6 @@ def test_default_probe_url_matches_windows_asset(monkeypatch):
     assert "/releases/latest/download/" in windows
     assert installer.windows_gui_asset_name() in windows
     assert installer.default_probe_url("webui") == installer.DEFAULT_PROBE_URL
-
-
-def _capture_online_sources(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        installer,
-        "_resolve_online_tags",
-        lambda *_args, **_kwargs: ("v1.0.0", "v1.0.0"),
-    )
-    captured: list[dict] = []
-
-    def fake_download(url, destination, **kwargs):
-        captured.append({"url": url, **kwargs})
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"fake")
-        return destination
-
-    monkeypatch.setattr(installer, "download", fake_download)
-    monkeypatch.setattr(
-        installer,
-        "extract_archive",
-        lambda *_args, **_kwargs: installer.fail("stop-after-capture"),
-    )
-    with pytest.raises(SystemExit):
-        installer._prepare_online_app(
-            tmp_path,
-            frontend="webui",
-            release_tag="auto",
-            cancel_event=None,
-        )
-    return captured
-
-
-def test_unverified_online_sources_default_to_direct(monkeypatch, tmp_path):
-    monkeypatch.delenv(installer.UNVERIFIED_ENV, raising=False)
-    monkeypatch.delenv("KAREN_BACKEND_SHA256", raising=False)
-    monkeypatch.delenv("KAREN_WEBUI_SHA256", raising=False)
-    captured = _capture_online_sources(monkeypatch, tmp_path)
-    assert captured[0]["ranked"][0]["mirror"] == "direct"
-    assert captured[1]["ranked"][0]["mirror"] == "direct"
-
-
-def test_unverified_online_sources_use_mirrors_after_opt_in(
-    monkeypatch, tmp_path
-):
-    monkeypatch.setenv(installer.UNVERIFIED_ENV, "1")
-    monkeypatch.delenv("KAREN_BACKEND_SHA256", raising=False)
-    monkeypatch.delenv("KAREN_WEBUI_SHA256", raising=False)
-    captured = _capture_online_sources(monkeypatch, tmp_path)
-    assert captured[0]["ranked"] is None
-    assert captured[1]["ranked"] is None
 
 
 class _RangeResponse:

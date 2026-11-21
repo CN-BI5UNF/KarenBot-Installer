@@ -158,6 +158,11 @@ def main() -> int:
     parser.add_argument("--work-dir", type=Path, default=None)
     parser.add_argument("--backend-tag", default="unknown")
     parser.add_argument("--gui-tag", default="unknown")
+    parser.add_argument(
+        "--release-tag",
+        default="",
+        help="KarenBot 主仓库统一发行版 tag；默认取 --backend-tag",
+    )
     parser.add_argument("--personas-tag", default="main")
     parser.add_argument("--keep-work", action="store_true")
     args = parser.parse_args()
@@ -189,6 +194,20 @@ def main() -> int:
             raise SystemExit(f"backend directory invalid: {backend}")
         if not (gui / "gui").is_dir():
             raise SystemExit(f"GUI directory invalid: {gui}")
+        release_tag = (args.release_tag or args.backend_tag).strip()
+        expected_version = release_tag.lstrip("vV")
+        for label, root in (("backend", backend), ("gui", gui)):
+            version_file = root / "VERSION"
+            actual = (
+                version_file.read_text(encoding="utf-8").strip()
+                if version_file.is_file()
+                else ""
+            )
+            if expected_version and actual != expected_version:
+                raise SystemExit(
+                    f"{label} VERSION={actual!r} does not match "
+                    f"release tag {release_tag!r}"
+                )
         shutil.copytree(
             backend, bundle, dirs_exist_ok=True, ignore=copy_ignore(backend)
         )
@@ -312,8 +331,13 @@ def main() -> int:
             env=env,
         )
 
+        release_tag = (args.release_tag or args.backend_tag).strip()
         manifest = {
             "schema": 1,
+            "distribution": {
+                "repo": "CN-BI5UNF/KarenBot",
+                "tag": release_tag,
+            },
             "backend": {
                 "repo": "CN-BI5UNF/KarenBot-backend",
                 "tag": args.backend_tag,

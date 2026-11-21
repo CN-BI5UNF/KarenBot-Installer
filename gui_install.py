@@ -468,7 +468,7 @@ class InstallerApp:
 
         self.source_radios = []
         for row, text, value in (
-            (0, "在线安装（自动选择稳定版/最新版）", "online"),
+            (0, "在线安装（自动选择 KarenBot 统一发行版）", "online"),
             (1, "本地源码目录", "source"),
             (2, "本地安装包", "archive"),
         ):
@@ -957,46 +957,8 @@ class InstallerApp:
     def _confirm_unverified_source(
         self, *, online: bool, frontend: str
     ) -> bool | None:
-        """返回 True=允许第三方镜像，False=仅直连，None=取消安装。
-
-        不再修改 ``os.environ``：用户这次的选择通过 ``allow_unverified``
-        显式传给核心，避免同一进程内后续安装被上一次选择污染。
-        """
-        if not online:
-            return False
-        if os.name == "nt" and frontend == "gui":
-            # Windows 便携包本身强制要求可信 SHA256，不需要这个提示。
-            return False
-        if self.github_mirror.get().strip().casefold() == "direct":
-            # 已经明确固定 GitHub 直连，弹窗只会制造困惑。
-            return False
-        enabled = os.environ.get(core.UNVERIFIED_ENV, "").strip().casefold()
-        if enabled in {"1", "true", "yes", "on"}:
-            return True
-        required = os.environ.get(
-            "KAREN_REQUIRE_VERIFIED", ""
-        ).strip().casefold()
-        if required in {"1", "true", "yes", "on"}:
-            # 核心会给出明确的缺少哈希错误。
-            return False
-        backend_hash = os.environ.get("KAREN_BACKEND_SHA256", "").strip()
-        frontend_hash = os.environ.get(
-            f"KAREN_{frontend.upper()}_SHA256", ""
-        ).strip()
-        if backend_hash and frontend_hash:
-            return False
-        answer = messagebox.askyesnocancel(
-            "源码包没有发布哈希",
-            "backend/frontend 使用 GitHub 自动源码归档，上游没有发布 SHA256。\n\n"
-            "【是】允许第三方镜像加速（快，但镜像可能篡改源码）\n"
-            "【否】仅使用 GitHub 直连（更安全，部分网络可能连不上）\n"
-            "【取消】中止安装\n\n"
-            "也可以通过 KAREN_BACKEND_SHA256 / "
-            f"KAREN_{frontend.upper()}_SHA256 提供哈希。",
-        )
-        if answer is None:
-            return None
-        return bool(answer)
+        """v2 统一发行版自带 SHA256，在线安装不再询问未校验镜像。"""
+        return False
 
     def _start_install(self) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -1089,7 +1051,7 @@ class InstallerApp:
         self._clear_log()
         self.notebook.select(1)
         source_desc = (
-            "在线安装（自动选择稳定版/最新版）"
+            "在线安装（自动选择 KarenBot 统一发行版）"
             if online
             else str(source_dir or archive)
         )

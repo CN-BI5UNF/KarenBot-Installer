@@ -34,7 +34,7 @@ KarenBot-Windows-x64/
     大肥鱼/persona_prompt.py
     deepseek/persona_prompt.py
   main.py                          # KarenBot 宿主入口
-  windows-bundle.json              # 本次打包的 backend/GUI/personas/Python/GTK 版本
+  windows-bundle.json              # KarenBot 发行版 tag + backend/GUI/personas/Python/GTK 版本
   runtime/
     python.exe
     pythonw.exe
@@ -76,8 +76,9 @@ KarenBot-Windows-x64/
 
 `.github/workflows/build-installer.yml` 的 `build-windows-bundle` job：
 
-1. checkout 本仓库、`KarenBot-backend`、`KarenBot-GUI`（tag 可手动指定），
-   以及 `KarenBot` 主仓库的 `personas/`（backend 仓库本身只有空壳）；
+1. checkout 本仓库，以及 `CN-BI5UNF/KarenBot` 主仓库的 `v2.0.0-alpha`
+   （含 `modules/KarenBot-backend`、`modules/KarenBot-GUI` submodule 和
+   `personas/`）；`--release-tag` 可手动指定；
 2. 下载并校验 **gvsbuild GTK4 2026.8.0 x64**（MSVC ABI，含 GTK4、
    libadwaita、PyGObject/PyCairo cp314 wheels 和全部依赖）：
 

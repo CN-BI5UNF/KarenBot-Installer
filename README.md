@@ -10,7 +10,7 @@ Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自
 Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装。
 
 仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
-`v1.0.0-rc`，安装器版本 `1.0.0-rc`）
+`v1.1.0`，安装器版本 `1.1.0`）
 
 ## 快速开始
 
@@ -21,9 +21,9 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 `install.sh` 后再执行：
 
 ```bash
-sha=v1.0.0-rc
+sha=v1.1.0
 want=2358b7ea0e1e8bcf421db5c4d93d370b421170839a8ff78c9d456c8e97558b57
-core=3051ab40554e080b3fc2167056360d6e7b8ba12f7b629809ba3f8b4a76141986
+core=a6eab44d7374adf537f21368fb92ab52b3bee1d3f83e9ac669ab282c9e51ed68
 KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
   ok=0
   for u in \
@@ -51,7 +51,7 @@ KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
 )
 ```
 
-上面的命令把 bootstrap 和安装核心都固定在 tag `v1.0.0-rc`，并分别用
+上面的命令把 bootstrap 和安装核心都固定在 tag `v1.1.0`，并分别用
 SHA256 校验脚本和 `karen_install.py`；这样即使使用第三方镜像，也不会执行
 被替换的旧脚本。想跟随 `main` 最新代码时，去掉 `KAREN_INSTALLER_REF` 和
 `KAREN_INSTALLER_SHA256` 即可。
@@ -75,9 +75,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer
 # 在线安装 WebUI
 ./install.sh --frontend webui --online
 
-# 本地源码安装（开发/本机验证）
+# 本地源码安装（开发/本机验证；需已按 umbrella 布局组装）
 ./install.sh --frontend gui \
-  --source-dir /path/to/KarenBot-GUI \
+  --source-dir /path/to/KarenBot \
   --dir ~/.local/opt/karenbot --no-shortcut
 
 # 本地 tar/zip 安装包
@@ -85,7 +85,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer
 
 # 只测镜像速度
 ./install.sh --probe-url \
-  https://github.com/CN-BI5UNF/KarenBot-backend/archive/refs/tags/v0.1.1-alpha.1.tar.gz
+  https://github.com/CN-BI5UNF/KarenBot/archive/refs/heads/main.tar.gz
 ```
 
 ### GUI
@@ -116,8 +116,9 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
    窗口），不会为每个资产重复测速。Release 页面/feed 解析也采用并发竞速：
    先请求直连，1.5 秒无响应就并发启动镜像，首个有效响应立即胜出；直连
    404 视为权威结论直接回退 `releases.atom`，不再串行等待所有镜像。
-2. **在线 Release 安装**：Linux 下载 backend 核心包 + GUI/WebUI 源码模块；
-   Windows 原生 GUI 下载 `KarenBot-Windows-x64.zip` 便携包。
+2. **在线 Release 安装**：从 `CN-BI5UNF/KarenBot` 的 `modules.json` 读取组件
+   资产与 SHA256，下载 backend + 所选前端；Windows 原生 GUI 使用同一
+   KarenBot 发行版构建的 `KarenBot-Windows-x64.zip` 便携包。
 3. **内置人格补齐**：backend 仓库的 `personas/` 只有空壳；Windows 便携包
    在 CI 中从主仓库复制人格，Linux/WebUI 在线安装在安装阶段下载
    `KarenBot-Personas.zip`（失败时回退主仓库源码包），避免 Runtime 因
@@ -245,14 +246,12 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
   清单时中止，确认风险时可设置 `KAREN_ALLOW_UNVERIFIED=1`；
 - 人格资产同样可使用镜像清单；清单缺失或没有该资产时，回退下载主仓库源码包，
   回退包在无哈希时强制直连；
-- backend/frontend 的 GitHub 自动源码归档没有发布方哈希，安装器默认**仅使用
-  GitHub 直连**；需要第三方镜像加速时必须显式设置 `KAREN_ALLOW_UNVERIFIED=1`
-  或提供下面的哈希（GUI 会弹窗确认）：
+- v2 在线安装的 backend/GUI/WebUI 资产都必须匹配 KarenBot Release 中
+  `modules.json` 的 SHA256；manifest 自身从 GitHub Release 下载，不再使用
+  无哈希的 GitHub 自动源码归档：
 
 | 环境变量 | 作用 |
 |---|---|
-| `KAREN_BACKEND_SHA256` | 校验 backend 源码归档 |
-| `KAREN_GUI_SHA256` / `KAREN_WEBUI_SHA256` | 校验所选界面模块源码归档 |
 | `KAREN_PERSONAS_SHA256` | 校验人格回退用的主仓库源码归档 |
 | `KAREN_WINDOWS_GUI_SHA256` | 校验自定义/覆盖的 Windows GUI 便携包 |
 | `KAREN_REQUIRE_VERIFIED=1` | 严格模式：缺少上述哈希时直接中止，不允许未校验下载 |
@@ -268,8 +267,9 @@ Release 流水线会为 Windows 便携包、人格包、安装器本体，以及
 ## Windows 原生 GUI
 
 Windows 源码安装不现实：GTK4/PyGObject 需要一整套便携运行时。安装器改为
-下载安装器 Release 的预构建包 `KarenBot-Windows-x64.zip`，并按
-`windows-gui-package.json` 契约校验：
+下载安装器 Release 的预构建包 `KarenBot-Windows-x64.zip`；该包由 CI 从
+KarenBot 主仓库 `v2.0.0-alpha` 的 submodule 组装，并写入同一发行版 tag。
+安装器按 `windows-gui-package.json` 契约校验：
 
 - `runtime/python.exe`（启动器会优先使用同目录的 `pythonw.exe`，避免黑框）；
 - `gtk-4-1.dll`、`adwaita-1-0.dll`、`gobject-2.0-0.dll`；
@@ -312,7 +312,9 @@ Cairo 软件渲染开始，桌面快捷方式也提供“KarenBot GUI (兼容模
 - `windows-2022` + gvsbuild GTK4 / CPython 3.14 → `KarenBot-Windows-x64.zip`（GTK4 便携包，Release 资产，不放进 exe）；
 - `ubuntu-24.04` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-x64`（x64，保留 console）；
 - `ubuntu-24.04-arm` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-arm64`（arm64，保留 console）；
-- `workflow_dispatch` 手动触发；PR 只跑 verify；
+- `workflow_dispatch` 手动触发；PR 跑 verify 和真实「在线安装」测试；
+- 在线安装测试直接从 `CN-BI5UNF/KarenBot` 的 `v2.0.0-alpha` Release 下载
+  `modules.json` + 组件资产，不使用本地源码/安装包；
 - 推送 `v*` tag 时自动把安装器、Windows 便携包、人格资产
   `KarenBot-Personas.zip` 和 `SHA256SUMS.txt` 附加到 GitHub Release。
 

@@ -654,44 +654,25 @@ def test_gui_close_waits_for_worker_rollback(monkeypatch, tmp_path):
             pass
 
 
-def test_gui_unverified_prompt_returns_choice_without_env(monkeypatch, tmp_path):
+def test_gui_unverified_prompt_is_not_used_for_unified_release(
+    monkeypatch, tmp_path
+):
     root, app, _messages = _make_app(tmp_path, monkeypatch)
-    monkeypatch.delenv(karen_install.UNVERIFIED_ENV, raising=False)
-    monkeypatch.delenv("KAREN_REQUIRE_VERIFIED", raising=False)
-    monkeypatch.delenv("KAREN_BACKEND_SHA256", raising=False)
-    monkeypatch.delenv("KAREN_WEBUI_SHA256", raising=False)
+    prompts: list[tuple] = []
+    monkeypatch.setattr(
+        gui_install.messagebox,
+        "askyesnocancel",
+        lambda *args, **kwargs: prompts.append(args) or True,
+    )
     try:
-        monkeypatch.setattr(
-            gui_install.messagebox,
-            "askyesnocancel",
-            lambda *args, **kwargs: True,
-        )
         assert (
-            app._confirm_unverified_source(online=True, frontend="webui")
-            is True
-        )
-        assert karen_install.UNVERIFIED_ENV not in os.environ
-
-        monkeypatch.setattr(
-            gui_install.messagebox,
-            "askyesnocancel",
-            lambda *args, **kwargs: False,
-        )
-        assert (
-            app._confirm_unverified_source(online=True, frontend="webui")
+            app._confirm_unverified_source(
+                online=True, frontend="webui"
+            )
             is False
         )
+        assert prompts == []
         assert karen_install.UNVERIFIED_ENV not in os.environ
-
-        monkeypatch.setattr(
-            gui_install.messagebox,
-            "askyesnocancel",
-            lambda *args, **kwargs: None,
-        )
-        assert (
-            app._confirm_unverified_source(online=True, frontend="webui")
-            is None
-        )
     finally:
         os.environ.pop(karen_install.UNVERIFIED_ENV, None)
         root.destroy()
