@@ -10,7 +10,7 @@ Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自
 Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装。
 
 仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
-`v1.1.3`，安装器版本 `1.1.3`）
+`v1.1.4`，安装器版本 `1.1.4`）
 
 ## 快速开始
 
@@ -21,9 +21,9 @@ Connection reset by peer`）。下面这条命令会依次尝试多个镜像，�
 `install.sh` 后再执行：
 
 ```bash
-sha=v1.1.3
+sha=v1.1.4
 want=e42a4f02ccbc473283ae0bc9af31be74ec42789eb96a09b4a0c76459c5aaf8c8
-core=fb7fa3c7883be4f45747f7fca6e00b6ac756fadaa1660a9536c36eaeb36702cb
+core=df2b3cf71ceac6fcd0b42b6f2e3a891a74da092274ddfe866927226bd9d52391
 KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
   ok=0
   for u in \
@@ -51,7 +51,7 @@ KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
 )
 ```
 
-上面的命令把 bootstrap 和安装核心都固定在 tag `v1.1.3`，并分别用
+上面的命令把 bootstrap 和安装核心都固定在 tag `v1.1.4`，并分别用
 SHA256 校验脚本和 `karen_install.py`；这样即使使用第三方镜像，也不会执行
 被替换的旧脚本。想跟随 `main` 最新代码时，去掉 `KAREN_INSTALLER_REF` 和
 `KAREN_INSTALLER_SHA256` 即可。
@@ -105,8 +105,23 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 
 - **原生 GUI**：桌面原生窗口，图片预览、默认应用打开、文件夹定位更顺手；
   Linux 需要系统 GTK4/libadwaita/PyGObject，Windows 使用便携 GTK4 预构建包。
-- **WebUI**：浏览器访问，不需要 GTK，局域网内手机/平板也能用；文件以浏览器
-  下载、内嵌打开为主，需要保持服务运行并管理访问令牌。
+- **WebUI**：浏览器访问，不需要 GTK；文件以浏览器下载、内嵌打开为主，需要
+  保持服务运行并管理访问令牌。
+
+### WebUI 局域网访问
+
+安装器生成的 WebUI 启动器默认**只监听 127.0.0.1**，只有本机能访问。需要让同一
+局域网内的手机/平板访问时，任选一种方式：
+
+1. 在本机打开 WebUI → **设置 → 网络**，打开“允许暴露在局域网中”，保存后点
+   “立即重启 WebUI”；
+2. 编辑 `<安装目录>/data/instances/default/config.yaml`，设置
+   `webui.allow_lan: true`，然后重启 WebUI 服务；
+3. 启动时显式加 `--host 0.0.0.0`（会覆盖配置），例如
+   `python main.py --host 0.0.0.0 --port 8000`。
+
+开启后仍然需要 WebUI 访问令牌；不要把端口暴露到不可信网络，也不要随意使用
+`--no-auth`。
 
 ## 安装器做了什么
 

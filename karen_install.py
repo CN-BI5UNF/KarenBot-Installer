@@ -94,7 +94,7 @@ def installer_icon_svg_path() -> Path | None:
 
 MIRRORS_FILE = _resource_path("mirrors.json")
 WINDOWS_PACKAGE_FILE = _resource_path("windows-gui-package.json")
-INSTALLER_VERSION = "1.1.3"
+INSTALLER_VERSION = "1.1.4"
 USER_AGENT = f"KarenBot-Installer/{INSTALLER_VERSION}"
 # 仅探测 256KB：既够区分镜像吞吐，又能缩短公共镜像的流量/长尾耗时。
 PROBE_BYTES = 256 * 1024
@@ -3945,11 +3945,11 @@ def _write_launchers(
         webui_command = [str(prebuilt_exe)]
     elif portable_python is not None:
         gui_command = [str(portable_python), "-m", "gui"]
+        # 不写死 --host：由 data/config.yaml 的 webui.allow_lan 决定
+        # （默认仅本机；设置页「网络」可开启局域网访问）。
         webui_command = [
             str(portable_python),
             "main.py",
-            "--host",
-            "127.0.0.1",
             "--port",
             "8000",
         ]
@@ -3959,8 +3959,6 @@ def _write_launchers(
         webui_command = [
             str(python),
             "main.py",
-            "--host",
-            "127.0.0.1",
             "--port",
             "8000",
         ]
@@ -4012,7 +4010,8 @@ def _write_windows_launchers(
         python = portable_python if portable_python is not None else _venv_python(venv)
         gui_command = f'"{python}" -m gui'
         safe_gui_command = gui_command
-        webui_command = f'"{python}" main.py --host 127.0.0.1 --port 8000'
+        # 不写死 --host：由 config.yaml 的 webui.allow_lan 决定。
+        webui_command = f'"{python}" main.py --port 8000'
         pythonw = python.with_name("pythonw.exe")
         if frontend == "gui" and pythonw.is_file():
             # 正常启动使用 pythonw.exe：不弹控制台；兼容模式保留 python.exe

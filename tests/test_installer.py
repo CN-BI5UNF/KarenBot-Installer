@@ -433,6 +433,24 @@ def test_launchers_only_cover_selected_frontend(tmp_path, monkeypatch):
     assert not (tmp_path / "launch-gui-safe.cmd").exists()
 
 
+def test_webui_launcher_does_not_pin_the_listen_host(tmp_path, monkeypatch):
+    """监听地址应由 config.yaml 的 webui.allow_lan 决定。"""
+    app = tmp_path / "app"
+    app.mkdir()
+    venv = tmp_path / "venv"
+
+    installer._write_launchers(tmp_path, app, venv, "webui")
+    linux_text = (tmp_path / "launch-webui.sh").read_text(encoding="utf-8")
+    assert "--host" not in linux_text
+    assert "--port 8000" in linux_text
+
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    installer._write_launchers(tmp_path, app, venv, "webui")
+    windows_text = (tmp_path / "launch-webui.cmd").read_text(encoding="utf-8")
+    assert "--host" not in windows_text
+    assert "--port 8000" in windows_text
+
+
 def test_install_rejects_source_inside_install_dir(tmp_path):
     source = tmp_path / "source"
     (source / "backend").mkdir(parents=True)
