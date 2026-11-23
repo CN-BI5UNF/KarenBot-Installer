@@ -3187,7 +3187,8 @@ def test_windows_launcher_escapes_percent_and_forces_portable_env(
 ):
     monkeypatch.setattr(installer, "IS_WINDOWS", True)
     app_root = Path("C:/100%Test/KarenBot")
-    command = '"C:/100%Test/KarenBot/runtime/python.exe" -m gui'
+    command_path = app_root / "runtime" / "python.exe"
+    command = f'"{command_path}" -m gui'
     script = installer._windows_launcher(
         app_root,
         command,
@@ -3198,8 +3199,10 @@ def test_windows_launcher_escapes_percent_and_forces_portable_env(
         },
         safe=False,
     )
-    assert 'cd /d "C:/100%%Test/KarenBot"' in script
-    assert 'C:/100%%Test/KarenBot/runtime/python.exe' in script
+    escaped_root = str(app_root).replace("%", "%%")
+    escaped_command = str(command_path).replace("%", "%%")
+    assert f'cd /d "{escaped_root}"' in script
+    assert escaped_command in script
     assert 'set "PATH=C:\\Portable;%PATH:"=%"' in script
     assert 'set "GI_TYPELIB_PATH=C:\\Portable\\lib"' in script
     assert 'set "FONTCONFIG_FILE=C:\\Fonts\\fonts.conf"' in script
