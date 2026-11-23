@@ -19,6 +19,7 @@ import fnmatch
 import hashlib
 import io
 import json
+import ntpath
 import os
 import platform
 import queue
@@ -48,6 +49,18 @@ IS_WINDOWS = os.name == "nt"
 # Windows 默认放到系统盘根目录：比 %LOCALAPPDATA%\Programs 短约 35 个字符，
 # 给解压阶段的 MAX_PATH 留出余量；中文用户名也不会污染路径。
 DEFAULT_WINDOWS_INSTALL_DIRNAME = "KarenBot"
+PORTABLE_ENV_KEYS = frozenset(
+    {
+        "GI_TYPELIB_PATH",
+        "GSETTINGS_SCHEMA_DIR",
+        "GTK_DATA_PREFIX",
+        "GTK_EXE_PREFIX",
+        "GDK_PIXBUF_MODULEDIR",
+        "GDK_PIXBUF_MODULE_FILE",
+        "GIO_MODULE_DIR",
+        "XDG_DATA_DIRS",
+    }
+)
 
 
 def _default_install_dir() -> Path:
@@ -301,7 +314,7 @@ for _runtime_key, _runtime_value in PYTHON_RUNTIME_SOURCES.items():
 DEFAULT_WINDOWS_PACKAGE: dict[str, Any] = {
     "schema": 1,
     "asset_name": WINDOWS_GUI_ASSET_NAME,
-    "required_dirs": ["backend", "gui"],
+    "required_dirs": ["backend", "gui", "personas"],
     "python_candidates": [
         "runtime/python.exe",
         "runtime/bin/python.exe",
@@ -484,6 +497,30 @@ def _creation_flags() -> int:
     return 0
 
 
+def _windows_system_executable(name: str) -> str:
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    if name.casefold() == "taskkill.exe":
+        parts = ("System32", "taskkill.exe")
+    elif name.casefold() == "powershell.exe":
+        parts = ("System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    else:
+        raise ValueError(f"Unsupported Windows system executable: {name}")
+    return ntpath.join(system_root, *parts)
+
+
+def _windows_batch_literal(value: Any) -> str:
+    return str(value).replace("%", "%%")
+
+
+def _is_installer_process(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    return bool(
+        getattr(sys, "frozen", False)
+        and pid == os.getppid()
+    )
+
+
 def _terminate_process(proc: subprocess.Popen[str]) -> None:
     """取消时终止整个子进程树；Windows 下 pip 常会再拉起子进程。"""
     if proc.poll() is not None:
@@ -491,7 +528,13 @@ def _terminate_process(proc: subprocess.Popen[str]) -> None:
     if IS_WINDOWS:
         try:
             subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                [
+                    _windows_system_executable("taskkill.exe"),
+                    "/F",
+                    "/T",
+                    "/PID",
+                    str(proc.pid),
+                ],
                 capture_output=True,
                 timeout=10,
                 creationflags=_creation_flags(),
@@ -532,6 +575,7 @@ def _run_process(
     timeout: float | None = None,
     cancel_event: Any | None = None,
     stream: bool = True,
+    merge_stderr: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """运行子进程并实时转发输出；取消时终止进程树。
 
@@ -553,30 +597,37 @@ def _run_process(
         cwd=str(cwd) if cwd else None,
         env=process_env,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
         bufsize=1,
         **kwargs,
     )
-    lines: queue.Queue[str | None] = queue.Queue()
-    output: list[str] = []
+    lines: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    stdout_output: list[str] = []
+    stderr_output: list[str] = []
+    streams = [("stdout", proc.stdout)]
+    if not merge_stderr:
+        streams.append(("stderr", proc.stderr))
 
-    def _reader() -> None:
-        stream_obj = proc.stdout
+    def _reader(name: str, stream_obj: Any) -> None:
         try:
             if stream_obj is not None:
                 for line in stream_obj:
-                    lines.put(line)
+                    lines.put((name, line))
         finally:
-            lines.put(None)
+            lines.put((name, None))
 
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
+    readers = [
+        threading.Thread(target=_reader, args=item, daemon=True) for item in streams
+    ]
+    for reader in readers:
+        reader.start()
     deadline = None if timeout is None else time.monotonic() + timeout
+    finished_readers = 0
     try:
-        while True:
+        while finished_readers < len(readers):
             if cancel_event is not None and cancel_event.is_set():
                 _terminate_process(proc)
                 raise InstallCancelled()
@@ -584,28 +635,35 @@ def _run_process(
                 _terminate_process(proc)
                 raise subprocess.TimeoutExpired(command, timeout)
             try:
-                line = lines.get(timeout=0.1)
+                name, line = lines.get(timeout=0.1)
             except queue.Empty:
                 if proc.poll() is not None:
-                    # 进程已退出：等 reader 把最后几行和结束标记刷出来。
-                    try:
-                        line = lines.get(timeout=2.0)
-                    except queue.Empty:
+                    for reader in readers:
+                        reader.join(timeout=0.1)
+                    if not any(reader.is_alive() for reader in readers):
                         break
-                else:
-                    continue
+                continue
             if line is None:
-                break
-            output.append(line)
+                finished_readers += 1
+                continue
+            (stderr_output if name == "stderr" else stdout_output).append(line)
             if stream:
                 log(line.rstrip("\r\n"))
         returncode = proc.wait(timeout=5)
     finally:
         if proc.poll() is None:
             _terminate_process(proc)
-        reader.join(timeout=2)
+        for reader in readers:
+            reader.join(timeout=2)
     return subprocess.CompletedProcess(
-        command, returncode, stdout="".join(output), stderr=None
+        command,
+        returncode,
+        stdout=(
+            "".join(stdout_output + stderr_output)
+            if merge_stderr
+            else "".join(stdout_output)
+        ),
+        stderr=None if merge_stderr else "".join(stderr_output),
     )
 
 
@@ -725,7 +783,6 @@ def _windows_processes_under(root_text: str) -> list[str]:
 
     root_norm = os.path.normcase(root_text)
     prefix = os.path.normcase(root_text.rstrip("\\/") + "\\")
-    self_path = os.path.normcase(str(sys.executable))
     found: list[str] = []
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if not snapshot or snapshot == ctypes.c_void_p(-1).value:
@@ -737,7 +794,7 @@ def _windows_processes_under(root_text: str) -> list[str]:
         while more:
             pid = int(entry.th32ProcessID)
             name = ctypes.wstring_at(entry.szExeFile)
-            if pid != os.getpid():
+            if not _is_installer_process(pid):
                 process = kernel32.OpenProcess(
                     PROCESS_QUERY_LIMITED_INFORMATION, False, pid
                 )
@@ -750,10 +807,7 @@ def _windows_processes_under(root_text: str) -> list[str]:
                         ):
                             path = buffer.value
                             path_norm = os.path.normcase(path)
-                            if path_norm != self_path and (
-                                path_norm == root_norm
-                                or path_norm.startswith(prefix)
-                            ):
+                            if path_norm == root_norm or path_norm.startswith(prefix):
                                 found.append(f"PID {pid}|{name}|{path}")
                     finally:
                         kernel32.CloseHandle(process)
@@ -2044,7 +2098,8 @@ def _safe_tar_extract(
     cancel_event: Any | None = None,
 ) -> None:
     destination.mkdir(parents=True, exist_ok=True)
-    root = destination.resolve()
+    destination = destination.resolve()
+    root = destination
     with tarfile.open(archive, "r:*") as tar:
         members = tar.getmembers()
         _check_cancel(cancel_event)
@@ -2083,6 +2138,22 @@ def _safe_tar_extract(
             if use_filter:
                 tar.extract(member, destination, filter="data")
             else:
+                target = destination / member.name
+                resolved = target.resolve()
+                if resolved != root and root not in resolved.parents:
+                    fail(f"压缩包包含越界路径：{member.name}")
+                for parent in target.parents:
+                    if parent == root:
+                        break
+                    if parent.is_symlink():
+                        fail(f"压缩包路径经过符号链接，拒绝解压：{member.name}")
+                if target.is_symlink():
+                    fail(f"压缩包将覆盖符号链接，拒绝解压：{member.name}")
+                if member.issym() or member.islnk():
+                    base = target.parent if member.issym() else root
+                    link_target = (base / member.linkname).resolve()
+                    if link_target != root and root not in link_target.parents:
+                        fail(f"压缩包链接越界，拒绝解压：{member.name}")
                 tar.extract(member, destination)
 
 
@@ -2249,18 +2320,16 @@ def _remove_tree(path: Path, *, strict: bool = False) -> None:
     """删除目录树，处理 Windows 只读文件并给出可诊断的错误。"""
 
     def _on_error(func: Callable[..., Any], target: str, _exc: Any) -> None:
-        try:
-            os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
-            func(target)
-        except OSError:
-            pass
+        os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+        func(target)
 
     last_error: OSError | None = None
     for attempt in range(3):
-        if not path.exists():
+        if not path.exists() and not path.is_symlink():
             return
         try:
-            shutil.rmtree(path, onerror=_on_error)
+            target = _win_long_path(path) if IS_WINDOWS else str(path)
+            shutil.rmtree(target, onerror=_on_error)
             return
         except OSError as exc:
             last_error = exc
@@ -2384,6 +2453,8 @@ def _validate_portable_gui(app_root: Path, python: Path) -> None:
         if not (app_root / str(rel)).is_dir():
             fail(f"Windows GUI 预构建包缺少目录：{rel}")
     personas_dir = app_root / "personas"
+    if not personas_dir.is_dir():
+        fail("Windows GUI 预构建包缺少 personas/ 目录。")
     if not any(
         item.is_dir() and (item / "persona_prompt.py").is_file()
         for item in personas_dir.iterdir()
@@ -2609,7 +2680,7 @@ def _fetch_distribution_manifest(
     """
     url = _distribution_manifest_url(tag)
     errors: list[str] = []
-    for mirror in available_mirrors():
+    for mirror in _distribution_mirrors():
         _check_cancel(cancel_event)
         target = mirrored_url(url, mirror)
         try:
@@ -2635,6 +2706,11 @@ def _fetch_distribution_manifest(
             )
             if components is None:
                 raise ValueError(problem)
+            if mirror.get("kind") != "direct":
+                log(
+                    "警告：发行版 modules.json 来自第三方镜像；"
+                    "清单中的哈希不能证明组件包由发布者提供。"
+                )
             if not quiet:
                 log(
                     f"已读取 KarenBot 发行版清单：{KARENBOT_REPO}@{tag}"
@@ -2680,6 +2756,7 @@ def _resolve_distribution_release(
         KARENBOT_REPO,
         "releases.atom",
         validator=_atom_page_validator(KARENBOT_REPO),
+        mirrors=_distribution_mirrors() if _require_verified() else None,
     )
     tags = _release_tags_from_atom(data, KARENBOT_REPO, limit=10)
     if not tags:
@@ -2731,6 +2808,7 @@ def _fetch_github_page(
     *,
     timeout: float | None = None,
     validator: Callable[[bytes, str], str | None] | None = None,
+    mirrors: list[dict[str, Any]] | None = None,
 ) -> tuple[bytes, str]:
     """并发竞速抓取 GitHub 页面，返回首个有效 (内容, 最终 URL)。
 
@@ -2742,7 +2820,7 @@ def _fetch_github_page(
     if timeout is None:
         timeout = GITHUB_PAGE_TIMEOUT
     url = f"https://github.com/{repo}/{path}"
-    mirrors = available_mirrors()
+    mirrors = mirrors if mirrors is not None else available_mirrors()
     if not mirrors:
         fail("没有可用的 GitHub 镜像。")
     results: queue.Queue = queue.Queue()
@@ -2842,6 +2920,19 @@ def _fetch_github_page(
         in_flight -= 1
         if kind == "ok":
             stop.set()
+            source_mirror = next(
+                (
+                    item
+                    for item in mirrors
+                    if str(item.get("name") or "?") == name
+                ),
+                {},
+            )
+            if source_mirror.get("kind") != "direct":
+                log(
+                    f"警告：GitHub 页面 {repo}/{path} 来自第三方镜像 "
+                    f"({name})；响应无法验证发布者身份。"
+                )
             if errors:
                 log(
                     f"GitHub 页面 {repo}/{path}：{len(errors)} 个镜像失败，"
@@ -2971,6 +3062,19 @@ def _checksum_mirrors() -> list[dict[str, Any]]:
             ordered.append(item)
             seen.add(name)
     return ordered
+
+
+def _distribution_mirrors() -> list[dict[str, Any]]:
+    mirrors = available_mirrors()
+    if not _require_verified():
+        return mirrors
+    trusted = [item for item in mirrors if item.get("kind") == "direct"]
+    if not trusted:
+        fail(
+            "KAREN_REQUIRE_VERIFIED=1：发行版清单只允许 GitHub 直连；"
+            "当前镜像选择不包含直连。"
+        )
+    return trusted
 
 
 def fetch_release_checksums(
@@ -3308,7 +3412,10 @@ def _prepare_windows_gui_app(
     if "://" not in asset_url and local_asset.is_file():
         archive = downloads / asset_name
         shutil.copy2(local_asset, archive)
-        log(f"使用本地 Windows GUI 便携包（跳过 Release 校验）：{local_asset}")
+        if expected_sha256 and sha256_file(archive) != expected_sha256:
+            archive.unlink(missing_ok=True)
+            fail(f"本地 Windows GUI 便携包 SHA256 校验失败：{local_asset}")
+        log(f"使用本地 Windows GUI 便携包：{local_asset}")
     else:
         ranked = None
         if not asset_url.startswith("https://github.com/"):
@@ -3846,15 +3953,27 @@ def _windows_launcher(
     windowed: bool = False,
     pause_on_error: bool = False,
 ) -> str:
-    lines = ["@echo off", "chcp 65001 >nul", "setlocal", f'cd /d "{app_root}"']
+    lines = [
+        "@echo off",
+        "chcp 65001 >nul",
+        "setlocal",
+        f'cd /d "{_windows_batch_literal(app_root)}"',
+    ]
     for key, value in env.items():
+        value = _windows_batch_literal(value)
         if key == "PATH":
-            lines.append(f'set "PATH={value};%PATH%"')
-        elif safe or key == DATA_ROOT_ENV:
+            lines.append(f'set "PATH={value};%PATH:"=%"')
+        elif (
+            safe
+            or key == DATA_ROOT_ENV
+            or key in PORTABLE_ENV_KEYS
+            or key == "FONTCONFIG_FILE"
+        ):
             # 数据根必须跟安装目录绑定，否则升级/卸载会找错位置。
             lines.append(f'set "{key}={value}"')
         else:
             lines.append(f'if not defined {key} set "{key}={value}"')
+    command = _windows_batch_literal(command)
     if safe and IS_WINDOWS:
         lines.append('if not defined GDK_BACKEND set "GDK_BACKEND=win32"')
     if windowed:
@@ -3891,6 +4010,7 @@ def _prepare_windows_portable_runtime(
             timeout=60,
             cancel_event=cancel_event,
             stream=False,
+            merge_stderr=False,
         )
     except InstallCancelled:
         raise
@@ -4233,9 +4353,6 @@ def _shortcut_icon(install_dir: Path) -> Path | None:
         app_root / "assets" / "karenbot.ico",
         app_root / "karenbot.ico",
     ]
-    bundled = installer_icon_path()
-    if bundled is not None:
-        candidates.append(bundled)
     for path in candidates:
         if path.is_file():
             return path
@@ -4244,6 +4361,16 @@ def _shortcut_icon(install_dir: Path) -> Path | None:
         for path in gui_root.rglob("*.ico"):
             if path.is_file():
                 return path
+    bundled = installer_icon_path()
+    if bundled is not None:
+        persistent = install_dir / "karenbot.ico"
+        try:
+            persistent.parent.mkdir(parents=True, exist_ok=True)
+            if bundled.resolve() != persistent.resolve():
+                shutil.copy2(bundled, persistent)
+            return persistent
+        except OSError as exc:
+            log(f"无法保存快捷方式图标（可手动设置）：{exc}")
     return None
 
 
@@ -4281,7 +4408,7 @@ def _install_windows_shortcut(
     try:
         subprocess.run(
             [
-                "powershell",
+                _windows_system_executable("powershell.exe"),
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
@@ -4388,21 +4515,50 @@ def _schedule_windows_uninstaller_cleanup(root: Path) -> bool:
     if not IS_WINDOWS:
         return False
     exe = Path(sys.executable)
+    parent_pid = os.getppid() if getattr(sys, "frozen", False) else 0
     script = f"""
-$pidToWait = {os.getpid()}
-$deadline = (Get-Date).AddSeconds(30)
+$waitPids = @({os.getpid()}, {parent_pid}) | Where-Object {{ $_ -gt 0 }} | Select-Object -Unique
+$deadline = (Get-Date).AddMinutes(2)
 while ((Get-Date) -lt $deadline) {{
-  if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) {{ break }}
+  $stillRunning = $false
+  foreach ($waitPid in $waitPids) {{
+    if (Get-Process -Id $waitPid -ErrorAction SilentlyContinue) {{
+      $stillRunning = $true
+      break
+    }}
+  }}
+  if (-not $stillRunning) {{ break }}
   Start-Sleep -Milliseconds 500
 }}
-Remove-Item -LiteralPath '{str(exe).replace("'", "''")}' -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath '{str(root).replace("'", "''")}' -Force -Recurse -ErrorAction SilentlyContinue
+foreach ($path in @('{str(exe).replace("'", "''")}', '{str(root).replace("'", "''")}')) {{
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {{
+    if (-not (Test-Path -LiteralPath $path)) {{ break }}
+    try {{
+      Remove-Item -LiteralPath $path -Force -Recurse -ErrorAction Stop
+    }} catch {{}}
+    if (-not (Test-Path -LiteralPath $path)) {{ break }}
+    Start-Sleep -Milliseconds 500
+  }}
+  if (Test-Path -LiteralPath $path) {{
+    try {{
+      $cleanupSource = @'
+using System.Runtime.InteropServices;
+public static class KarenBotCleanup {{
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern bool MoveFileEx(string existing, string replacement, int flags);
+}}
+'@
+      Add-Type -TypeDefinition $cleanupSource -ErrorAction SilentlyContinue
+      [KarenBotCleanup]::MoveFileEx($path, $null, 4) | Out-Null
+    }} catch {{}}
+  }}
+}}
 """
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     try:
         subprocess.Popen(
             [
-                "powershell.exe",
+                _windows_system_executable("powershell.exe"),
                 "-NoProfile",
                 "-NonInteractive",
                 "-WindowStyle",
@@ -4423,6 +4579,20 @@ Remove-Item -LiteralPath '{str(root).replace("'", "''")}' -Force -Recurse -Error
         log(f"安排删除 Windows 卸载入口失败：{exc}")
         return False
     return True
+
+
+def schedule_windows_uninstaller_cleanup() -> bool:
+    """安排当前运行中的安装器副本在退出后删除。"""
+    if not IS_WINDOWS:
+        return False
+    root = _windows_uninstall_root()
+    if not root.exists() or not _running_from_path(root):
+        return False
+    if _schedule_windows_uninstaller_cleanup(root):
+        log("Windows 卸载入口副本将在卸载进程退出后删除")
+        return True
+    log(f"安排删除 Windows 卸载入口失败，可稍后手动删除：{root}")
+    return False
 
 
 def _prepare_windows_uninstall_launcher(
@@ -4615,7 +4785,7 @@ def _shortcut_names() -> tuple[str, ...]:
 
 def _windows_shell_folder(
     csidl: int, env_name: str, fallback: Path
-) -> Path:
+) -> tuple[Path, bool]:
     """优先用 SHGetFolderPathW，避免被 OneDrive/重定向后的桌面路径骗到。"""
     try:
         import ctypes
@@ -4625,23 +4795,23 @@ def _windows_shell_folder(
             None, csidl, None, 0, buffer
         )
         if result == 0 and buffer.value:
-            return Path(buffer.value)
+            return Path(buffer.value), True
     except (AttributeError, OSError):
         pass
     value = os.environ.get(env_name)
-    return Path(value) if value else fallback
+    return (Path(value) if value else fallback), False
 
 
 def _remove_shortcuts() -> None:
     names = _shortcut_names()
     if IS_WINDOWS:
         windows_names = [name for name in names if name.endswith(".lnk")]
-        programs = _windows_shell_folder(
+        programs, programs_from_shell = _windows_shell_folder(
             0x0002,
             "APPDATA",
             Path.home() / "AppData" / "Roaming",
         )
-        if programs.name.casefold() != "programs":
+        if not programs_from_shell:
             programs = (
                 programs
                 / "Microsoft"
@@ -4649,12 +4819,12 @@ def _remove_shortcuts() -> None:
                 / "Start Menu"
                 / "Programs"
             )
-        desktop = _windows_shell_folder(
+        desktop, desktop_from_shell = _windows_shell_folder(
             0x0010,
             "USERPROFILE",
             Path.home(),
         )
-        if desktop.name.casefold() != "desktop":
+        if not desktop_from_shell:
             desktop = desktop / "Desktop"
         for directory in (programs, desktop):
             for name in windows_names:
@@ -4796,10 +4966,11 @@ def uninstall(
     *,
     cancel_event: Any | None = None,
     keep_data: bool = False,
+    defer_uninstaller_cleanup: bool = False,
 ) -> Path:
     """卸载安装器写入的目录、启动器、快捷方式、字体和主题偏好。"""
     install_dir = install_dir.expanduser().resolve()
-    if install_dir in {Path("/"), Path.home()}:
+    if install_dir == install_dir.parent or install_dir == Path.home().resolve():
         fail(f"拒绝卸载：安装目录过于宽泛：{install_dir}")
     if not _looks_like_karenbot_install(install_dir):
         fail(
@@ -4833,6 +5004,10 @@ def uninstall(
             (install_dir / name).unlink(missing_ok=True)
         except OSError as exc:
             log(f"删除启动器失败（可手动删除）：{name}：{exc}")
+    try:
+        (install_dir / "karenbot.ico").unlink(missing_ok=True)
+    except OSError as exc:
+        log(f"删除快捷方式图标失败（可手动删除）：{exc}")
     cache = install_dir / DOWNLOAD_CACHE_DIRNAME
     if cache.exists():
         _remove_tree(cache, strict=False)
@@ -4852,13 +5027,10 @@ def uninstall(
         uninstall_root = _windows_uninstall_root()
         if uninstall_root.exists():
             if _running_from_path(uninstall_root):
-                if _schedule_windows_uninstaller_cleanup(uninstall_root):
-                    log("Windows 卸载入口副本将在卸载进程退出后删除")
+                if defer_uninstaller_cleanup:
+                    log("卸载完成提示关闭后删除 Windows 卸载入口副本")
                 else:
-                    log(
-                        "Windows 卸载入口副本需稍后手动删除："
-                        f"{uninstall_root}"
-                    )
+                    schedule_windows_uninstaller_cleanup()
             else:
                 _remove_tree(uninstall_root, strict=False)
                 if uninstall_root.exists():
@@ -5157,6 +5329,7 @@ def _migrate_legacy_install_data(
     target_app: Path,
     *,
     external_data_root: bool,
+    data_moves: list[tuple[Path, Path]] | None = None,
 ) -> list[tuple[Path, Path]]:
     """升级时迁移旧版运行数据，返回需要回滚的纯移动操作。
 
@@ -5164,7 +5337,7 @@ def _migrate_legacy_install_data(
     文件，绝不覆盖当前数据。迁移失败会中止安装并触发回滚，避免删掉旧
     目录后才发现数据没有复制完整。
     """
-    moved: list[tuple[Path, Path]] = []
+    moved = data_moves if data_moves is not None else []
     external_dir = _external_data_dir(install_dir)
     old_data = old_app / "data"
     if external_data_root:
@@ -5175,8 +5348,8 @@ def _migrate_legacy_install_data(
                 if copied:
                     stage(f"合并旧版运行数据：{copied} 个文件")
             else:
-                moved.append((old_data, target_data))
                 _move_legacy_data(old_data, target_data)
+                moved.append((old_data, target_data))
                 stage(f"迁移旧版运行数据：{target_data}")
     else:
         target_data = target_app / "data"
@@ -5193,8 +5366,8 @@ def _migrate_legacy_install_data(
                     if copied:
                         stage(f"合并旧版运行数据：{copied} 个文件")
             else:
-                moved.append((primary, target_data))
                 _move_legacy_data(primary, target_data)
+                moved.append((primary, target_data))
                 for source in sources[1:]:
                     copied = _merge_legacy_data(source, target_data)
                     if copied:
@@ -5609,11 +5782,12 @@ def install(
             data_root is None
             and _external_data_dir(install_dir).is_dir()
         ):
-            data_moves = _migrate_legacy_install_data(
+            _migrate_legacy_install_data(
                 install_dir,
                 old_app,
                 target_app,
                 external_data_root=data_root is not None,
+                data_moves=data_moves,
             )
         if old_app.exists():
             _remove_tree(old_app, strict=False)
@@ -5663,10 +5837,20 @@ def install(
                     marker_backup,
                     marker_existed,
                 )
-        elif data_moves or launcher_backup is not None:
-            # 全新安装没有旧 app 可回滚，但迁移过的数据和新启动入口仍要
-            # 恢复到安装前状态，避免留下半套入口指向失败的应用。
+        elif swapped and target_app is not None and old_app is not None:
+            # 首次安装没有旧 app/ 可恢复；移除已就位的新程序并还原迁移数据。
             stage("安装失败，正在清理本次改动…")
+            _undo_data_moves(data_moves)
+            _remove_tree(target_app, strict=False)
+            if launcher_backup is not None:
+                _restore_install_entrypoints(
+                    install_dir,
+                    launcher_backup,
+                    existing_launchers,
+                    marker_backup,
+                    marker_existed,
+                )
+        elif data_moves or launcher_backup is not None:
             _undo_data_moves(data_moves)
             if launcher_backup is not None:
                 _restore_install_entrypoints(
@@ -6002,6 +6186,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.require_verified:
         os.environ["KAREN_REQUIRE_VERIFIED"] = "1"
     if args.uninstall:
+        if not args.non_interactive:
+            if sys.stdin is None or not sys.stdin.isatty():
+                print(
+                    "卸载需要交互确认；如确认卸载，请加 --non-interactive 参数。",
+                    file=sys.stderr,
+                )
+                return 2
+            scope = (
+                "保留运行数据和自定义人格"
+                if args.keep_data
+                else "删除程序、运行数据和自定义人格"
+            )
+            answer = _prompt(
+                f"确认卸载 {Path(args.dir).expanduser()}（{scope}）？输入 yes",
+                "no",
+            )
+            if answer.casefold() not in {"y", "yes"}:
+                print("卸载已取消")
+                return 1
         target = uninstall(Path(args.dir), keep_data=args.keep_data)
         print(f"已卸载：{target}")
         return 0

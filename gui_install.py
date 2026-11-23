@@ -257,10 +257,18 @@ class InstallerApp:
         self._mirror_apply_button: ttk.Button | None = None
         self._closing = False
         self._close_deadline = 0.0
-        self._log_file = Path(tempfile.gettempdir()) / "karenbot-install.log"
+        self._uninstaller_cleanup_pending = False
+        self._log_file: Path | None = None
         self._log_handle = None
         try:
-            self._log_handle = self._log_file.open("w", encoding="utf-8")
+            self._log_handle = tempfile.NamedTemporaryFile(
+                prefix="karenbot-install-",
+                suffix=".log",
+                delete=False,
+                mode="w",
+                encoding="utf-8",
+            )
+            self._log_file = Path(self._log_handle.name)
         except OSError:
             self._log_handle = None
         self._build_vars()
@@ -1090,23 +1098,24 @@ class InstallerApp:
         self._worker.start()
 
     def _run_install(self, **kwargs: Any) -> None:
+        event: tuple[str, Any] | None = None
         try:
             result = core.install(**kwargs)
         except core.InstallCancelled:
-            self._queue.put(("cancelled", None))
+            event = ("cancelled", None)
         except core.InstallFailure as exc:
-            self._queue.put(("error", exc.message))
+            event = ("error", exc.message)
         except Exception as exc:  # noqa: BLE001
             self._queue.put(("log", traceback.format_exc()))
-            self._queue.put(
-                ("error", _friendly_operation_error(exc, action="安装"))
-            )
+            event = ("error", _friendly_operation_error(exc, action="安装"))
         else:
-            self._queue.put(("done", str(result)))
+            event = ("done", str(result))
         finally:
             core.set_log_sink(None)
             core.set_progress_sink(None)
             core.set_status_sink(None)
+            if event is not None:
+                self._queue.put(event)
 
     def _poll_queue(self) -> None:
         # pip 会刷出大量日志；每次最多处理 500 条，避免一次卡住 UI。
@@ -1136,7 +1145,11 @@ class InstallerApp:
                 self._on_mirror_error(str(payload))
             elif kind == "uninstalled":
                 self._on_uninstalled(Path(str(payload)))
-        self.root.after(1 if not self._queue.empty() else 80, self._poll_queue)
+        if not self._closing:
+            try:
+                self.root.after(1 if not self._queue.empty() else 80, self._poll_queue)
+            except tk.TclError:
+                pass
 
     def _on_stage(self, message: str) -> None:
         self.progress_step.set(message)
@@ -1209,14 +1222,15 @@ class InstallerApp:
         )
 
     def _on_done(self, path: Path) -> None:
+        self._uninstaller_cleanup_pending = False
         self._uninstall_running = False
         self._worker = None
         self._close_progress_dialog()
         self._set_running(False)
         self.progress.stop()
         self.progress.configure(mode="determinate", maximum=100, value=100)
-        self.status.set("安装完成")
         self._installed_dir = path
+        self.status.set("安装完成")
         self.open_button.configure(state="normal")
         self.launch_button.configure(state="normal")
         self.launch_safe_button.configure(
@@ -1334,27 +1348,30 @@ class InstallerApp:
     def _run_uninstall(
         self, *, install_dir: Path, keep_data: bool = False
     ) -> None:
+        event: tuple[str, Any] | None = None
         try:
             result = core.uninstall(
                 install_dir,
                 cancel_event=self._cancel,
                 keep_data=keep_data,
+                defer_uninstaller_cleanup=True,
             )
         except core.InstallCancelled:
-            self._queue.put(("cancelled", None))
+            event = ("cancelled", None)
         except core.InstallFailure as exc:
-            self._queue.put(("error", exc.message))
+            event = ("error", exc.message)
         except Exception as exc:  # noqa: BLE001
             self._queue.put(("log", traceback.format_exc()))
-            self._queue.put(
-                ("error", _friendly_operation_error(exc, action="卸载"))
-            )
+            event = ("error", _friendly_operation_error(exc, action="卸载"))
         else:
-            self._queue.put(("uninstalled", str(result)))
+            self._uninstaller_cleanup_pending = True
+            event = ("uninstalled", str(result))
         finally:
             core.set_log_sink(None)
             core.set_progress_sink(None)
             core.set_status_sink(None)
+            if event is not None:
+                self._queue.put(event)
 
     def _on_uninstalled(self, path: Path) -> None:
         keep_data = self._uninstall_keep_data
@@ -1365,8 +1382,8 @@ class InstallerApp:
         self._set_running(False)
         self.progress.stop()
         self.progress.configure(mode="determinate", maximum=100, value=0)
-        self.status.set("已卸载")
         self._installed_dir = None
+        self.status.set("已卸载")
         self.open_button.configure(state="disabled")
         self.launch_button.configure(state="disabled")
         self.launch_safe_button.configure(state="disabled")
@@ -1381,9 +1398,14 @@ class InstallerApp:
                 if keep_data
                 else ""
             )
-            messagebox.showinfo(
-                "卸载完成", f"KarenBot 已卸载：\n{path}{suffix}"
-            )
+            try:
+                messagebox.showinfo(
+                    "卸载完成", f"KarenBot 已卸载：\n{path}{suffix}"
+                )
+            finally:
+                if self._uninstaller_cleanup_pending:
+                    core.schedule_windows_uninstaller_cleanup()
+                    self._uninstaller_cleanup_pending = False
 
     def _cancel_install(self) -> None:
         if self._worker is None or not self._worker.is_alive():
@@ -1591,6 +1613,8 @@ class InstallerApp:
                 pass
 
     def _start_mirror_test(self) -> None:
+        if self._running or self._closing:
+            return
         if self._mirror_worker is not None and self._mirror_worker.is_alive():
             return
         url = self.mirror_url.get().strip()
@@ -1618,6 +1642,8 @@ class InstallerApp:
             self._queue.put(("mirror", results))
 
     def _show_mirrors(self, results: list[dict[str, Any]]) -> None:
+        if self._closing or self._mirror_window is None:
+            return
         tree = self._mirror_tree
         if tree is not None:
             for row in tree.get_children():
@@ -1652,13 +1678,16 @@ class InstallerApp:
                     values=(name, speed, latency, score, state),
                 )
                 self._mirror_rows[row] = (name, ok)
-        if self._mirror_button is not None:
+        if not self._running and self._mirror_button is not None:
             self._mirror_button.configure(state="normal")
         available = sum(1 for item in results if item.get("ok"))
-        self.status.set(f"镜像测速完成：{available}/{len(results)} 可用")
+        if not self._running:
+            self.status.set(f"镜像测速完成：{available}/{len(results)} 可用")
         self._log_line(f"镜像测速完成：{available}/{len(results)} 可用")
 
     def _apply_selected_mirror(self, _event: tk.Event | None = None) -> None:
+        if self._running or self._closing:
+            return
         tree = self._mirror_tree
         if tree is None:
             return
@@ -1675,11 +1704,15 @@ class InstallerApp:
         self._log_line(f"已固定 GitHub 镜像：{name}")
 
     def _on_mirror_error(self, message: str) -> None:
-        if self._mirror_button is not None:
+        if self._closing or self._mirror_window is None:
+            return
+        if not self._running and self._mirror_button is not None:
             self._mirror_button.configure(state="normal")
-        self.status.set("镜像测速失败")
+        if not self._running:
+            self.status.set("镜像测速失败")
         self._log_line("镜像测速失败：" + message)
-        messagebox.showerror("测速失败", message[:2000])
+        if not self._running and self._mirror_window is not None:
+            messagebox.showerror("测速失败", message[:2000])
 
     def _open_install_dir(self) -> None:
         if self._installed_dir is None:
@@ -1755,6 +1788,9 @@ class InstallerApp:
             return
         self._closing = True
         self._close_progress_dialog()
+        if self._uninstaller_cleanup_pending:
+            core.schedule_windows_uninstaller_cleanup()
+            self._uninstaller_cleanup_pending = False
         if self._log_handle is not None:
             try:
                 self._log_handle.close()
@@ -1868,7 +1904,11 @@ def main(argv: list[str] | None = None) -> int:
             keep_data = bool(choice)
 
         try:
-            result = core.uninstall(target_path, keep_data=keep_data)
+            result = core.uninstall(
+                target_path,
+                keep_data=keep_data,
+                defer_uninstaller_cleanup=True,
+            )
         except core.InstallFailure as exc:
             _print_console(f"卸载失败：{exc.message}")
             if ui_root is not None:
@@ -1912,6 +1952,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             finally:
                 _destroy_root(ui_root)
+        core.schedule_windows_uninstaller_cleanup()
         return 0
     if _TK_ERROR is not None:
         _print_console(

@@ -2059,6 +2059,7 @@ def test_running_from_path_detects_frozen_uninstaller(tmp_path, monkeypatch):
 
 def test_schedule_windows_uninstaller_cleanup(tmp_path, monkeypatch):
     monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setattr(installer.sys, "frozen", True, raising=False)
     root = tmp_path / "Uninstall"
     root.mkdir()
     captured: dict[str, object] = {}
@@ -2075,12 +2076,15 @@ def test_schedule_windows_uninstaller_cleanup(tmp_path, monkeypatch):
     assert installer._schedule_windows_uninstaller_cleanup(root) is True
     command = captured["command"]
     assert isinstance(command, list)
-    assert command[0] == "powershell.exe"
+    assert command[0] == installer._windows_system_executable("powershell.exe")
     assert "-EncodedCommand" in command
     encoded = command[command.index("-EncodedCommand") + 1]
     script = base64.b64decode(encoded).decode("utf-16le")
     assert str(root) in script
     assert "Get-Process -Id" in script
+    assert str(os.getppid()) in script
+    assert "for ($attempt = 0; $attempt -lt 40; $attempt++)" in script
+    assert "MoveFileEx" in script
 
 
 def test_register_windows_uninstall_writes_hkcu(tmp_path, monkeypatch):
@@ -2381,7 +2385,13 @@ def test_uninstall_cli_passes_keep_data(monkeypatch, tmp_path):
     monkeypatch.setattr(installer, "uninstall", fake_uninstall)
     assert (
         installer.main(
-            ["--uninstall", "--dir", str(tmp_path), "--keep-data"]
+            [
+                "--uninstall",
+                "--dir",
+                str(tmp_path),
+                "--keep-data",
+                "--non-interactive",
+            ]
         )
         == 0
     )
@@ -3059,3 +3069,374 @@ def test_windows_process_scan_uses_ctypes_without_powershell():
     assert "CreateToolhelp32Snapshot" in source
     assert "QueryFullProcessImageNameW" in source
     assert "-ExecutionPolicy" not in source
+
+
+def test_legacy_tar_extraction_rejects_symlink_chain(tmp_path, monkeypatch):
+    archive = tmp_path / "links.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        parent = tarfile.TarInfo("dir/s")
+        parent.type = tarfile.SYMTYPE
+        parent.linkname = ".."
+        tar.addfile(parent)
+
+        nested = tarfile.TarInfo("dir/s/escape")
+        nested.type = tarfile.SYMTYPE
+        nested.linkname = "../../outside"
+        tar.addfile(nested)
+
+        payload = b"escaped"
+        child = tarfile.TarInfo("dir/s/escape/pwn.txt")
+        child.size = len(payload)
+        tar.addfile(child, io.BytesIO(payload))
+
+    monkeypatch.delattr(installer.tarfile, "data_filter", raising=False)
+    destination = tmp_path / "out"
+    with pytest.raises(SystemExit) as error:
+        installer._safe_tar_extract(
+            archive, destination, allow_symlinks=True
+        )
+    assert "符号链接" in error.value.message
+    assert not destination.parent.parent.joinpath("outside").exists()
+
+
+def test_distribution_manifest_requires_direct_mirror_when_verified(
+    monkeypatch,
+):
+    monkeypatch.setenv("KAREN_REQUIRE_VERIFIED", "1")
+    monkeypatch.setattr(installer, "_MIRROR_OVERRIDE", None)
+    monkeypatch.setattr(
+        installer,
+        "_MIRROR_CACHE",
+        [
+            {"name": "direct", "kind": "direct", "enabled": True},
+            {
+                "name": "proxy",
+                "kind": "prefix",
+                "prefix": "https://mirror.test",
+                "enabled": True,
+            },
+        ],
+    )
+    payload = json.dumps(_manifest_payload()).encode("utf-8")
+    urls: list[str] = []
+
+    def fake_urlopen(request, **_kwargs):
+        urls.append(request.full_url)
+        return _DownloadResponse(payload)
+
+    monkeypatch.setattr(installer, "_urlopen", fake_urlopen)
+    installer._fetch_distribution_manifest("v2.0.0-alpha")
+    assert urls == [installer._distribution_manifest_url("v2.0.0-alpha")]
+
+
+def test_verified_distribution_rejects_forced_proxy(monkeypatch):
+    monkeypatch.setenv("KAREN_REQUIRE_VERIFIED", "1")
+    monkeypatch.setattr(installer, "_MIRROR_CACHE", None)
+    monkeypatch.setattr(
+        installer,
+        "load_mirrors",
+        lambda: [
+            {
+                "name": "proxy",
+                "kind": "prefix",
+                "prefix": "https://mirror.test",
+            }
+        ],
+    )
+    monkeypatch.setattr(installer, "_MIRROR_OVERRIDE", "proxy")
+    with pytest.raises(SystemExit) as error:
+        installer._fetch_distribution_manifest("v2.0.0-alpha")
+    assert "只允许 GitHub 直连" in error.value.message
+
+
+def test_local_windows_gui_asset_checks_expected_sha256(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    asset = tmp_path / "gui.zip"
+    asset.write_bytes(b"tampered")
+    monkeypatch.setenv("KAREN_REQUIRE_VERIFIED", "1")
+    monkeypatch.setenv("KAREN_WINDOWS_GUI_SHA256", "0" * 64)
+    with pytest.raises(SystemExit) as error:
+        installer._prepare_windows_gui_app(
+            tmp_path / "staging",
+            cancel_event=None,
+            windows_gui_asset=str(asset),
+        )
+    assert "SHA256 校验失败" in error.value.message
+    assert not (
+        tmp_path / "staging" / "downloads" / installer.windows_gui_asset_name()
+    ).exists()
+
+
+def test_run_process_keeps_stderr_separate_when_requested():
+    result = installer._run_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('out'); print('warning', file=sys.stderr)",
+        ],
+        stream=False,
+        merge_stderr=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "out\n"
+    assert result.stderr == "warning\n"
+
+
+def test_windows_launcher_escapes_percent_and_forces_portable_env(
+    monkeypatch,
+):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    app_root = Path("C:/100%Test/KarenBot")
+    command = '"C:/100%Test/KarenBot/runtime/python.exe" -m gui'
+    script = installer._windows_launcher(
+        app_root,
+        command,
+        {
+            "PATH": r"C:\Portable",
+            "GI_TYPELIB_PATH": r"C:\Portable\lib",
+            "FONTCONFIG_FILE": r"C:\Fonts\fonts.conf",
+        },
+        safe=False,
+    )
+    assert 'cd /d "C:/100%%Test/KarenBot"' in script
+    assert 'C:/100%%Test/KarenBot/runtime/python.exe' in script
+    assert 'set "PATH=C:\\Portable;%PATH:"=%"' in script
+    assert 'set "GI_TYPELIB_PATH=C:\\Portable\\lib"' in script
+    assert 'set "FONTCONFIG_FILE=C:\\Fonts\\fonts.conf"' in script
+    assert "if not defined GI_TYPELIB_PATH" not in script
+
+
+def test_windows_system_commands_use_system_root(monkeypatch):
+    monkeypatch.setenv("SystemRoot", r"D:\Windows")
+    assert installer._windows_system_executable("taskkill.exe") == (
+        r"D:\Windows\System32\taskkill.exe"
+    )
+    assert installer._windows_system_executable("powershell.exe") == (
+        r"D:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    )
+
+
+def test_windows_process_filter_skips_only_current_and_frozen_parent(
+    monkeypatch,
+):
+    monkeypatch.setattr(installer.sys, "frozen", False, raising=False)
+    assert installer._is_installer_process(os.getpid())
+    assert not installer._is_installer_process(os.getppid())
+    monkeypatch.setattr(installer.sys, "frozen", True, raising=False)
+    assert installer._is_installer_process(os.getppid())
+
+
+def test_shortcut_icon_is_copied_out_of_frozen_resources(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    bundled = tmp_path / "MEI123" / "karenbot.ico"
+    bundled.parent.mkdir()
+    bundled.write_bytes(b"ico")
+    install_dir = tmp_path / "install"
+    (install_dir / "app").mkdir(parents=True)
+    monkeypatch.setattr(installer, "installer_icon_path", lambda: bundled)
+
+    icon = installer._shortcut_icon(install_dir)
+
+    assert icon == install_dir / "karenbot.ico"
+    assert icon.read_bytes() == b"ico"
+
+
+def test_migration_records_moves_before_later_migration_failure(
+    tmp_path, monkeypatch
+):
+    install_dir = tmp_path / "install"
+    old_app = install_dir / "app.old"
+    old_data = old_app / "data"
+    old_data.mkdir(parents=True)
+    (old_data / "state.json").write_text("state", encoding="utf-8")
+    target_app = tmp_path / "stage" / "app"
+    target_app.mkdir(parents=True)
+    moves: list[tuple[Path, Path]] = []
+
+    def fail_config_copy(*_args, **_kwargs):
+        installer.fail("config copy failed")
+
+    monkeypatch.setattr(installer, "_copy_legacy_config_files", fail_config_copy)
+    with pytest.raises(SystemExit):
+        installer._migrate_legacy_install_data(
+            install_dir,
+            old_app,
+            target_app,
+            external_data_root=False,
+            data_moves=moves,
+        )
+
+    assert moves == [(old_data, target_app / "data")]
+    installer._undo_data_moves(moves)
+    assert (old_data / "state.json").read_text(encoding="utf-8") == "state"
+
+
+@pytest.mark.parametrize("external_data_root", [False, True])
+def test_failed_upgrade_restores_data_when_config_migration_fails(
+    tmp_path, monkeypatch, external_data_root
+):
+    source = _make_upgrade_source(
+        tmp_path, data_root_supported=external_data_root
+    )
+    install_dir = tmp_path / "install"
+    old_app = install_dir / "app"
+    old_data = old_app / "data"
+    old_data.mkdir(parents=True)
+    (old_data / "config.yaml").write_text("user data", encoding="utf-8")
+    (old_app / ".env").write_text("TOKEN=keep", encoding="utf-8")
+
+    def fail_config_copy(*_args, **_kwargs):
+        installer.fail("config copy failed")
+
+    monkeypatch.setattr(installer, "_copy_legacy_config_files", fail_config_copy)
+    with pytest.raises(SystemExit):
+        installer.install(
+            frontend="webui",
+            install_dir=install_dir,
+            source_dir=source,
+            archive=None,
+            venv=None,
+            skip_deps=True,
+            create_shortcut=False,
+            download_fonts=False,
+        )
+    assert (old_data / "config.yaml").read_text(encoding="utf-8") == "user data"
+    assert (old_app / ".env").read_text(encoding="utf-8") == "TOKEN=keep"
+    assert not (install_dir / "app.old").exists()
+
+
+def test_windows_shell_shortcuts_keep_redirected_folder_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    desktop = tmp_path / "OneDrive" / "桌面"
+    programs = tmp_path / "开始菜单" / "程序"
+    for folder in (desktop, programs):
+        folder.mkdir(parents=True)
+        (folder / "KarenBot WebUI.lnk").write_text("lnk", encoding="utf-8")
+
+    def shell_folder(csidl, *_args):
+        return (programs if csidl == 0x0002 else desktop), True
+
+    monkeypatch.setattr(installer, "_windows_shell_folder", shell_folder)
+    installer._remove_shortcuts()
+    assert not (desktop / "KarenBot WebUI.lnk").exists()
+    assert not (programs / "KarenBot WebUI.lnk").exists()
+
+
+def test_validate_portable_gui_reports_missing_personas(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        installer, "load_windows_package_contract", lambda: {"required_dirs": []}
+    )
+    with pytest.raises(SystemExit) as error:
+        installer._validate_portable_gui(tmp_path, tmp_path / "python.exe")
+    assert "personas/" in error.value.message
+
+
+def test_failed_first_install_removes_staged_app(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    (source / "backend").mkdir(parents=True)
+    (source / "gui").mkdir()
+    (source / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    install_dir = tmp_path / "install"
+
+    def fail_python_runtime(*_args, **_kwargs):
+        raise RuntimeError("runtime setup failed")
+
+    monkeypatch.setattr(installer, "ensure_python_runtime", fail_python_runtime)
+    with pytest.raises(RuntimeError, match="runtime setup failed"):
+        installer.install(
+            frontend="gui",
+            install_dir=install_dir,
+            source_dir=source,
+            archive=None,
+            venv=None,
+            skip_deps=False,
+            create_shortcut=False,
+            download_fonts=False,
+        )
+    assert not (install_dir / "app").exists()
+
+
+def test_remove_tree_retries_failed_onerror_and_preserves_strict_error(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "remove-me"
+    target.mkdir()
+    (target / "locked").write_text("x", encoding="utf-8")
+    real_rmtree = shutil.rmtree
+    attempts = 0
+
+    def flaky_rmtree(path, *, onerror):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            failing_path = str(Path(path) / "locked")
+
+            def fail_unlink(_path):
+                raise PermissionError("locked")
+
+            try:
+                raise PermissionError("locked")
+            except PermissionError:
+                onerror(fail_unlink, failing_path, sys.exc_info())
+        real_rmtree(path, onerror=onerror)
+
+    monkeypatch.setattr(installer.shutil, "rmtree", flaky_rmtree)
+    monkeypatch.setattr(installer.time, "sleep", lambda *_args: None)
+    installer._remove_tree(target, strict=True)
+    assert attempts == 2
+    assert not target.exists()
+
+
+def test_remove_tree_strict_reports_unresolved_errors(tmp_path, monkeypatch):
+    target = tmp_path / "locked"
+    target.mkdir()
+    (target / "file").write_text("x", encoding="utf-8")
+
+    def failed_rmtree(path, *, onerror):
+        def fail_unlink(_path):
+            raise PermissionError("locked")
+
+        try:
+            raise PermissionError("locked")
+        except PermissionError:
+            onerror(fail_unlink, str(Path(path) / "file"), sys.exc_info())
+
+    monkeypatch.setattr(installer.shutil, "rmtree", failed_rmtree)
+    monkeypatch.setattr(installer.time, "sleep", lambda *_args: None)
+    with pytest.raises(SystemExit) as error:
+        installer._remove_tree(target, strict=True)
+    assert "无法删除目录" in error.value.message
+
+
+def test_uninstall_cli_requires_confirmation_without_non_interactive(
+    monkeypatch, tmp_path
+):
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        installer, "uninstall", lambda path, **_kwargs: calls.append(path)
+    )
+
+    class NonTTY:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(installer.sys, "stdin", NonTTY())
+    assert installer.main(["--uninstall", "--dir", str(tmp_path)]) == 2
+    assert calls == []
+
+
+def test_uninstall_cli_interactive_decline_keeps_install(monkeypatch, tmp_path):
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        installer, "uninstall", lambda path, **_kwargs: calls.append(path)
+    )
+
+    class TTY:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(installer.sys, "stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda *_args: "no")
+    assert installer.main(["--uninstall", "--dir", str(tmp_path)]) == 1
+    assert calls == []

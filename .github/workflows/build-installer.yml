@@ -66,6 +66,7 @@ jobs:
       - name: Installer tests
         run: |
           python -m pytest tests/test_installer.py \
+            tests/test_bootstrap.py \
             tests/test_installer_gui_contract.py \
             tests/test_windows_packaging.py -q
 

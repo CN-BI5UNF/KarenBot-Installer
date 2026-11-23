@@ -24,6 +24,14 @@ if ($Machine -ne 0x8664) {
 }
 
 $Version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($ExePath)
+$VersionFile = Join-Path $Root "VERSION"
+$ExpectedVersion = (Get-Content -LiteralPath $VersionFile -Raw).Trim()
+if ($Version.FileVersion -ne $ExpectedVersion -or $Version.ProductVersion -ne $ExpectedVersion) {
+    throw (
+        "Artifact version mismatch: expected {0}, FileVersion={1}, ProductVersion={2}" -f
+        $ExpectedVersion, $Version.FileVersion, $Version.ProductVersion
+    )
+}
 Write-Host ("PE machine: 0x{0:X4} (x86-64)" -f $Machine)
 Write-Host ("FileVersion: {0}; ProductVersion: {1}" -f $Version.FileVersion, $Version.ProductVersion)
 Write-Host ("Size: {0:N1} MB" -f ($Item.Length / 1MB))

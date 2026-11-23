@@ -15,7 +15,18 @@ set -euo pipefail
 REPO="${KAREN_INSTALLER_REPO:-CN-BI5UNF/KarenBot-Installer}"
 REF="${KAREN_INSTALLER_REF:-main}"
 PYTHON="${KAREN_INSTALL_PYTHON:-python3}"
-HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
+HERE=""
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+if [ -n "$SCRIPT_SOURCE" ] && [ -f "$SCRIPT_SOURCE" ]; then
+    HERE="$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" 2>/dev/null && pwd || true)"
+fi
+
+is_direct_base() {
+    case "$1" in
+        https://raw.githubusercontent.com/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 if ! command -v "$PYTHON" >/dev/null 2>&1; then
     echo "需要 Python 3.10+；请先安装 python3（Debian/Ubuntu: sudo apt install python3）。" >&2
@@ -32,7 +43,7 @@ run_installer() {
 }
 
 # 仓库内直接运行：优先使用同目录的 Python 源码。
-if [ -f "$HERE/karen_install.py" ]; then
+if [ -n "$HERE" ] && [ -f "$HERE/karen_install.py" ]; then
     run_installer "$PYTHON" "$HERE/karen_install.py" "$@"
     exit $?
 fi
@@ -45,7 +56,8 @@ esac
 # 冻结版是 GUI 入口（可直接运行，也接受 --check/--smoke-test/--self-test/
 # --uninstall 等安装器参数）；带安装参数时继续用 Python 安装核心，避免把
 # --frontend 等参数传给 GUI。
-if [ -n "$ARCH" ] && [ -x "$HERE/KarenBot-Installer-linux-$ARCH" ] && [ "$#" -eq 0 ]; then
+if [ -n "$HERE" ] && [ -n "$ARCH" ] && \
+    [ -x "$HERE/KarenBot-Installer-linux-$ARCH" ] && [ "$#" -eq 0 ]; then
     run_installer "$HERE/KarenBot-Installer-linux-$ARCH"
     exit $?
 fi
@@ -77,10 +89,33 @@ else
 fi
 
 BASE=""
+EXPECTED_SHA256="$(printf '%s' "${KAREN_INSTALLER_SHA256:-}" | tr '[:upper:]' '[:lower:]')"
+if [ -n "$EXPECTED_SHA256" ] && [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "KAREN_INSTALLER_SHA256 必须是 64 位十六进制 SHA256。" >&2
+    exit 1
+fi
 for candidate in "${BASES[@]}"; do
     echo "获取安装核心：$candidate/karen_install.py"
     if curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 8 --max-time 30 \
         "$candidate/karen_install.py" -o "$TMP_DIR/karen_install.py"; then
+        if [ -n "$EXPECTED_SHA256" ]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+                ACTUAL="$(sha256sum "$TMP_DIR/karen_install.py" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+            elif command -v shasum >/dev/null 2>&1; then
+                ACTUAL="$(shasum -a 256 "$TMP_DIR/karen_install.py" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+            else
+                echo "需要 sha256sum 或 shasum 才能校验 KAREN_INSTALLER_SHA256。" >&2
+                exit 1
+            fi
+            if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+                echo "karen_install.py SHA256 校验失败：$ACTUAL" >&2
+                rm -f "$TMP_DIR/karen_install.py"
+                continue
+            fi
+        elif ! is_direct_base "$candidate"; then
+            echo "拒绝从第三方镜像运行未经校验的 karen_install.py；请设置 KAREN_INSTALLER_SHA256。" >&2
+            exit 1
+        fi
         BASE="$candidate"
         break
     fi
@@ -91,24 +126,14 @@ if [ -z "$BASE" ]; then
     exit 1
 fi
 
-if [ -n "${KAREN_INSTALLER_SHA256:-}" ]; then
-    if command -v sha256sum >/dev/null 2>&1; then
-        ACTUAL="$(sha256sum "$TMP_DIR/karen_install.py" | awk '{print $1}')"
-    else
-        ACTUAL="$(shasum -a 256 "$TMP_DIR/karen_install.py" | awk '{print $1}')"
-    fi
-    if [ "$ACTUAL" != "$KAREN_INSTALLER_SHA256" ]; then
-        echo "karen_install.py SHA256 校验失败：$ACTUAL" >&2
-        exit 1
-    fi
-fi
-
 # 资源文件缺失时 Python 核心有内置默认值；能拿到就一起放在临时目录。
-for resource in mirrors.json windows-gui-package.json packaging/karenbot.svg; do
-    name="${resource##*/}"
-    curl -fsSL --retry 1 --connect-timeout 8 --max-time 60 \
-        "$BASE/$resource" -o "$TMP_DIR/$name" 2>/dev/null || true
-done
+if is_direct_base "$BASE"; then
+    for resource in mirrors.json windows-gui-package.json packaging/karenbot.svg; do
+        name="${resource##*/}"
+        curl -fsSL --retry 1 --connect-timeout 8 --max-time 60 \
+            "$BASE/$resource" -o "$TMP_DIR/$name" 2>/dev/null || true
+    done
+fi
 
 set +e
 run_installer "$PYTHON" "$TMP_DIR/karen_install.py" "$@"

@@ -699,3 +699,81 @@ def test_gui_unverified_prompt_skipped_for_direct_mirror(monkeypatch, tmp_path):
         assert karen_install.UNVERIFIED_ENV not in os.environ
     finally:
         root.destroy()
+
+
+def test_terminal_event_is_queued_after_global_sinks_are_cleared(
+    monkeypatch, tmp_path
+):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    events: list[tuple[str, object]] = []
+
+    class RecordingQueue:
+        def put(self, item):
+            events.append(("queue", item))
+
+    app._queue = RecordingQueue()
+    monkeypatch.setattr(
+        karen_install,
+        "install",
+        lambda **kwargs: kwargs["install_dir"],
+    )
+    monkeypatch.setattr(
+        karen_install,
+        "set_log_sink",
+        lambda value: events.append(("log_sink", value)),
+    )
+    monkeypatch.setattr(
+        karen_install,
+        "set_progress_sink",
+        lambda value: events.append(("progress_sink", value)),
+    )
+    monkeypatch.setattr(
+        karen_install,
+        "set_status_sink",
+        lambda value: events.append(("status_sink", value)),
+    )
+    try:
+        app._run_install(install_dir=tmp_path / "install")
+        terminal = events[-1]
+        assert terminal == ("queue", ("done", str(tmp_path / "install")))
+        assert all(item[1] is None for item in events[-4:-1])
+    finally:
+        root.destroy()
+
+
+def test_mirror_callbacks_do_not_override_running_or_closed_ui(
+    monkeypatch, tmp_path
+):
+    root, app, messages = _make_app(tmp_path, monkeypatch)
+    try:
+        app._running = True
+        app.status.set("安装中")
+        app._start_mirror_test()
+        app._mirror_window = object()
+        app._on_mirror_error("stale failure")
+        assert app.status.get() == "安装中"
+        assert not any(kind == "error" for kind, _ in messages)
+
+        app._running = False
+        app._mirror_window = None
+        app._on_mirror_error("closed-window failure")
+        assert not any(kind == "error" for kind, _ in messages)
+    finally:
+        root.destroy()
+
+
+def test_poll_queue_does_not_schedule_after_window_closes(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    app._closing = True
+    root.destroy()
+    app._poll_queue()
+
+
+def test_gui_log_file_uses_private_unique_temporary_name(monkeypatch, tmp_path):
+    root, app, _messages = _make_app(tmp_path, monkeypatch)
+    try:
+        assert app._log_file is not None
+        assert app._log_file.name.startswith("karenbot-install-")
+        assert app._log_file.name != "karenbot-install.log"
+    finally:
+        root.destroy()
