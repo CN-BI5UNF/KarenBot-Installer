@@ -328,7 +328,7 @@ Cairo 软件渲染开始，桌面快捷方式也提供“KarenBot GUI (兼容模
 - `ubuntu-24.04` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-x64`（x64，保留 console）；
 - `ubuntu-24.04-arm` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-arm64`（arm64，保留 console）；
 - `workflow_dispatch` 手动触发；PR 跑 verify 和真实「在线安装」测试；
-- 在线安装测试直接从 `CN-BI5UNF/KarenBot` 的 `v2.0.1-alpha` Release 下载
++ 在线安装测试直接从 `CN-BI5UNF/KarenBot` 的 `v2.0.1-alpha.1` Release 下载
   `modules.json` + 组件资产，不使用本地源码/安装包；
 - 推送 `v*` tag 时自动把安装器、Windows 便携包、人格资产
   `KarenBot-Personas.zip` 和 `SHA256SUMS.txt` 附加到 GitHub Release。
