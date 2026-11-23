@@ -3,7 +3,7 @@
 [简体中文](README.md) | [English](README_EN.md)
 
 这是 KarenBot 的**独立安装引导仓库**，与模块仓库解耦。提供 Linux CLI
-（NapCat 风格的一行式入口）、跨平台 Tkinter GUI、GitHub 镜像测速、在线
+跨平台 Tkinter GUI、GitHub 镜像测速、在线
 Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自动拉取、渲染
 回退启动器和快捷方式。
 
