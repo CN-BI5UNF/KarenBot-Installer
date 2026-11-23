@@ -226,3 +226,18 @@ def test_manifest_version_matches_windows_version_info():
     assert match is not None
     version = ".".join(match.groups())
     assert f'version="{version}"' in manifest
+
+
+def test_release_version_matches_cli_and_windows_resource_strings():
+    version = (INSTALLER / "VERSION").read_text(encoding="utf-8").strip()
+    source = (INSTALLER / "karen_install.py").read_text(encoding="utf-8")
+    info = (INSTALLER / "packaging" / "windows-version-info.txt").read_text(
+        encoding="utf-8"
+    )
+    assert re.search(
+        rf'^INSTALLER_VERSION = "{re.escape(version)}"$',
+        source,
+        re.MULTILINE,
+    )
+    assert f"StringStruct('FileVersion', '{version}')" in info
+    assert f"StringStruct('ProductVersion', '{version}')" in info
