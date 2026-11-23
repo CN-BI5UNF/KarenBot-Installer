@@ -1,94 +1,141 @@
-# KarenBot 安装引导器
+# KarenBot 安装器
+
+[简体中文](README.md) | [English](README_EN.md)
 
 这是 KarenBot 的**独立安装引导仓库**，与模块仓库解耦。提供 Linux CLI
 （NapCat 风格的一行式入口）、跨平台 Tkinter GUI、GitHub 镜像测速、在线
 Release 安装、本地源码/离线包安装、GTK4 主题包选择、字体自动拉取、渲染
 回退启动器和快捷方式。
 
-安装器**不内置任何应用包**，也不构建 deb/exe 应用包；它只负责选择来源、
+安装器**不内置 KarenBot 应用包**；它负责选择来源、
 测速、下载、校验、解压、建 venv 和写启动入口。Linux 以终端 CLI 为主，
 Windows 原生 GUI 通过安装器 Release 里的 GTK4 便携预构建包安装。
 
-仓库：`https://github.com/CN-BI5UNF/KarenBot-Installer`（当前版本
-`v1.1.4`，安装器版本 `1.1.4`）
+当前安装器：**[v2.0.0-alpha（Latest）](https://github.com/CN-BI5UNF/KarenBot-Installer/releases/latest)**。
+KarenBot 应用与安装器分别发布；当前应用版本为
+[v2.1.0-alpha](https://github.com/CN-BI5UNF/KarenBot/releases/tag/v2.1.0-alpha)。
+
+## 下载
+
+下列链接始终指向安装器的 **Latest** 资产：
+
+| 平台 / 用途 | 下载 |
+|---|---|
+| Windows 10/11 x64 图形安装器 | [KarenBot-Installer.exe](https://github.com/CN-BI5UNF/KarenBot-Installer/releases/latest/download/KarenBot-Installer.exe) |
+| Linux x64 图形安装器 | [KarenBot-Installer-linux-x64](https://github.com/CN-BI5UNF/KarenBot-Installer/releases/latest/download/KarenBot-Installer-linux-x64) |
+| Linux arm64 图形安装器 | [KarenBot-Installer-linux-arm64](https://github.com/CN-BI5UNF/KarenBot-Installer/releases/latest/download/KarenBot-Installer-linux-arm64) |
+| Linux CLI 引导脚本 | [install.sh](https://github.com/CN-BI5UNF/KarenBot-Installer/releases/latest/download/install.sh) |
+| Windows GUI 便携应用包 | [KarenBot-Windows-x64.zip](https://github.com/CN-BI5UNF/KarenBot-Installer/releases/latest/download/KarenBot-Windows-x64.zip) |
+| SHA256 校验清单 | [SHA256SUMS.txt](https://github.com/CN-BI5UNF/KarenBot-Installer/releases/latest/download/SHA256SUMS.txt) |
 
 ## 快速开始
 
+### Windows 10/11（x64）
+
+1. 下载上表中的 `KarenBot-Installer.exe` 并双击运行，无需预装 Python。
+2. 如果 SmartScreen 提示未知发布者，确认文件来自官方 Release 后选择“更多信息 → 仍要运行”。
+3. 选择可写的纯英文短路径，默认 `C:\KarenBot`（系统盘不是 C: 时使用对应盘符）。
+4. 选择 **在线安装** 和 **GUI** 或 **WebUI**，点击“开始安装”。
+5. 完成后从桌面 / 开始菜单启动；也可在安装器中直接启动或修复已有安装。
+
+Windows GUI 使用独立下载的 GTK4 便携包，无需手动安装 GTK。包内应用版本由该包的
+构建版本决定；如需最新应用版本，可在安装完成后进入 **设置 → 更新** 选择
+KarenBot `v2.1.0-alpha`。Windows WebUI 按需下载便携 Python。
+
 ### Linux 一行式安装（CLI）
 
-`raw.githubusercontent.com` 在部分网络会被重置（`curl: (35) Recv failure:
-Connection reset by peer`）。下面这条命令会依次尝试多个镜像，成功拿到
-`install.sh` 后再执行：
+需要 Bash、curl、Python 3.10+ 和 `sha256sum`。Debian / Ubuntu 可先安装：
 
 ```bash
-sha=v1.1.4
-want=e42a4f02ccbc473283ae0bc9af31be74ec42789eb96a09b4a0c76459c5aaf8c8
-core=df2b3cf71ceac6fcd0b42b6f2e3a891a74da092274ddfe866927226bd9d52391
-KAREN_INSTALLER_REF=$sha KAREN_INSTALLER_SHA256=$core bash <(
-  ok=0
+sudo apt install curl python3 python3-venv
+```
+
+直连 GitHub 时，在同一个终端执行以下命令。脚本和安装核心均固定为当前
+Latest `v2.0.0-alpha`，并分别校验 SHA256：
+
+```bash
+export KAREN_INSTALLER_REF=v2.0.0-alpha
+export KAREN_INSTALLER_SHA256=0c5fa39a5a4ac15726cd70708c2e34488703dfec067d07efdb8594b197821309
+curl -fL https://github.com/CN-BI5UNF/KarenBot-Installer/releases/download/v2.0.0-alpha/install.sh -o install.sh &&
+printf '%s  %s\n' '624538f2c167b091ee32e17cdc2c9322e3c857f94619723b1e1fd7375d759d01' install.sh | sha256sum -c - &&
+bash install.sh
+```
+
+没有参数时进入交互菜单，选择 **在线安装**、`GUI` / `WebUI` 和安装目录
+（默认 `~/.local/opt/karenbot`）。继续使用同一个终端中的环境变量，也可直接传参：
+
+```bash
+# 在线安装 WebUI，并明确选择 KarenBot 应用版本
+bash install.sh --online --frontend webui --tag v2.1.0-alpha \
+  --dir ~/.local/opt/karenbot
+
+# 在线安装原生 GUI（Linux 使用系统 GTK4）
+bash install.sh --online --frontend gui --tag v2.1.0-alpha \
+  --dir ~/.local/opt/karenbot
+```
+
+原生 GUI 还需要系统 GTK4 / libadwaita / PyGObject：
+
+```bash
+sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+```
+
+只使用 WebUI 不需要 GTK。下载的 `KarenBot-Installer-linux-*` 是图形安装器，
+运行前先 `chmod +x`，并需要桌面会话；服务器或 SSH 环境使用 CLI。
+
+### GitHub 访问不稳定时
+
+下面的 Bash 命令依次尝试直连和多个镜像，先把脚本保存为文件，再校验其完整字节
+（包括末尾换行）。脚本与安装核心均固定为 `v2.0.0-alpha`：
+
+```bash
+(
+  set -e
+  installer_ref=v2.0.0-alpha
+  installer_script_sha=624538f2c167b091ee32e17cdc2c9322e3c857f94619723b1e1fd7375d759d01
+  installer_core_sha=0c5fa39a5a4ac15726cd70708c2e34488703dfec067d07efdb8594b197821309
+  installer_tmp="$(mktemp -d)"
+  trap 'rm -rf -- "$installer_tmp"' EXIT
+  installer_script="$installer_tmp/install.sh"
   for u in \
-    "https://gh-proxy.com/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
-    "https://ghproxy.net/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
-    "https://ghproxy.cfd/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh" \
-    "https://fastly.jsdelivr.net/gh/CN-BI5UNF/KarenBot-Installer@$sha/install.sh" \
-    "https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$sha/install.sh"; do
-      s="$(curl -fsSL --connect-timeout 8 --max-time 30 "$u" 2>/dev/null)" || continue
-      case "$s" in
-        "#!/usr/bin/env bash"*) ;;
-        *) continue ;;
-      esac
-      if command -v sha256sum >/dev/null 2>&1; then
-        h="$(printf '%s' "$s" | sha256sum | cut -d' ' -f1)"
-      else
-        h="$(printf '%s' "$s" | shasum -a 256 | cut -d' ' -f1)"
+    "https://github.com/CN-BI5UNF/KarenBot-Installer/releases/download/$installer_ref/install.sh" \
+    "https://gh-proxy.com/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$installer_ref/install.sh" \
+    "https://ghproxy.net/https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/$installer_ref/install.sh" \
+    "https://fastly.jsdelivr.net/gh/CN-BI5UNF/KarenBot-Installer@$installer_ref/install.sh"; do
+      if curl -fL --connect-timeout 8 --max-time 30 "$u" -o "$installer_script" &&
+        printf '%s  %s\n' "$installer_script_sha" "$installer_script" | sha256sum -c -; then
+        KAREN_INSTALLER_REF="$installer_ref" KAREN_INSTALLER_SHA256="$installer_core_sha" \
+          bash "$installer_script"
+        exit 0
       fi
-      [ "$h" = "$want" ] || { echo "跳过 SHA256 不匹配的源：$u" >&2; continue; }
-      printf '%s\n' "$s"
-      ok=1
-      break
   done
-  [ "$ok" = 1 ] || printf 'echo "无法下载 install.sh：请检查网络或使用代理" >&2\nexit 1\n'
+  echo "无法下载或校验 install.sh；请检查网络或使用代理。" >&2
+  exit 1
 )
 ```
 
-上面的命令把 bootstrap 和安装核心都固定在 tag `v1.1.4`，并分别用
-SHA256 校验脚本和 `karen_install.py`；这样即使使用第三方镜像，也不会执行
-被替换的旧脚本。想跟随 `main` 最新代码时，去掉 `KAREN_INSTALLER_REF` 和
-`KAREN_INSTALLER_SHA256` 即可。
+`install.sh` 获取安装核心时也会尝试镜像；`KAREN_INSTALLER_BASE` 可指定
+源码文件所在的基地址。所有源失败时请配置代理，或使用本地安装包。
 
-如果网络能直连 GitHub，也可以用原来的短命令：
+### 本地安装与开发
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/CN-BI5UNF/KarenBot-Installer/main/install.sh)
-```
-
-所有源都失败时，请配置代理，或下载仓库里的 `install.sh` 后本地执行
-`bash install.sh`。`install.sh` 自身也会按 `raw → jsDelivr → ghproxy`
-的顺序回退获取 `karen_install.py`，可用 `KAREN_INSTALLER_BASE` 固定镜像。
-
-没有参数时会进入交互菜单；也可以直接传参：
+以下 CLI 示例继续使用上文已下载的脚本和版本环境变量：
 
 ```bash
-# 在线安装原生 GUI（Linux 使用系统 GTK4）
-./install.sh --frontend gui --online
-
-# 在线安装 WebUI
-./install.sh --frontend webui --online
-
 # 本地源码安装（开发/本机验证；需已按 umbrella 布局组装）
-./install.sh --frontend gui \
+bash install.sh --frontend gui \
   --source-dir /path/to/KarenBot \
   --dir ~/.local/opt/karenbot --no-shortcut
 
 # 本地 tar/zip 安装包
-./install.sh --frontend gui --archive /path/to/karen.tar.gz
+bash install.sh --frontend gui --archive /path/to/karen.tar.gz
 
 # 只测镜像速度
-./install.sh --probe-url \
+bash install.sh --probe-url \
   https://github.com/CN-BI5UNF/KarenBot/archive/refs/heads/main.tar.gz
 ```
 
-### GUI
+源码方式运行图形安装器：
 
 ```bash
 # Linux 需要 Tkinter（Debian/Ubuntu）
@@ -96,10 +143,9 @@ sudo apt install python3-tk
 python3 gui_install.py
 ```
 
-Windows 使用 GitHub Actions 产出的 `KarenBot-Installer.exe`，不需要本机
-Python；也可以在本机用 PyInstaller 构建（见下文，仅验证用）。Linux 的
-`KarenBot-Installer-linux-*` 是 GUI 入口；带 CLI 参数时 `install.sh` 会改用
-Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
+带 CLI 安装参数时，`install.sh` 使用 Python 安装核心。
+KarenBot 主仓库的 GitHub 自动源码归档不包含 submodule 内容；本地源码安装需先按
+[主仓库开发说明](https://github.com/CN-BI5UNF/KarenBot#开发与构建) 组装。
 
 ### GUI 与 WebUI 怎么选
 
@@ -224,7 +270,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 |---|---|
 | `--frontend gui\|webui` | 选择原生 GUI 或 WebUI |
 | `--online` | 从 GitHub Release 在线安装；未指定源码/安装包时默认开启 |
-| `--tag` | 指定 Online Release tag；默认 `auto`（每个仓库优先稳定版，否则最新版） |
+| `--tag` | 指定 KarenBot 应用发行版，例如 `v2.1.0-alpha`；默认 `auto`，从主仓库 Release feed 选择包含有效 `modules.json` 的最近版本（含预发布）；Windows GUI 使用便携包内的应用版本 |
 | `--dir` | 安装目录，Linux 默认 `~/.local/opt/karenbot`，Windows 默认系统盘短路径 `C:\KarenBot` |
 | `--source-dir` | 从本地源码安装（测试/离线；Windows 原生 GUI 不支持源码安装） |
 | `--archive` | 从本地 tar/zip 安装包安装（可安装 Windows GTK4 便携包） |
@@ -273,7 +319,7 @@ Python 安装核心，避免把 `--frontend` 等参数传给 GUI。
 | `KAREN_ALLOW_UNVERIFIED=1` | 明确允许未校验下载（仅用于测试/可信网络） |
 
 `install.sh` 还支持 `KAREN_INSTALLER_SHA256` 校验 `karen_install.py`；README
-顶部的一行式命令已经同时固定了 commit 和核心哈希。
+顶部命令已经同时固定安装器 tag、脚本哈希和核心哈希。
 
 Release 流水线会为 Windows 便携包、人格包、安装器本体，以及
 `karen_install.py`、`gui_install.py`、`install.sh` 等安装器源码生成
@@ -283,7 +329,9 @@ Release 流水线会为 Windows 便携包、人格包、安装器本体，以及
 
 Windows 源码安装不现实：GTK4/PyGObject 需要一整套便携运行时。安装器改为
 下载安装器 Release 的预构建包 `KarenBot-Windows-x64.zip`；该包由 CI 从
-KarenBot 主仓库 `v2.0.0-alpha` 的 submodule 组装，并写入同一发行版 tag。
+KarenBot 主仓库 submodule 组装，所用应用 tag 由构建时的 `KARENBOT_TAG` 决定。
+安装器 tag 与包内应用 tag 不一定相同；`--bundle-tag` 选择安装器 Release，
+`--tag` 不会重新组装 Windows GUI 便携包。需要更新应用时使用应用内更新页。
 安装器按 `windows-gui-package.json` 契约校验：
 
 - `runtime/python.exe`（启动器会优先使用同目录的 `pythonw.exe`，避免黑框）；
@@ -328,7 +376,7 @@ Cairo 软件渲染开始，桌面快捷方式也提供“KarenBot GUI (兼容模
 - `ubuntu-24.04` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-x64`（x64，保留 console）；
 - `ubuntu-24.04-arm` runner + `ubuntu:22.04` 容器 → `KarenBot-Installer-linux-arm64`（arm64，保留 console）；
 - `workflow_dispatch` 手动触发；PR 跑 verify 和真实「在线安装」测试；
-- 在线安装测试直接从 `CN-BI5UNF/KarenBot` 的 `v2.0.0-alpha` Release 下载
+- 在线安装测试按 workflow 的 `release_tag` / `KARENBOT_TAG` 从 `CN-BI5UNF/KarenBot` Release 下载
   `modules.json` + 组件资产，不使用本地源码/安装包；
 - 推送 `v*` tag 时自动把安装器、Windows 便携包、人格资产
   `KarenBot-Personas.zip` 和 `SHA256SUMS.txt` 附加到 GitHub Release。
@@ -378,8 +426,7 @@ Windows 可能提示 SmartScreen，可选择“更多信息 → 仍要运行”�
 
 ## 当前限制
 
-- 在线安装默认自动选择每个仓库的最新**稳定版**；没有稳定版时选择最新
-  Release。backend 提供核心程序 + 后端，GUI/WebUI 各自提供界面模块。
+- Linux / Windows WebUI 在线安装默认从 KarenBot 主仓库 Release feed 选择最近可用的统一发行版，可能包含预发布；需要指定版本时传 `--tag`。
 - Windows 原生 GUI 需要安装器 Release 里已有 `KarenBot-Windows-x64.zip`；
   它由安装器仓库的 Windows 打包 job 产出，不放进安装器 exe。
 - Windows WebUI 安装会按需下载便携 Python；系统 Python 不是必需。
